@@ -112,7 +112,7 @@ RiskPipeline Architecture
 
 ### Step 1: Clone the Repository
 ```bash
-git clone https://github.com/yourusername/risk-pipeline.git
+git clone https://github.com/Timeless4k/Risk-Pipeline/risk-pipeline.git
 cd risk-pipeline
 ```
 
