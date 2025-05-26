@@ -3,3 +3,6 @@ source venv/bin/activate
 
 
 rm -rf data_cache/
+
+python run_pipeline.py --quick
+python run_pipeline.py --full

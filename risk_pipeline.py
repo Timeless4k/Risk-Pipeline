@@ -527,7 +527,7 @@ class ModelFactory:
         return model
 
 class WalkForwardValidator:
-    """Implements walk-forward cross-validation"""
+    """Implements walk-forward cross-validation with dynamic sizing"""
     
     def __init__(self, n_splits: int = 5, test_size: int = 252):
         self.n_splits = n_splits
@@ -536,76 +536,65 @@ class WalkForwardValidator:
         self.logger.info(f"WalkForwardValidator initialized: {n_splits} splits, test_size={test_size}")
         
     def split(self, X: pd.DataFrame) -> List[Tuple[pd.Index, pd.Index]]:
-        """Generate train/test indices for walk-forward validation"""
+        """Generate train/test indices for walk-forward validation with adaptive sizing"""
         n_samples = len(X)
         splits = []
         
-        self.logger.info(f"WalkForward: Total samples={n_samples}, n_splits={self.n_splits}, test_size={self.test_size}")
+        self.logger.info(f"WalkForward: Total samples={n_samples}, requested_splits={self.n_splits}, requested_test_size={self.test_size}")
         
-        # Adjust for small datasets (like quick test)
-        if n_samples < self.test_size:
-            # For very small datasets, use a smaller test size
-            adjusted_test_size = max(20, n_samples // 4)  # At least 20 samples or 25% of data
-            self.logger.warning(f"Dataset too small. Adjusting test_size from {self.test_size} to {adjusted_test_size}")
-        else:
-            adjusted_test_size = self.test_size
-            
-        # Ensure we have enough data for at least one split
-        min_train_size = 60  # Minimum training samples needed for meaningful models
+        # CRITICAL FIX: Calculate viable parameters
+        min_train_size = 60  # Minimum for meaningful models
+        min_test_size = 20   # Minimum for evaluation
         
-        if n_samples < min_train_size + adjusted_test_size:
-            self.logger.warning(f"Dataset too small for {self.n_splits} splits. Reducing to 1 split.")
-            # Single split with minimum viable sizes
-            train_size = max(min_train_size, n_samples - adjusted_test_size)
-            test_start = train_size
-            test_end = n_samples
-            
-            if test_start < test_end:
-                train_idx = X.index[:train_size]
-                test_idx = X.index[test_start:test_end]
-                splits.append((train_idx, test_idx))
-                self.logger.info(f"Single split: Train={len(train_idx)}, Test={len(test_idx)}")
-            
-            return splits
+        # Calculate maximum feasible test size
+        max_test_size = min(self.test_size, n_samples - min_train_size)
         
-        # Calculate size of each fold for normal case
-        available_for_splits = n_samples - adjusted_test_size
-        fold_size = available_for_splits // self.n_splits
+        if max_test_size < min_test_size:
+            self.logger.error(f"Dataset too small: {n_samples} samples insufficient for validation")
+            return []
         
-        # Ensure minimum fold size
-        if fold_size < min_train_size // 2:
-            # Reduce number of splits
-            max_splits = available_for_splits // (min_train_size // 2)
-            actual_n_splits = min(self.n_splits, max_splits, 3)  # Cap at 3 for quick test
-            self.logger.warning(f"Reducing splits from {self.n_splits} to {actual_n_splits} due to data constraints")
-        else:
-            actual_n_splits = self.n_splits
+        # Use adaptive test size
+        actual_test_size = max(min_test_size, max_test_size)
+        self.logger.info(f"Adaptive test_size: {actual_test_size} (requested: {self.test_size})")
         
-        # Recalculate fold size
-        fold_size = available_for_splits // actual_n_splits
+        # Calculate maximum number of splits possible
+        available_for_training = n_samples - actual_test_size
+        max_possible_splits = min(self.n_splits, max(1, available_for_training // min_train_size))
         
-        for i in range(actual_n_splits):
-            train_end = fold_size * (i + 1)
+        self.logger.info(f"Maximum possible splits: {max_possible_splits} (requested: {self.n_splits})")
+        
+        if max_possible_splits == 0:
+            self.logger.error("Cannot create any valid splits")
+            return []
+        
+        # Generate splits with expanding window
+        for i in range(max_possible_splits):
+            if max_possible_splits == 1:
+                # Single split: use most data for training
+                train_end = n_samples - actual_test_size
+            else:
+                # Multiple splits: expanding window
+                train_end = min_train_size + ((available_for_training - min_train_size) * (i + 1)) // max_possible_splits
+                
             test_start = train_end
-            test_end = min(test_start + adjusted_test_size, n_samples)
+            test_end = min(test_start + actual_test_size, n_samples)
             
-            if test_end > n_samples or test_start >= test_end:
-                break
+            # Ensure we have valid indices
+            if train_end <= 0 or test_start >= n_samples or test_end > n_samples or test_start >= test_end:
+                self.logger.warning(f"Split {i+1}: Invalid indices, skipping")
+                continue
                 
             train_idx = X.index[:train_end]
             test_idx = X.index[test_start:test_end]
             
-            # Ensure minimum sizes
-            if len(train_idx) >= min_train_size and len(test_idx) >= 10:
+            # Final validation
+            if len(train_idx) >= min_train_size and len(test_idx) >= min_test_size:
                 splits.append((train_idx, test_idx))
-                self.logger.info(f"Split {i+1}: Train={len(train_idx)}, Test={len(test_idx)}")
+                self.logger.info(f"✅ Split {i+1}: Train={len(train_idx)}, Test={len(test_idx)}")
             else:
-                self.logger.warning(f"Split {i+1} skipped: insufficient data (Train={len(train_idx)}, Test={len(test_idx)})")
-                break
+                self.logger.warning(f"Split {i+1}: Insufficient data (Train={len(train_idx)}, Test={len(test_idx)})")
         
-        if not splits:
-            self.logger.error("No valid splits generated!")
-            
+        self.logger.info(f"Generated {len(splits)} valid splits")
         return splits
 
 class RiskPipeline:
@@ -769,7 +758,7 @@ class RiskPipeline:
                 
                 # Prepare features and targets with validation
                 feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
-                              'RollingStd5', 'MA_ratio', 'VIX', 'VIX_change']
+                              'RollingStd5', 'MA_ratio', 'Corr_MA10', 'Corr_MA50']
                 
                 # Add correlation features if available
                 for col in ['AAPL_GSPC_corr', 'IOZ_CBA_corr', 'BHP_IOZ_corr']:
@@ -919,69 +908,130 @@ class RiskPipeline:
         """Run all classification models with walk-forward validation"""
         results = {}
         
+        # ===== FIX: Log the exact features being used =====
+        self.logger.info(f"{asset} - Training classification models with features: {X.columns.tolist()}")
+        
         # Models to evaluate
         models = {
             'Random': DummyClassifier(strategy='stratified', random_state=self.config.RANDOM_STATE),
             'XGBoost': xgb.XGBClassifier(
-                n_estimators=100,
-                max_depth=5,
+                n_estimators=50,
+                max_depth=3,
                 learning_rate=0.1,
                 random_state=self.config.RANDOM_STATE,
                 use_label_encoder=False,
                 eval_metric='mlogloss'
             ),
-            'MLP': MLPClassifier(
-                hidden_layer_sizes=(100, 50),
-                max_iter=1000,
-                random_state=self.config.RANDOM_STATE,
-                early_stopping=True
-            ),
-            'LSTM_Classifier': 'lstm_clf'
         }
         
         for model_name, model in models.items():
             self.logger.info(f"  Training {model_name}...")
             
-            if isinstance(model, str):
-                # Deep learning model
-                results[model_name] = self._evaluate_dl_model(
-                    X, y, model, task='classification', asset=asset
-                )
-            else:
-                # Sklearn-compatible model
-                results[model_name] = self._evaluate_sklearn_model(X, y, model, asset, model_name)
+            try:
+                if isinstance(model, str):
+                    results[model_name] = self._evaluate_dl_model(
+                        X, y, model, task='classification', asset=asset
+                    )
+                else:
+                    results[model_name] = self._evaluate_sklearn_model(X, y, model, asset, model_name)
+                    
+                if results[model_name] and 'Accuracy' in results[model_name]:
+                    accuracy = results[model_name]['Accuracy']
+                    if not np.isfinite(accuracy) or accuracy < 0 or accuracy > 1:
+                        self.logger.warning(f"{model_name} produced invalid accuracy: {accuracy}")
+                        results[model_name]['Accuracy'] = 0.0
+                else:
+                    self.logger.warning(f"{model_name} failed to produce valid results")
+                    
+            except Exception as e:
+                self.logger.error(f"Model {model_name} failed: {e}")
+                results[model_name] = {
+                    'Accuracy': 0.0, 'F1': 0.0, 'Precision': 0.0, 'Recall': 0.0,
+                    'predictions': [], 'actuals': []
+                }
                 
         return results
     
     def _evaluate_naive_baseline(self, X: pd.DataFrame, y: pd.Series) -> Dict:
-        """Evaluate naive baseline (previous value)"""
-        splits = self.validator.split(X)
-        predictions = []
-        actuals = []
-        
-        for train_idx, test_idx in splits:
-            # Use last training value as prediction for all test samples
-            y_train = y.loc[train_idx]
-            y_test = y.loc[test_idx]
+        """Evaluate naive baseline with comprehensive error handling"""
+        try:
+            splits = self.validator.split(X)
             
-            # Naive prediction: use last known value
-            y_pred = pd.Series(index=test_idx, data=y_train.iloc[-1])
+            if not splits:
+                self.logger.error("No valid splits for naive baseline evaluation")
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'),
+                    'R2': -float('inf'),
+                    'predictions': [],
+                    'actuals': []
+                }
             
-            predictions.extend(y_pred.values)
-            actuals.extend(y_test.values)
-        
-        # Calculate metrics
-        rmse = np.sqrt(mean_squared_error(actuals, predictions))
-        mae = mean_absolute_error(actuals, predictions)
-        r2 = r2_score(actuals, predictions)
-        
-        return {
-            'RMSE': rmse,
-            'MAE': mae,
-            'R2': r2,
-            'predictions': predictions,
-            'actuals': actuals
-        }
+            predictions = []
+            actuals = []
+            
+            for train_idx, test_idx in splits:
+                try:
+                    y_train = y.loc[train_idx]
+                    y_test = y.loc[test_idx]
+                    
+                    if len(y_train) == 0 or len(y_test) == 0:
+                        self.logger.warning("Empty train or test set in naive baseline")
+                        continue
+                    
+                    # Naive prediction: use last known value
+                    last_value = y_train.iloc[-1] if len(y_train) > 0 else 0.1  # fallback
+                    y_pred = pd.Series(index=test_idx, data=last_value)
+                    
+                    predictions.extend(y_pred.values)
+                    actuals.extend(y_test.values)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in naive baseline fold: {e}")
+                    continue
+            
+            if not predictions or not actuals:
+                self.logger.error("No predictions generated for naive baseline")
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'), 
+                    'R2': -float('inf'),
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
+            
+            # Calculate metrics with error handling
+            try:
+                rmse = np.sqrt(mean_squared_error(actuals, predictions))
+                mae = mean_absolute_error(actuals, predictions)
+                r2 = r2_score(actuals, predictions)
+            except Exception as e:
+                self.logger.error(f"Error calculating naive baseline metrics: {e}")
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'),
+                    'R2': -float('inf'),
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
+            
+            return {
+                'RMSE': rmse,
+                'MAE': mae,
+                'R2': r2,
+                'predictions': predictions,
+                'actuals': actuals
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Naive baseline evaluation failed: {e}")
+            return {
+                'RMSE': float('inf'),
+                'MAE': float('inf'),
+                'R2': -float('inf'),
+                'predictions': [],
+                'actuals': []
+            }
     
     def _evaluate_arima(self, X: pd.DataFrame, y: pd.Series) -> Dict:
         """Evaluate ARIMA model"""
@@ -1211,6 +1261,10 @@ class RiskPipeline:
         predictions = []
         actuals = []
         
+        # ===== FIX: Store feature names for SHAP consistency =====
+        feature_names_used = X.columns.tolist()
+        self.logger.debug(f"{asset} - {model_name} using features: {feature_names_used}")
+        
         for fold_idx, (train_idx, test_idx) in enumerate(splits):
             X_train, X_test = X.loc[train_idx], X.loc[test_idx]
             y_train, y_test = y.loc[train_idx], y.loc[test_idx]
@@ -1230,17 +1284,22 @@ class RiskPipeline:
             predictions.extend(y_pred)
             actuals.extend(y_test.values)
             
-            # Save model for last fold (for SHAP analysis)
+            # ===== FIX: Save model and scaler with feature names for last fold =====
             if fold_idx == len(splits) - 1 and model_name == 'XGBoost':
                 model_key = f"{asset}_xgboost_classification"
                 self.models[model_key] = model_copy
+                
+                # Store feature names in the scaler for SHAP consistency
+                scaler.feature_names_in_ = feature_names_used
                 self.scalers[model_key] = scaler
+                
+                self.logger.debug(f"Stored {model_name} model and scaler for {asset} with features: {feature_names_used}")
         
         # Calculate metrics
         accuracy = accuracy_score(actuals, predictions)
-        f1 = f1_score(actuals, predictions, average='weighted')
-        precision = precision_score(actuals, predictions, average='weighted')
-        recall = recall_score(actuals, predictions, average='weighted')
+        f1 = f1_score(actuals, predictions, average='weighted', zero_division=0)
+        precision = precision_score(actuals, predictions, average='weighted', zero_division=0)
+        recall = recall_score(actuals, predictions, average='weighted', zero_division=0)
         
         return {
             'Accuracy': accuracy,
@@ -1264,10 +1323,28 @@ class RiskPipeline:
     
     @log_execution_time
     def _generate_shap_analysis(self):
-        """Generate SHAP interpretability analysis"""
+        """Generate SHAP interpretability analysis with proper feature alignment"""
         self.logger.info("Generating SHAP analysis...")
         
-        shap_results = {}  # Track SHAP results
+        shap_results = {}
+        
+        try:
+            self.logger.info("Loading all data for SHAP analysis...")
+            all_assets_data = self.data_loader.download_data(
+                self.config.ALL_ASSETS + ['^VIX'], 
+                self.config.START_DATE, 
+                self.config.END_DATE
+            )
+            
+            if not all_assets_data:
+                self.logger.error("Failed to load data for SHAP analysis")
+                return
+            
+            self.logger.info(f"Loaded data for {len(all_assets_data)} symbols")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load data for SHAP analysis: {e}")
+            return
         
         # Focus on XGBoost for classification (as it's most interpretable)
         for asset in self.results.keys():
@@ -1279,84 +1356,115 @@ class RiskPipeline:
                     model = self.models[model_key]
                     scaler = self.scalers[model_key]
                     
-                    # Get some test data - reuse the processed data from the pipeline
-                    asset_data = self.data_loader.download_data([asset], 
-                                                              self.config.START_DATE, 
-                                                              self.config.END_DATE)
+                    # ===== FIX: Get the exact feature list used during training =====
+                    if hasattr(scaler, 'feature_names_in_'):
+                        training_feature_cols = list(scaler.feature_names_in_)
+                        self.logger.info(f"Using stored training features for {asset}: {training_feature_cols}")
+                    else:
+                        # Fallback to the feature list without VIX features (as shown in the error)
+                        training_feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
+                                               'RollingStd5', 'MA_ratio', 'AAPL_GSPC_corr', 'IOZ_CBA_corr', 'BHP_IOZ_corr']
+                        self.logger.warning(f"No stored features found for {asset}, using fallback list: {training_feature_cols}")
                     
-                    if asset not in asset_data:
+                    # ===== STEP 1: Reconstruct features using EXACT same process as training =====
+                    if asset not in all_assets_data:
                         self.logger.warning(f"No data available for {asset} in SHAP analysis")
                         continue
                     
                     # Create technical features
-                    features = self.feature_engineer.create_technical_features(asset_data[asset])
+                    self.logger.debug(f"{asset} - Creating technical features for SHAP...")
+                    features = self.feature_engineer.create_technical_features(all_assets_data[asset])
                     
-                    # Add VIX features if VIX data is available
-                    vix_data = self.data_loader.download_data(['^VIX'], 
-                                                            self.config.START_DATE, 
-                                                            self.config.END_DATE)
-                    if '^VIX' in vix_data:
-                        features = self.feature_engineer.add_vix_features(features, vix_data['^VIX'])
-                        self.logger.debug(f"{asset} - VIX features added successfully")
+                    # ===== FIX: Only add VIX features if they were used during training =====
+                    if 'VIX' in training_feature_cols and 'VIX_change' in training_feature_cols:
+                        if '^VIX' in all_assets_data:
+                            features = self.feature_engineer.add_vix_features(features, all_assets_data['^VIX'])
+                            self.logger.debug(f"{asset} - VIX features added successfully")
+                        else:
+                            self.logger.warning(f"{asset} - VIX features required but VIX data not available")
+                            continue
+                    else:
+                        self.logger.debug(f"{asset} - Skipping VIX features (not used during training)")
                     
-                    # Use the EXACT same feature list as used during training
-                    base_feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
-                                       'RollingStd5', 'MA_ratio']
+                    # ===== STEP 2: Calculate correlation features only if used during training =====
+                    correlation_features_needed = [f for f in training_feature_cols if '_corr' in f]
+                    if correlation_features_needed:
+                        self.logger.debug(f"{asset} - Calculating correlation features for SHAP...")
+                        try:
+                            correlations = self.feature_engineer.calculate_correlations(all_assets_data)
+                            
+                            # Add only the correlation features that were used during training
+                            for corr_col in correlation_features_needed:
+                                if corr_col in correlations.columns and not correlations[corr_col].empty:
+                                    aligned_corr = correlations[corr_col].reindex(features.index, method='ffill')
+                                    features[corr_col] = aligned_corr
+                                    self.logger.debug(f"{asset} - Added correlation feature: {corr_col}")
+                            
+                            added_corr_features = [f for f in correlation_features_needed if f in features.columns]
+                            self.logger.info(f"{asset} - Correlation features added: {added_corr_features}")
+                            
+                        except Exception as e:
+                            self.logger.error(f"{asset} - Failed to calculate correlations for SHAP: {e}")
+                            continue
                     
-                    # Add VIX features if they exist
-                    vix_feature_cols = ['VIX', 'VIX_change']
-                    for col in vix_feature_cols:
-                        if col in features.columns:
-                            base_feature_cols.append(col)
-                    
-                    feature_cols = base_feature_cols
-                    self.logger.info(f"SHAP analysis for {asset}: Using features {feature_cols}")
-                    
-                    # Validate all features exist
-                    missing_features = [col for col in feature_cols if col not in features.columns]
-                    if missing_features:
-                        self.logger.warning(f"Missing features for {asset} SHAP analysis: {missing_features}")
-                        feature_cols = [col for col in feature_cols if col in features.columns]
-                    
-                    if not feature_cols:
-                        self.logger.warning(f"No valid features available for {asset} SHAP analysis")
+                    # ===== STEP 3: Extract data in EXACT same order as training =====
+                    try:
+                        # Validate all required features exist
+                        missing_features = [col for col in training_feature_cols if col not in features.columns]
+                        
+                        if missing_features:
+                            self.logger.error(f"Missing features for {asset} SHAP analysis: {missing_features}")
+                            self.logger.info(f"Available features: {features.columns.tolist()}")
+                            continue
+                        
+                        X = features[training_feature_cols].dropna()
+                        
+                        if X.empty:
+                            self.logger.warning(f"No valid data for {asset} SHAP analysis after dropna()")
+                            continue
+                        
+                        # Use last 100 samples for SHAP analysis
+                        X = X.iloc[-100:] if len(X) > 100 else X
+                        
+                        self.logger.debug(f"{asset} - SHAP data shape: {X.shape}")
+                        self.logger.debug(f"{asset} - SHAP feature columns: {X.columns.tolist()}")
+                        
+                        # ===== STEP 4: Scale using the same scaler from training =====
+                        self.logger.debug(f"{asset} - Scaling features for SHAP analysis...")
+                        X_scaled = scaler.transform(X)
+                        self.logger.debug(f"{asset} - Features scaled successfully, shape: {X_scaled.shape}")
+                        
+                        # ===== STEP 5: Create SHAP explainer and calculate values =====
+                        self.logger.info(f"{asset} - Creating SHAP explainer...")
+                        explainer = shap.TreeExplainer(model)
+                        self.logger.debug(f"{asset} - SHAP explainer created")
+                        
+                        # Calculate SHAP values
+                        self.logger.info(f"{asset} - Computing SHAP values...")
+                        shap_values = explainer.shap_values(X_scaled)
+                        self.logger.debug(f"{asset} - SHAP values computed, type: {type(shap_values)}")
+                        
+                        if isinstance(shap_values, list):
+                            self.logger.debug(f"{asset} - SHAP values shape: {[np.array(sv).shape for sv in shap_values]}")
+                        else:
+                            self.logger.debug(f"{asset} - SHAP values shape: {np.array(shap_values).shape}")
+                        
+                        # ===== STEP 6: Save SHAP plots =====
+                        self.logger.info(f"{asset} - Generating SHAP plots...")
+                        plot_files = self._save_shap_plots(shap_values, X, asset)
+                        
+                        # Store results
+                        shap_results[asset] = {
+                            'feature_count': len(X.columns),
+                            'sample_count': len(X),
+                            'plot_files': plot_files
+                        }
+                        
+                        self.logger.info(f"✅ SHAP analysis completed for {asset}")
+                        
+                    except Exception as e:
+                        self.logger.error(f"SHAP computation failed for {asset}: {e}", exc_info=True)
                         continue
-                    
-                    # Get the data
-                    X = features[feature_cols].dropna().iloc[-100:]  # Last 100 samples
-                    
-                    if X.empty:
-                        self.logger.warning(f"No valid data for {asset} SHAP analysis after dropna()")
-                        continue
-                    
-                    self.logger.debug(f"{asset} - SHAP data shape: {X.shape}")
-                    
-                    # Scale using the same scaler from training
-                    X_scaled = scaler.transform(X)
-                    self.logger.debug(f"{asset} - Features scaled for SHAP analysis")
-                    
-                    # Create SHAP explainer
-                    self.logger.info(f"{asset} - Creating SHAP explainer...")
-                    explainer = shap.TreeExplainer(model)
-                    self.logger.debug(f"{asset} - SHAP explainer created")
-                    
-                    # Calculate SHAP values
-                    self.logger.info(f"{asset} - Computing SHAP values...")
-                    shap_values = explainer.shap_values(X_scaled)
-                    self.logger.debug(f"{asset} - SHAP values computed, shape: {np.array(shap_values).shape}")
-                    
-                    # Save SHAP plots
-                    self.logger.info(f"{asset} - Generating SHAP plots...")
-                    plot_files = self._save_shap_plots(shap_values, X, asset)
-                    
-                    # Store results
-                    shap_results[asset] = {
-                        'feature_count': len(feature_cols),
-                        'sample_count': len(X),
-                        'plot_files': plot_files
-                    }
-                    
-                    self.logger.info(f"✅ SHAP analysis completed for {asset}")
                     
                 except Exception as e:
                     self.logger.error(f"SHAP analysis failed for {asset}: {e}", exc_info=True)
@@ -1376,7 +1484,7 @@ class RiskPipeline:
             self.logger.info("="*50)
         else:
             self.logger.warning("No SHAP analysis results generated")
-
+    
     @log_execution_time
     def _save_shap_plots(self, shap_values: np.ndarray, X: pd.DataFrame, asset: str) -> list:
         """Save SHAP visualization plots with enhanced logging"""
