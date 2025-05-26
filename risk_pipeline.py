@@ -86,7 +86,7 @@ class DataLoader:
             else:
                 logger.info(f"Downloading data for {symbol}")
                 try:
-                    # Download the data
+                    # Download the data for a single ticker
                     df = yf.download(
                         tickers=symbol,
                         start=start_date,
@@ -95,12 +95,22 @@ class DataLoader:
                         auto_adjust=False
                     )
 
-                    # If columns are MultiIndex (as with single-ticker), fix them properly
+                    # Debug: Print the full MultiIndex structure
                     if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(1)  # ✅ This gives ['Open', 'High', ...]
-                        logger.info(f"{symbol} - Cleaned MultiIndex columns: {df.columns.tolist()}")
+                        logger.info(f"{symbol} - Original MultiIndex levels: {df.columns.levels}")
+                        logger.info(f"{symbol} - Original MultiIndex names: {df.columns.names}")
+                        logger.info(f"{symbol} - Original columns: {df.columns.tolist()}")
+                        
+                        # Drop the ticker level (level 0) to get field names
+                        df.columns = df.columns.droplevel(0)
+                        logger.info(f"{symbol} - Flattened columns: {df.columns.tolist()}")
                     else:
                         logger.info(f"{symbol} - Flat columns: {df.columns.tolist()}")
+                    
+                    # Validate we have the required columns
+                    if 'Close' not in df.columns:
+                        logger.error(f"{symbol} - ❌ Still missing 'Close' column even after flattening.")
+                        continue
                         
                     df.to_pickle(cache_file)
                     data[symbol] = df
@@ -124,6 +134,12 @@ class DataLoader:
         else:
             logger.info("Downloading VIX data")
             vix_data = yf.download('^VIX', start=start_date, end=end_date, progress=False)
+            # Fix VIX data columns if needed
+            if isinstance(vix_data.columns, pd.MultiIndex):
+                logger.info("VIX - Original MultiIndex levels: {vix_data.columns.levels}")
+                logger.info("VIX - Original MultiIndex names: {vix_data.columns.names}")
+                vix_data.columns = vix_data.columns.droplevel(0)  # Drop the TICKER level
+                logger.info(f"VIX - Flattened columns: {vix_data.columns.tolist()}")
             vix_data.to_pickle(vix_cache)
             data['VIX'] = vix_data
             
@@ -858,6 +874,12 @@ class RiskPipeline:
         
         # Save results as CSV
         results_df = self._format_results_dataframe()
+        
+        # Check if results dataframe is empty
+        if results_df.empty:
+            logger.warning("No results to save - results dataframe is empty")
+            return
+            
         results_df.to_csv(output_dir / 'model_performance.csv')
         
         # Save detailed results
@@ -892,6 +914,11 @@ class RiskPipeline:
     
     def _generate_summary_report(self, results_df: pd.DataFrame, output_dir: Path):
         """Generate a summary report with visualizations"""
+        # Check if results dataframe is empty
+        if results_df.empty:
+            logger.warning("Cannot generate summary report - results dataframe is empty")
+            return
+            
         # Create visualizations
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         
