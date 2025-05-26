@@ -10,7 +10,7 @@ import pandas as pd
 import yfinance as yf
 import warnings
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Iterator
 import joblib
 from pathlib import Path
 import logging
@@ -33,6 +33,10 @@ import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
+from sklearn.ensemble import RandomForestRegressor
+from imblearn.combine import SMOTETomek
+from imblearn.over_sampling import SMOTE
+from collections import Counter
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -146,8 +150,8 @@ class AssetConfig:
     ALL_ASSETS = US_ASSETS + AU_ASSETS
     
     # Date range as per thesis
-    START_DATE = '2017-01-01'
-    END_DATE = '2024-03-31'
+    START_DATE = '2000-01-01'
+    END_DATE = '2025-01-05'
     
     # Feature windows
     VOLATILITY_WINDOW = 5
@@ -157,7 +161,7 @@ class AssetConfig:
     
     # Model parameters
     WALK_FORWARD_SPLITS = 5
-    TEST_SIZE = 252  # ~1 year of trading days
+    TEST_SIZE = 45  # ~1.5 months of trading days (reduced from 252)
     RANDOM_STATE = 42
 
 class DataLoader:
@@ -252,45 +256,102 @@ class FeatureEngineer:
     
     def create_technical_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create technical features as specified in thesis"""
-        self.logger.info(f"Creating technical features from {df.shape[0]} rows")
-        self.logger.debug(f"Input columns: {df.columns.tolist()}")
-        features = pd.DataFrame(index=df.index)
-        
         # Use Adj Close if available, otherwise fall back to Close
         price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+        df['Price'] = df[price_col]  # Changed from df['Adj Close'].fillna(df['Close'])
         
-        # Calculate returns
-        returns = self.calculate_log_returns(df[price_col])
+        # Calculate returns using the combined price column
+        returns = self.calculate_log_returns(df['Price'])
         
-        # Target variable: 5-day volatility
-        features['Volatility5D'] = self.calculate_volatility(returns, self.config.VOLATILITY_WINDOW)
+        # Create features DataFrame
+        features = pd.DataFrame(index=df.index)
         
-        # Lagged returns (Lag1, Lag2, Lag3)
-        for i in range(1, 4):
-            features[f'Lag{i}'] = returns.shift(i)
-            self.logger.debug(f"Created Lag{i} feature")
+        # Add lagged returns
+        for lag in [1, 2, 3]:
+            features[f'Lag{lag}'] = returns.shift(lag)
         
-        # Rate of Change over 5 days (ROC5)
-        features['ROC5'] = (df[price_col] / df[price_col].shift(5) - 1) * 100
-        self.logger.debug("Created ROC5 feature")
+        # Add rate of change
+        features['ROC5'] = df['Price'].pct_change(periods=5)
         
-        # Moving Averages (MA10, MA50)
-        features['MA10'] = df[price_col].rolling(window=self.config.MA_SHORT).mean()
-        features['MA50'] = df[price_col].rolling(window=self.config.MA_LONG).mean()
-        self.logger.debug("Created moving average features (MA10, MA50)")
+        # Add moving averages
+        features['MA10'] = df['Price'].rolling(window=self.config.MA_SHORT, min_periods=1).mean()
+        features['MA50'] = df['Price'].rolling(window=self.config.MA_LONG, min_periods=1).mean()
         
-        # Rolling Standard Deviation (RollingStd5)
-        features['RollingStd5'] = returns.rolling(window=self.config.VOLATILITY_WINDOW).std()
-        self.logger.debug("Created RollingStd5 feature")
-        
-        # MA Ratio (MA10/MA50)
+        # Add MA ratio
         features['MA_ratio'] = features['MA10'] / features['MA50']
-        self.logger.debug("Created MA_ratio feature")
         
-        valid_rows = features.dropna().shape[0]
-        self.logger.info(f"✅ Features created: {features.shape[1]} columns, {valid_rows} valid rows")
-        self.logger.debug(f"All feature columns: {features.columns.tolist()}")
+        # Add rolling standard deviation
+        features['RollingStd5'] = returns.rolling(window=5, min_periods=1).std()
+        
+        # Add correlation with MA10 and MA50
+        features['Corr_MA10'] = returns.rolling(window=self.config.MA_SHORT, min_periods=1).corr(features['MA10'])
+        features['Corr_MA50'] = returns.rolling(window=self.config.MA_LONG, min_periods=1).corr(features['MA50'])
+        
+        # Add RSI
+        features['RSI'] = self.calculate_rsi(df['Price'])
+        
+        # Add MACD
+        features['MACD'] = self.calculate_macd(df['Price'])
+        
+        # Add ATR
+        features['ATR'] = self.calculate_atr(df)
+        
+        # Add Bollinger Bands
+        bb_upper, bb_lower = self.calculate_bollinger(df['Price'])
+        features['Bollinger_Upper'] = bb_upper
+        features['Bollinger_Lower'] = bb_lower
+        
+        # Add time-based features
+        features['DayOfWeek'] = df.index.dayofweek
+        features['MonthOfYear'] = df.index.month
+        features['Quarter'] = df.index.quarter
+        
+        # Add rolling statistics with shorter windows only (5D, 10D, 20D)
+        for window in [5, 10, 20]:
+            features[f'Volatility{window}D'] = self.calculate_volatility(returns, window)
+            features[f'Skew{window}D'] = returns.rolling(window=window, min_periods=1).skew()
+            features[f'Kurt{window}D'] = returns.rolling(window=window, min_periods=1).kurt()
+        
+        # Use interpolation for missing values
+        features = features.interpolate(method='linear', limit_direction='forward', axis=0)
+        
         return features
+    
+    def calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
+        """Calculate Relative Strength Index"""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=1).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=1).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+    
+    def calculate_macd(self, prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
+        """Calculate MACD (Moving Average Convergence Divergence)"""
+        exp1 = prices.ewm(span=fast, adjust=False).mean()
+        exp2 = prices.ewm(span=slow, adjust=False).mean()
+        macd = exp1 - exp2
+        return macd
+    
+    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate Average True Range"""
+        high = df['High']
+        low = df['Low']
+        close = df['Close']
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.rolling(window=period, min_periods=1).mean()
+    
+    def calculate_bollinger(self, prices: pd.Series, period: int = 20, std_dev: int = 2) -> Tuple[pd.Series, pd.Series]:
+        """Calculate Bollinger Bands"""
+        ma = prices.rolling(window=period, min_periods=1).mean()
+        std = prices.rolling(window=period, min_periods=1).std()
+        upper_band = ma + (std * std_dev)
+        lower_band = ma - (std * std_dev)
+        return upper_band, lower_band
     
     def add_vix_features(self, features: pd.DataFrame, vix_data: pd.DataFrame) -> pd.DataFrame:
         """Add VIX-related features"""
@@ -371,7 +432,7 @@ class FeatureEngineer:
         return regimes
     
     def create_volatility_labels(self, volatility: pd.Series) -> pd.Series:
-        """Create volatility regime labels using quantile binning"""
+        """Create volatility regime labels using quartile binning for more granular classification"""
         self.logger.debug(f"Creating volatility labels for {len(volatility)} samples")
         
         if len(volatility) == 0:
@@ -385,36 +446,34 @@ class FeatureEngineer:
         # Remove any remaining NaN values
         clean_volatility = volatility.dropna()
         
-        if len(clean_volatility) < 3:
-            self.logger.warning(f"Insufficient data for quantile binning: {len(clean_volatility)} samples")
+        if len(clean_volatility) < 4:
+            self.logger.warning(f"Insufficient data for quartile binning: {len(clean_volatility)} samples")
             # Create simple labels based on mean
             mean_vol = clean_volatility.mean()
             labels = pd.Series(index=clean_volatility.index, dtype='object')
-            labels[clean_volatility <= mean_vol] = 'Low'
-            labels[clean_volatility > mean_vol] = 'High'
-            # Add medium category for middle values
-            median_vol = clean_volatility.median()
-            mask = (clean_volatility > median_vol * 0.9) & (clean_volatility <= median_vol * 1.1)
-            labels[mask] = 'Medium'
+            labels[clean_volatility <= mean_vol] = 'Q1'
+            labels[clean_volatility > mean_vol] = 'Q4'
             return labels
         
         try:
-            # Use quantiles to create balanced classes
-            labels = pd.qcut(clean_volatility, q=3, labels=['Low', 'Medium', 'High'], duplicates='drop')
-            self.logger.debug(f"Quantile-based labels created: {labels.value_counts().to_dict()}")
+            # Use quartiles to create four balanced classes (Q1-Q4)
+            labels = pd.qcut(clean_volatility, q=4, labels=['Q1', 'Q2', 'Q3', 'Q4'], duplicates='drop')
+            self.logger.debug(f"Quartile-based labels created: {labels.value_counts().to_dict()}")
             return labels
             
         except Exception as e:
-            self.logger.warning(f"Quantile binning failed: {e}. Using percentile-based approach")
+            self.logger.warning(f"Quartile binning failed: {e}. Using percentile-based approach")
             
             # Fallback to percentile-based labeling
-            p33 = clean_volatility.quantile(0.33)
-            p67 = clean_volatility.quantile(0.67)
+            p25 = clean_volatility.quantile(0.25)
+            p50 = clean_volatility.quantile(0.50)
+            p75 = clean_volatility.quantile(0.75)
             
             labels = pd.Series(index=clean_volatility.index, dtype='object')
-            labels[clean_volatility <= p33] = 'Low'
-            labels[(clean_volatility > p33) & (clean_volatility <= p67)] = 'Medium'
-            labels[clean_volatility > p67] = 'High'
+            labels[clean_volatility <= p25] = 'Q1'
+            labels[(clean_volatility > p25) & (clean_volatility <= p50)] = 'Q2'
+            labels[(clean_volatility > p50) & (clean_volatility <= p75)] = 'Q3'
+            labels[clean_volatility > p75] = 'Q4'
             
             self.logger.debug(f"Percentile-based labels created: {labels.value_counts().to_dict()}")
             return labels
@@ -449,10 +508,10 @@ class ModelFactory:
     
     @staticmethod
     def create_lstm_classifier(input_shape: Tuple[int, int], 
-                             n_classes: int = 3,
+                             n_classes: int = 4,  # Updated to 4 classes for Q1-Q4
                              units: List[int] = [50, 30], 
                              dropout: float = 0.2) -> tf.keras.Model:
-        """Create LSTM model for classification"""
+        """Create LSTM model for classification with 4 volatility classes (Q1-Q4)"""
         model = Sequential()
         
         # First LSTM layer
@@ -465,7 +524,7 @@ class ModelFactory:
         
         # Dense layers
         model.add(Dense(25, activation='relu'))
-        model.add(Dense(n_classes, activation='softmax'))
+        model.add(Dense(n_classes, activation='softmax'))  # 4 output classes for Q1-Q4
         
         model.compile(optimizer=Adam(learning_rate=0.001), 
                      loss='sparse_categorical_crossentropy', 
@@ -618,131 +677,124 @@ class RiskPipeline:
     @log_execution_time
     def run_pipeline(self, assets: List[str] = None, skip_correlations: bool = False, debug: bool = False):
         """Execute the complete pipeline with enhanced timing"""
-        start_time = datetime.now()
-        
-        if debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-            self.logger.debug("Debug mode enabled")
-            
-        if assets is None:
-            assets = self.config.ALL_ASSETS
-        
-        self.logger.info("=" * 80)
-        self.logger.info("STARTING RISK PIPELINE EXECUTION")
-        self.logger.info("=" * 80)
-        self.logger.info(f"Processing assets: {assets}")
-        self.logger.info(f"Date range: {self.config.START_DATE} to {self.config.END_DATE}")
-        self.logger.info(f"Walk-forward splits: {self.config.WALK_FORWARD_SPLITS}")
-        self.logger.info(f"Execution started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
         try:
-            # Step 1: Load data
+            start_time = datetime.now()  # Add start_time at the beginning
+            
+            # Step 1: Data loading
             step_start = datetime.now()
             self.logger.info("Step 1: Loading data...")
-            raw_data = self.data_loader.download_data(
-                assets + ['^VIX'], 
-                self.config.START_DATE, 
-                self.config.END_DATE
-            )
-            step_time = (datetime.now() - step_start).total_seconds()
-            self.logger.info(f"✅ Step 1 completed in {step_time:.2f} seconds - Loaded {len(raw_data)} datasets")
             
-            # Step 2: Feature engineering for each asset
+            raw_data = self.data_loader.download_data(
+                symbols=self.config.ASSETS if assets is None else assets,
+                start_date=self.config.START_DATE,
+                end_date=self.config.END_DATE
+            )
+            
+            if not raw_data:
+                self.logger.error("No data downloaded. Exiting pipeline.")
+                return
+            
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 1 completed in {step_time:.2f} seconds")
+            
+            # Step 2: Feature engineering
             step_start = datetime.now()
             self.logger.info("Step 2: Engineering features...")
+            
             processed_data = {}
-
-            for asset in assets:
-                if asset in raw_data:
-                    asset_start = datetime.now()
-                    self.logger.info(f"Processing features for {asset}")
+            for asset, df in raw_data.items():
+                if asset == '^VIX':
+                    continue
                     
-                    # Create technical features
-                    features = self.feature_engineer.create_technical_features(raw_data[asset])
-                    self.logger.debug(f"{asset} - Technical features shape: {features.shape}")
-                    
-                    # Add VIX features
-                    if '^VIX' in raw_data:
-                        features = self.feature_engineer.add_vix_features(features, raw_data['^VIX'])
-                        self.logger.debug(f"{asset} - Added VIX features")
-                    
-                    # Add correlation features if not skipped
-                    if not skip_correlations:
-                        try:
-                            correlations = self.feature_engineer.calculate_correlations(raw_data)
-                            for col in correlations.columns:
-                                if col in correlations:
-                                    features[col] = correlations[col]
-                            self.logger.debug(f"{asset} - Added correlation features: {correlations.columns.tolist()}")
-                        except Exception as e:
-                            self.logger.warning(f"Skipping correlation features for {asset}: {e}")
-                    
-                    # ===== FIX: Create labels BEFORE cleaning data =====
-                    price_col = 'Adj Close' if 'Adj Close' in raw_data[asset].columns else 'Close'
-                    returns = self.feature_engineer.calculate_log_returns(raw_data[asset][price_col])
-                    
-                    # Create regime labels
-                    self.logger.debug(f"{asset} - Creating regime labels...")
-                    features['Regime'] = self.feature_engineer.create_regime_labels(returns)
-                    self.logger.debug(f"{asset} - Regime labels created")
-                    
-                    # Create volatility labels - CRITICAL FIX
-                    self.logger.debug(f"{asset} - Creating volatility labels...")
+                asset_start = datetime.now()
+                self.logger.info(f"Processing features for {asset}")
+                
+                # Create technical features
+                features = self.feature_engineer.create_technical_features(raw_data[asset])
+                self.logger.debug(f"{asset} - Technical features shape: {features.shape}")
+                
+                # Add VIX features
+                if '^VIX' in raw_data:
+                    features = self.feature_engineer.add_vix_features(features, raw_data['^VIX'])
+                    self.logger.debug(f"{asset} - Added VIX features")
+                
+                # Add correlation features if not skipped
+                if not skip_correlations:
                     try:
-                        # Make sure we have volatility data before creating labels
-                        if 'Volatility5D' in features.columns:
-                            volatility_series = features['Volatility5D'].dropna()
-                            if len(volatility_series) > 0:
-                                # Create labels using the clean volatility data
-                                volatility_labels = self.feature_engineer.create_volatility_labels(volatility_series)
-                                
-                                # Align the labels back to the original index
-                                features['VolatilityLabel'] = None  # Initialize with None
-                                features.loc[volatility_series.index, 'VolatilityLabel'] = volatility_labels
-                                
-                                self.logger.debug(f"{asset} - Volatility labels created: {features['VolatilityLabel'].value_counts().to_dict()}")
-                            else:
-                                self.logger.error(f"{asset} - No valid volatility data for label creation")
-                                continue
-                        else:
-                            self.logger.error(f"{asset} - Missing Volatility5D column")
-                            continue
-                            
+                        correlations = self.feature_engineer.calculate_correlations(raw_data)
+                        for col in correlations.columns:
+                            if col in correlations:
+                                features[col] = correlations[col]
+                        self.logger.debug(f"{asset} - Added correlation features: {correlations.columns.tolist()}")
                     except Exception as e:
-                        self.logger.error(f"{asset} - Failed to create volatility labels: {e}", exc_info=True)
-                        continue
-                    
-                    # Verify all required columns exist before cleaning
-                    required_columns = ['Volatility5D', 'VolatilityLabel', 'Regime']
-                    missing_columns = [col for col in required_columns if col not in features.columns]
-                    
-                    if missing_columns:
-                        self.logger.error(f"{asset} - Missing required columns: {missing_columns}")
-                        continue
-                    
-                    # Clean data (remove NaNs)
-                    original_shape = features.shape
+                        self.logger.warning(f"Skipping correlation features for {asset}: {e}")
+                
+                # Create labels BEFORE cleaning data
+                price_col = 'Adj Close' if 'Adj Close' in raw_data[asset].columns else 'Close'
+                returns = self.feature_engineer.calculate_log_returns(raw_data[asset][price_col])
+                
+                # Create regime labels
+                self.logger.debug(f"{asset} - Creating regime labels...")
+                features['Regime'] = self.feature_engineer.create_regime_labels(returns)
+                self.logger.debug(f"{asset} - Regime labels created")
+                
+                # Create volatility labels
+                self.logger.debug(f"{asset} - Creating volatility labels...")
+                features['VolatilityLabel'] = self.feature_engineer.create_volatility_labels(returns)
+                self.logger.debug(f"{asset} - Volatility labels created")
+                
+                # Verify required columns exist
+                required_columns = ['VolatilityLabel', 'Regime']
+                missing_columns = [col for col in required_columns if col not in features.columns]
+                
+                if missing_columns:
+                    self.logger.error(f"{asset} - Missing required columns: {missing_columns}")
+                    continue
+                
+                # Enhanced data cleaning
+                original_shape = features.shape
+                
+                # Separate categorical and numerical columns
+                categorical_cols = ['Regime', 'VolatilityLabel']
+                numerical_cols = [col for col in features.columns if col not in categorical_cols]
+                
+                # Enhanced NaN handling for numerical columns
+                for col in numerical_cols:
+                    # First try linear interpolation
+                    features[col] = features[col].interpolate(method='linear', limit_direction='both')
+                    # Then fill remaining NaNs with rolling mean
+                    features[col] = features[col].fillna(features[col].rolling(window=5, min_periods=1).mean())
+                    # Finally, fill any remaining NaNs with column mean
+                    features[col] = features[col].fillna(features[col].mean())
+                
+                # Handle categorical columns with forward fill and backward fill
+                features[categorical_cols] = features[categorical_cols].fillna(method='ffill').fillna(method='bfill')
+                
+                # Verify no NaNs remain
+                if features.isna().any().any():
+                    self.logger.warning(f"{asset} - NaN values remain after cleaning. Dropping rows with NaNs.")
                     features = features.dropna()
-                    self.logger.debug(f"{asset} - Data cleaned: {original_shape} -> {features.shape}")
-                    
-                    # Verify we still have data after cleaning
-                    if features.empty:
-                        self.logger.error(f"{asset} - No data remaining after cleaning")
-                        continue
-                    
-                    # Verify VolatilityLabel has valid values
-                    vol_label_counts = features['VolatilityLabel'].value_counts()
-                    if vol_label_counts.empty:
-                        self.logger.error(f"{asset} - No valid VolatilityLabel values after cleaning")
-                        continue
-                    
-                    self.logger.info(f"{asset} - Final processed data shape: {features.shape}")
-                    self.logger.debug(f"{asset} - VolatilityLabel distribution: {vol_label_counts.to_dict()}")
-                    
-                    processed_data[asset] = features
-                    
-                    asset_time = (datetime.now() - asset_start).total_seconds()
-                    self.logger.debug(f"{asset} feature engineering completed in {asset_time:.2f} seconds")
+                
+                self.logger.debug(f"{asset} - Data cleaned: {original_shape} -> {features.shape}")
+                
+                # Verify we still have data after cleaning
+                if features.empty:
+                    self.logger.error(f"{asset} - No data remaining after cleaning")
+                    continue
+                
+                # Verify VolatilityLabel has valid values
+                vol_label_counts = features['VolatilityLabel'].value_counts()
+                if vol_label_counts.empty:
+                    self.logger.error(f"{asset} - No valid VolatilityLabel values after cleaning")
+                    continue
+                
+                self.logger.info(f"{asset} - Final processed data shape: {features.shape}")
+                self.logger.debug(f"{asset} - VolatilityLabel distribution: {vol_label_counts.to_dict()}")
+                
+                processed_data[asset] = features
+                
+                asset_time = (datetime.now() - asset_start).total_seconds()
+                self.logger.debug(f"{asset} feature engineering completed in {asset_time:.2f} seconds")
 
             step_time = (datetime.now() - step_start).total_seconds()
             self.logger.info(f"✅ Step 2 completed in {step_time:.2f} seconds")
@@ -775,7 +827,7 @@ class RiskPipeline:
                 self.logger.debug(f"{asset} - Using features: {available_features}")
                 
                 # Validate required columns exist
-                required_cols = ['Volatility5D', 'VolatilityLabel']
+                required_cols = ['VolatilityLabel', 'Regime']
                 missing_required = [col for col in required_cols if col not in data.columns]
                 
                 if missing_required:
@@ -791,15 +843,15 @@ class RiskPipeline:
                     self.logger.debug(f"{asset} - VolatilityLabel unique values: {vol_labels.unique()}")
                     
                     # Check for valid label values
-                    valid_labels = {'Low', 'Medium', 'High'}
+                    valid_labels = {'Q1', 'Q2', 'Q3', 'Q4'}
                     actual_labels = set(vol_labels.dropna().unique())
                     
                     if not actual_labels.issubset(valid_labels):
                         self.logger.error(f"{asset} - Invalid volatility labels: {actual_labels}. Expected: {valid_labels}")
                         continue
                     
-                    # Map labels to numbers
-                    y_clf = vol_labels.map({'Low': 0, 'Medium': 1, 'High': 2})
+                    # Map labels to numbers (0=Q1, 1=Q2, 2=Q3, 3=Q4)
+                    y_clf = vol_labels.map({'Q1': 0, 'Q2': 1, 'Q3': 2, 'Q4': 3})
                     
                     # Validate we have valid data
                     if X.empty or y_reg.empty or y_clf.empty:
@@ -817,6 +869,7 @@ class RiskPipeline:
                         self.logger.warning(f"{asset} - Classification target contains NaN values")
                     
                     self.logger.info(f"{asset} - Feature matrix shape: {X.shape}, Regression target: {y_reg.shape}, Classification target: {y_clf.shape}")
+                    self.logger.debug(f"{asset} - Volatility quartile distribution: {vol_labels.value_counts().to_dict()}")
                     
                     # Run regression models
                     self.logger.info(f"Training regression models for {asset}...")
@@ -905,7 +958,7 @@ class RiskPipeline:
         return results
     
     def _run_classification_models(self, X: pd.DataFrame, y: pd.Series, asset: str) -> Dict:
-        """Run all classification models with walk-forward validation"""
+        """Run all classification models with walk-forward validation and SMOTE+Tomek for class balancing"""
         results = {}
         
         # ===== FIX: Log the exact features being used =====
@@ -1076,13 +1129,13 @@ class RiskPipeline:
     
     def _evaluate_dl_model(self, X: pd.DataFrame, y: pd.Series, 
                           model_type: str, task: str, asset: str) -> Dict:
-        """Evaluate deep learning models"""
+        """Evaluate deep learning models with improved NaN handling"""
         splits = self.validator.split(X)
         predictions = []
         actuals = []
         
         # Prepare data for LSTM (requires 3D input)
-        sequence_length = 20  # Look back 20 days
+        sequence_length = 15  # Look back 15 days
         
         self.logger.info(f"Starting DL model evaluation for {model_type} on {asset}")
         self.logger.info(f"Total data shape: X={X.shape}, y={y.shape}")
@@ -1094,10 +1147,49 @@ class RiskPipeline:
             X_train, X_test = X.loc[train_idx], X.loc[test_idx]
             y_train, y_test = y.loc[train_idx], y.loc[test_idx]
             
+            # Enhanced NaN handling for training data
+            if X_train.isna().any().any() or y_train.isna().any():
+                self.logger.warning(f"NaN values found in training data. Handling them...")
+                # Enhanced NaN handling for features
+                for col in X_train.columns:
+                    # Try linear interpolation first
+                    X_train[col] = X_train[col].interpolate(method='linear', limit_direction='both')
+                    # Then use rolling mean
+                    X_train[col] = X_train[col].fillna(X_train[col].rolling(window=5, min_periods=1).mean())
+                    # Finally use column mean
+                    X_train[col] = X_train[col].fillna(X_train[col].mean())
+                
+                # Handle target variable NaNs
+                y_train = y_train.interpolate(method='linear', limit_direction='both')
+                y_train = y_train.fillna(y_train.rolling(window=5, min_periods=1).mean())
+                y_train = y_train.fillna(y_train.mean())
+            
+            # Enhanced NaN handling for test data
+            if X_test.isna().any().any() or y_test.isna().any():
+                self.logger.warning(f"NaN values found in test data. Handling them...")
+                # Use the same approach as training data
+                for col in X_test.columns:
+                    X_test[col] = X_test[col].interpolate(method='linear', limit_direction='both')
+                    X_test[col] = X_test[col].fillna(X_test[col].rolling(window=5, min_periods=1).mean())
+                    X_test[col] = X_test[col].fillna(X_test[col].mean())
+                
+                y_test = y_test.interpolate(method='linear', limit_direction='both')
+                y_test = y_test.fillna(y_test.rolling(window=5, min_periods=1).mean())
+                y_test = y_test.fillna(y_test.mean())
+            
             self.logger.info(f"Fold {fold_idx + 1}: Train shape={X_train.shape}, Test shape={X_test.shape}")
             
+            # Verify no NaNs remain
+            if X_train.isna().any().any() or y_train.isna().any():
+                self.logger.error(f"Fold {fold_idx + 1}: NaN values remain in training data after preprocessing")
+                continue
+                
+            if X_test.isna().any().any() or y_test.isna().any():
+                self.logger.error(f"Fold {fold_idx + 1}: NaN values remain in test data after preprocessing")
+                continue
+            
             # Check if we have enough data
-            if len(X_train) < sequence_length + 10:  # Need minimum data for sequences + some buffer
+            if len(X_train) < sequence_length + 10:
                 self.logger.warning(f"Fold {fold_idx + 1}: Insufficient training data ({len(X_train)} samples), skipping")
                 continue
             
@@ -1110,18 +1202,28 @@ class RiskPipeline:
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
             
-            # Create sequences
-            X_train_seq, y_train_seq = self._create_sequences(
-                X_train_scaled, y_train.values, sequence_length
-            )
-            X_test_seq, y_test_seq = self._create_sequences(
-                X_test_scaled, y_test.values, sequence_length
-            )
-            
-            self.logger.info(f"Fold {fold_idx + 1}: Sequences created - Train: {X_train_seq.shape}, Test: {X_test_seq.shape}")
-            
-            if len(X_train_seq) == 0 or len(X_test_seq) == 0:
-                self.logger.warning(f"Fold {fold_idx + 1}: Empty sequences after creation, skipping")
+            # Create sequences with validation
+            try:
+                X_train_seq, y_train_seq = self._create_sequences(
+                    X_train_scaled, y_train.values, sequence_length
+                )
+                X_test_seq, y_test_seq = self._create_sequences(
+                    X_test_scaled, y_test.values, sequence_length
+                )
+                
+                # Verify sequences
+                if np.isnan(X_train_seq).any() or np.isnan(y_train_seq).any():
+                    self.logger.error(f"Fold {fold_idx + 1}: NaN values in training sequences after preprocessing")
+                    continue
+                    
+                if np.isnan(X_test_seq).any() or np.isnan(y_test_seq).any():
+                    self.logger.error(f"Fold {fold_idx + 1}: NaN values in test sequences after preprocessing")
+                    continue
+                
+                self.logger.info(f"Fold {fold_idx + 1}: Sequences created - Train: {X_train_seq.shape}, Test: {X_test_seq.shape}")
+                
+            except Exception as e:
+                self.logger.error(f"Fold {fold_idx + 1}: Error creating sequences: {e}")
                 continue
             
             # Create model
@@ -1140,17 +1242,28 @@ class RiskPipeline:
                 
                 self.logger.info(f"Fold {fold_idx + 1}: Model created successfully")
                 
-                # Train model
-                early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-                reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=0.00001)
+                # Train model with NaN handling
+                early_stop = EarlyStopping(
+                    monitor='val_loss',
+                    patience=5,
+                    restore_best_weights=True,
+                    mode='min'
+                )
+                reduce_lr = ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,
+                    patience=5,
+                    min_lr=0.00001,
+                    mode='min'
+                )
                 
-                # Reduce epochs for quick test
-                epochs = 20 if hasattr(self.config, 'START_DATE') and '2023' in self.config.START_DATE else 50
+                # Set epochs to 100
+                epochs = 100
                 
                 history = model.fit(
                     X_train_seq, y_train_seq,
                     epochs=epochs,
-                    batch_size=16,  # Smaller batch size for limited data
+                    batch_size=16,
                     validation_split=0.2,
                     callbacks=[early_stop, reduce_lr],
                     verbose=0
@@ -1158,13 +1271,27 @@ class RiskPipeline:
                 
                 self.logger.info(f"Fold {fold_idx + 1}: Model training completed")
                 
-                # Make predictions
+                # Make predictions with validation
                 y_pred = model.predict(X_test_seq, verbose=0)
+                
+                # Check for NaN in predictions
+                if np.isnan(y_pred).any():
+                    self.logger.error(f"Fold {fold_idx + 1}: NaN values in predictions")
+                    continue
                 
                 if task == 'classification':
                     y_pred = np.argmax(y_pred, axis=1)
                 else:
                     y_pred = y_pred.flatten()
+                
+                # Validate predictions and actuals
+                if len(y_pred) != len(y_test_seq):
+                    self.logger.error(f"Fold {fold_idx + 1}: Prediction length mismatch")
+                    continue
+                    
+                if np.isnan(y_pred).any() or np.isnan(y_test_seq).any():
+                    self.logger.error(f"Fold {fold_idx + 1}: NaN values in predictions or actuals")
+                    continue
                 
                 self.logger.info(f"Fold {fold_idx + 1}: Predictions shape={y_pred.shape}, Test targets shape={y_test_seq.shape}")
                 
@@ -1203,6 +1330,31 @@ class RiskPipeline:
                     'actuals': []
                 }
         
+        # Convert to numpy arrays for final validation
+        predictions = np.array(predictions)
+        actuals = np.array(actuals)
+        
+        # Final NaN check
+        if np.isnan(predictions).any() or np.isnan(actuals).any():
+            self.logger.error(f"NaN values found in final predictions or actuals")
+            if task == 'regression':
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'),
+                    'R2': -float('inf'),
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
+                }
+            else:
+                return {
+                    'Accuracy': 0.0,
+                    'F1': 0.0,
+                    'Precision': 0.0,
+                    'Recall': 0.0,
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
+                }
+        
         self.logger.info(f"Final results for {model_type}: {len(predictions)} predictions, {len(actuals)} actuals")
         
         # Calculate metrics
@@ -1216,8 +1368,8 @@ class RiskPipeline:
                     'RMSE': rmse,
                     'MAE': mae,
                     'R2': r2,
-                    'predictions': predictions,
-                    'actuals': actuals
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
                 }
             else:
                 accuracy = accuracy_score(actuals, predictions)
@@ -1230,8 +1382,8 @@ class RiskPipeline:
                     'F1': f1,
                     'Precision': precision,
                     'Recall': recall,
-                    'predictions': predictions,
-                    'actuals': actuals
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
                 }
         except Exception as e:
             self.logger.error(f"Metrics calculation failed for {model_type}: {e}")
@@ -1241,8 +1393,8 @@ class RiskPipeline:
                     'RMSE': float('inf'),
                     'MAE': float('inf'),
                     'R2': -float('inf'),
-                    'predictions': predictions,
-                    'actuals': actuals
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
                 }
             else:
                 return {
@@ -1250,13 +1402,13 @@ class RiskPipeline:
                     'F1': 0.0,
                     'Precision': 0.0,
                     'Recall': 0.0,
-                    'predictions': predictions,
-                    'actuals': actuals
+                    'predictions': predictions.tolist(),
+                    'actuals': actuals.tolist()
                 }
     
     def _evaluate_sklearn_model(self, X: pd.DataFrame, y: pd.Series, 
                                model, asset: str, model_name: str) -> Dict:
-        """Evaluate sklearn-compatible models"""
+        """Evaluate sklearn-compatible models with SMOTE+Tomek for class balancing"""
         splits = self.validator.split(X)
         predictions = []
         actuals = []
@@ -1274,9 +1426,35 @@ class RiskPipeline:
             X_train_scaled = scaler.fit_transform(X_train)
             X_test_scaled = scaler.transform(X_test)
             
+            # Apply SMOTE+Tomek to training data only
+            try:
+                # Log original class distribution
+                original_dist = Counter(y_train)
+                self.logger.debug(f"Fold {fold_idx + 1} - Original class distribution: {dict(original_dist)}")
+                
+                # Apply SMOTE+Tomek with error handling
+                smt = SMOTETomek(smote=SMOTE(k_neighbors=1), random_state=self.config.RANDOM_STATE)
+                X_train_resampled, y_train_resampled = smt.fit_resample(X_train_scaled, y_train)
+                
+                # Log new class distribution
+                new_dist = Counter(y_train_resampled)
+                self.logger.debug(f"Fold {fold_idx + 1} - New class distribution: {dict(new_dist)}")
+                
+                # Optional: Visualize class balance for debugging
+                if fold_idx == 0:  # Only for first fold
+                    plt.figure(figsize=(10, 6))
+                    sns.countplot(x=y_train_resampled)
+                    plt.title(f"Class Distribution After SMOTE+Tomek - {asset}")
+                    plt.savefig(f'class_balance_{asset}_{model_name}.png')
+                    plt.close()
+                
+            except Exception as e:
+                self.logger.warning(f"SMOTE+Tomek failed for fold {fold_idx + 1}: {e}. Using original data.")
+                X_train_resampled, y_train_resampled = X_train_scaled, y_train
+            
             # Train model
             model_copy = model.__class__(**model.get_params())
-            model_copy.fit(X_train_scaled, y_train)
+            model_copy.fit(X_train_resampled, y_train_resampled)
             
             # Make predictions
             y_pred = model_copy.predict(X_test_scaled)
@@ -1312,12 +1490,13 @@ class RiskPipeline:
     
     def _create_sequences(self, X: np.ndarray, y: np.ndarray, 
                          sequence_length: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Create sequences for LSTM input"""
+        """Create sequences for LSTM input with stride=1 for maximum training size"""
         X_seq, y_seq = [], []
+        stride = 1  # Use stride=1 to maximize training size
         
-        for i in range(sequence_length, len(X)):
-            X_seq.append(X[i-sequence_length:i])
-            y_seq.append(y[i])
+        for i in range(0, len(X) - sequence_length, stride):
+            X_seq.append(X[i:i+sequence_length])
+            y_seq.append(y[i+sequence_length-1])  # Use the last value in the sequence
             
         return np.array(X_seq), np.array(y_seq)
     
@@ -1786,3 +1965,207 @@ def main():
 if __name__ == "__main__":
     test_logging()
     # main()  # Uncomment this to run the main pipeline
+
+def augment_time_series(X: np.ndarray, y: np.ndarray, n_augmentations: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate synthetic training data through time series augmentation"""
+    augmented_X, augmented_y = [], []
+    
+    for _ in range(n_augmentations):
+        # Add small random noise
+        noise = np.random.normal(0, 0.01, X.shape)
+        X_aug = X + noise
+        
+        # Time warping
+        stretch_factor = np.random.uniform(0.9, 1.1)
+        n_samples = len(X)
+        new_n_samples = int(n_samples * stretch_factor)
+        
+        # Create warped indices
+        indices = np.linspace(0, n_samples - 1, new_n_samples)
+        indices = np.clip(indices, 0, n_samples - 1).astype(int)
+        
+        # Apply warping
+        X_warped = X[indices]
+        y_warped = y[indices]
+        
+        # Add to augmented data
+        augmented_X.append(X_warped)
+        augmented_y.append(y_warped)
+    
+    # Combine original and augmented data
+    X_combined = np.vstack([X] + augmented_X)
+    y_combined = np.hstack([y] + augmented_y)
+    
+    return X_combined, y_combined
+
+def augment_time_shifts(X: np.ndarray, y: np.ndarray, max_shift: int = 2) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate synthetic training data through time shifts.
+    
+    This function creates additional training samples by shifting the time series
+    forward by 1 to max_shift days. This preserves the temporal structure while
+    creating more training data.
+    
+    Args:
+        X: Input features array of shape (n_samples, n_features)
+        y: Target values array of shape (n_samples,)
+        max_shift: Maximum number of days to shift forward (default: 2)
+        
+    Returns:
+        Tuple of (X_combined, y_combined) containing original and shifted data
+    """
+    augmented_X, augmented_y = [], []
+    
+    # Keep original data
+    augmented_X.append(X)
+    augmented_y.append(y)
+    
+    # Create shifted versions
+    for shift in range(1, max_shift + 1):
+        # Shift features forward by 'shift' days
+        X_shifted = X[shift:]
+        y_shifted = y[shift:]
+        
+        # Pad the beginning with the first value to maintain sequence length
+        X_padded = np.pad(X_shifted, ((shift, 0), (0, 0)), mode='edge')
+        y_padded = np.pad(y_shifted, (shift, 0), mode='edge')
+        
+        augmented_X.append(X_padded)
+        augmented_y.append(y_padded)
+    
+    # Combine all versions
+    X_combined = np.vstack(augmented_X)
+    y_combined = np.hstack(augmented_y)
+    
+    return X_combined, y_combined
+
+def prepare_training_data(self, features: pd.DataFrame, target: pd.Series, 
+                         sequence_length: int = 20) -> Tuple[np.ndarray, np.ndarray]:
+    """Prepare training data with sequences and augmentation"""
+    # Create sequences
+    X, y = [], []
+    for i in range(len(features) - sequence_length):
+        X.append(features.iloc[i:(i + sequence_length)].values)
+        y.append(target.iloc[i + sequence_length])
+    
+    X = np.array(X)
+    y = np.array(y)
+    
+    # Apply both types of augmentation
+    X_aug1, y_aug1 = augment_time_series(X, y)
+    X_aug2, y_aug2 = augment_time_shifts(X, y)
+    
+    # Combine all augmented data
+    X_combined = np.vstack([X_aug1, X_aug2])
+    y_combined = np.hstack([y_aug1, y_aug2])
+    
+    return X_combined, y_combined
+
+def time_series_cv_split(X: pd.DataFrame, y: pd.Series, n_splits: int = 5, gap: int = 5) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    """Implement proper time series cross-validation with gap"""
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=gap)
+    
+    for train_idx, test_idx in tscv.split(X):
+        # Ensure minimum training size
+        if len(train_idx) < 252:  # 1 year minimum
+            continue
+            
+        yield train_idx, test_idx
+
+def create_ensemble_predictions(self, models_predictions: List[np.ndarray], 
+                              weights: Optional[np.ndarray] = None) -> np.ndarray:
+    """Combine predictions from multiple models"""
+    if weights is None:
+        # Equal weights
+        weights = np.ones(len(models_predictions)) / len(models_predictions)
+    
+    ensemble_pred = np.zeros_like(models_predictions[0])
+    for pred, weight in zip(models_predictions, weights):
+        ensemble_pred += pred * weight
+    
+    return ensemble_pred
+
+def _run_ensemble_models(self, X: pd.DataFrame, y: pd.Series, asset: str) -> Dict:
+    """Run ensemble of models with proper cross-validation"""
+    results = {}
+    
+    # Initialize models
+    models = {
+        'LSTM': create_lstm_regressor(input_shape=(X.shape[1], X.shape[2])),
+        'XGBoost': xgb.XGBRegressor(
+            n_estimators=100,
+            max_depth=5,
+            learning_rate=0.1,
+            random_state=self.config.RANDOM_STATE
+        ),
+        'RandomForest': RandomForestRegressor(
+            n_estimators=100,
+            max_depth=5,
+            random_state=self.config.RANDOM_STATE
+        )
+    }
+    
+    # Get cross-validation splits
+    splits = list(time_series_cv_split(X, y))
+    
+    # Store predictions for each model
+    model_predictions = {name: [] for name in models.keys()}
+    actuals = []
+    
+    for fold_idx, (train_idx, test_idx) in enumerate(splits):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train.reshape(-1, X_train.shape[-1])).reshape(X_train.shape)
+        X_test_scaled = scaler.transform(X_test.reshape(-1, X_test.shape[-1])).reshape(X_test.shape)
+        
+        # Train and predict with each model
+        for name, model in models.items():
+            if name == 'LSTM':
+                # Prepare sequences for LSTM
+                X_train_seq = X_train_scaled
+                X_test_seq = X_test_scaled
+                
+                # Train LSTM
+                history = train_model(
+                    model, X_train_seq, y_train,
+                    X_test_seq, y_test,
+                    asset, name, self.config
+                )
+                
+                # Make predictions
+                y_pred = model.predict(X_test_seq)
+            else:
+                # Reshape for sklearn models
+                X_train_flat = X_train_scaled.reshape(X_train_scaled.shape[0], -1)
+                X_test_flat = X_test_scaled.reshape(X_test_scaled.shape[0], -1)
+                
+                # Train and predict
+                model.fit(X_train_flat, y_train)
+                y_pred = model.predict(X_test_flat)
+            
+            model_predictions[name].extend(y_pred)
+        
+        actuals.extend(y_test)
+    
+    # Create ensemble predictions
+    ensemble_pred = self.create_ensemble_predictions(
+        [np.array(preds) for preds in model_predictions.values()]
+    )
+    
+    # Calculate metrics for each model and ensemble
+    for name, preds in model_predictions.items():
+        results[name] = {
+            'mse': mean_squared_error(actuals, preds),
+            'mae': mean_absolute_error(actuals, preds),
+            'r2': r2_score(actuals, preds)
+        }
+    
+    results['Ensemble'] = {
+        'mse': mean_squared_error(actuals, ensemble_pred),
+        'mae': mean_absolute_error(actuals, ensemble_pred),
+        'r2': r2_score(actuals, ensemble_pred)
+    }
+    
+    return results

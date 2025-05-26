@@ -140,7 +140,8 @@ class TestFeatureEngineer(unittest.TestCase):
         # Check all features are created
         expected_features = [
             'Volatility5D', 'Lag1', 'Lag2', 'Lag3', 'ROC5',
-            'MA10', 'MA50', 'RollingStd5', 'MA_ratio'
+            'MA10', 'MA50', 'RollingStd5', 'MA_ratio',
+            'Corr_MA10', 'Corr_MA50'  # Added new correlation features
         ]
         
         for feature in expected_features:
@@ -148,6 +149,10 @@ class TestFeatureEngineer(unittest.TestCase):
             
         # Check feature shapes
         self.assertEqual(len(features), len(self.test_data))
+        
+        # Check correlation features are within valid range [-1, 1]
+        self.assertTrue(all(features['Corr_MA10'].dropna().between(-1, 1)))
+        self.assertTrue(all(features['Corr_MA50'].dropna().between(-1, 1)))
         
     def test_regime_labels(self):
         """Test regime label creation"""
@@ -164,12 +169,12 @@ class TestFeatureEngineer(unittest.TestCase):
         labels = self.feature_engineer.create_volatility_labels(volatility)
         
         self.assertEqual(len(labels), len(volatility))
-        self.assertEqual(set(labels.unique()), {'Low', 'Medium', 'High'})
+        self.assertEqual(set(labels.unique()), {'Q1', 'Q2', 'Q3', 'Q4'})
         
         # Check roughly balanced classes
         counts = labels.value_counts()
-        for label in ['Low', 'Medium', 'High']:
-            self.assertGreater(counts[label], len(volatility) * 0.2)
+        for label in ['Q1', 'Q2', 'Q3', 'Q4']:
+            self.assertGreater(counts[label], len(volatility) * 0.15)  # Allow for some imbalance
 
 
 class TestModelFactory(unittest.TestCase):

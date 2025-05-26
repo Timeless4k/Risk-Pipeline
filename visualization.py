@@ -157,9 +157,10 @@ class VolatilityVisualizer:
             'Bull': '#2ca02c',
             'Bear': '#d62728',
             'Sideways': '#ff7f0e',
-            'Low': '#1f77b4',
-            'Medium': '#ff7f0e',
-            'High': '#d62728'
+            'Q1': '#1f77b4',  # Lowest volatility
+            'Q2': '#7f7f7f',  # Low-medium volatility
+            'Q3': '#ff7f0e',  # Medium-high volatility
+            'Q4': '#d62728'   # Highest volatility
         }
         
     def plot_performance_comparison(self, results: Dict, task: str = 'regression'):
@@ -774,8 +775,8 @@ class VolatilityVisualizer:
     def _plot_class_distribution(self, results: Dict, ax):
         """Plot volatility class distribution"""
         # This is a placeholder - would need actual class distribution data
-        classes = ['Low', 'Medium', 'High']
-        counts = [0.4, 0.35, 0.25]  # Example distribution
+        classes = ['Q1', 'Q2', 'Q3', 'Q4']
+        counts = [0.25, 0.25, 0.25, 0.25]  # Equal distribution for Q1-Q4
         colors = [self.regime_colors[c] for c in classes]
         
         ax.pie(counts, labels=classes, colors=colors, autopct='%1.1f%%')

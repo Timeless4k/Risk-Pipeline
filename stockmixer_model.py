@@ -13,6 +13,10 @@ from tensorflow.keras.regularizers import l1_l2
 import numpy as np
 from typing import Tuple, Optional, Dict
 import logging
+from tensorflow.keras.layers import LSTM, Dropout, BatchNormalization, Dense
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau, TensorBoard
+from pathlib import Path
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -370,6 +374,126 @@ class StockMixerExplainer:
         
         plt.tight_layout()
         return fig
+
+
+def create_lstm_regressor(input_shape, units=[128, 64, 32], dropout=0.3):
+    """Create an enhanced LSTM model with deeper architecture and better regularization"""
+    model = Sequential()
+    
+    # First LSTM layer with return sequences
+    model.add(LSTM(units[0], 
+                  return_sequences=True, 
+                  input_shape=input_shape,
+                  kernel_regularizer=tf.keras.regularizers.l2(0.01),
+                  recurrent_regularizer=tf.keras.regularizers.l2(0.01)))
+    model.add(Dropout(dropout))
+    model.add(BatchNormalization())
+    
+    # Second LSTM layer with return sequences
+    model.add(LSTM(units[1], 
+                  return_sequences=True,
+                  kernel_regularizer=tf.keras.regularizers.l2(0.01),
+                  recurrent_regularizer=tf.keras.regularizers.l2(0.01)))
+    model.add(Dropout(dropout))
+    model.add(BatchNormalization())
+    
+    # Third LSTM layer
+    model.add(LSTM(units[2], 
+                  return_sequences=False,
+                  kernel_regularizer=tf.keras.regularizers.l2(0.01),
+                  recurrent_regularizer=tf.keras.regularizers.l2(0.01)))
+    model.add(Dropout(dropout))
+    model.add(BatchNormalization())
+    
+    # Dense layers with residual connections
+    dense1 = Dense(64, 
+                  activation='relu',
+                  kernel_regularizer=tf.keras.regularizers.l2(0.01))(model.output)
+    dense1 = Dropout(dropout)(dense1)
+    dense1 = BatchNormalization()(dense1)
+    
+    dense2 = Dense(32, 
+                  activation='relu',
+                  kernel_regularizer=tf.keras.regularizers.l2(0.01))(dense1)
+    dense2 = Dropout(dropout)(dense2)
+    dense2 = BatchNormalization()(dense2)
+    
+    # Output layer with linear activation
+    output = Dense(1, activation='linear')(dense2)
+    
+    # Create model
+    model = Model(inputs=model.input, outputs=output)
+    
+    # Use better optimizer with gradient clipping and NaN handling
+    optimizer = Adam(
+        learning_rate=0.001,
+        clipnorm=1.0,
+        clipvalue=0.5,
+        beta_1=0.9,
+        beta_2=0.999,
+        epsilon=1e-07
+    )
+    
+    # Compile with Huber loss for robustness against outliers
+    model.compile(
+        optimizer=optimizer,
+        loss=tf.keras.losses.Huber(delta=1.0),  # Huber loss is more robust to outliers
+        metrics=['mae', 'mse']
+    )
+    
+    return model
+
+def train_model(model, X_train, y_train, X_val, y_val, asset, model_type, config):
+    """Train model with enhanced callbacks and checkpointing"""
+    # Create callbacks directory if it doesn't exist
+    callbacks_dir = Path('models')
+    callbacks_dir.mkdir(exist_ok=True)
+    
+    # Model checkpointing
+    checkpoint = ModelCheckpoint(
+        f'models/{asset}_{model_type}_best.h5',
+        monitor='val_loss',
+        save_best_only=True,
+        mode='min',
+        verbose=1
+    )
+    
+    # Early stopping with patience=5
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=5,
+        restore_best_weights=True,
+        verbose=1
+    )
+    
+    # Learning rate reduction
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=config.training.reduce_lr_patience,
+        min_lr=1e-6,
+        verbose=1
+    )
+    
+    # TensorBoard logging
+    log_dir = Path(config.output.log_dir) / 'tensorboard' / f'{asset}_{model_type}'
+    tensorboard = TensorBoard(
+        log_dir=log_dir,
+        histogram_freq=1,
+        write_graph=True
+    )
+    
+    # Train model with all callbacks
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=config.training.epochs,
+        batch_size=config.training.batch_size,
+        callbacks=[checkpoint, early_stopping, reduce_lr, tensorboard],
+        verbose=1
+    )
+    
+    return history
 
 
 # Example usage and testing
