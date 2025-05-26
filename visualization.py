@@ -13,12 +13,20 @@ from plotly.subplots import make_subplots
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import warnings
+import logging
 warnings.filterwarnings('ignore')
 
 # Set style
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("husl")
 
+# Setup logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all levels
+
+# Add a null handler to prevent "No handler found" warnings
+# The actual handlers will be added by the root logger in run_pipeline.py
+logger.addHandler(logging.NullHandler())
 
 class VolatilityVisualizer:
     """Main visualization class for volatility forecasting results"""
@@ -58,10 +66,19 @@ class VolatilityVisualizer:
             
     def _plot_regression_comparison(self, results: Dict):
         """Plot regression performance metrics"""
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        
         # Prepare data
         metrics_data = self._prepare_metrics_data(results, 'regression')
+        
+        # Check if we have data to plot
+        if metrics_data.empty:
+            logger.warning("No regression metrics data available for plotting")
+            return
+        
+        if 'Asset' not in metrics_data.columns:
+            logger.warning("Missing 'Asset' column in metrics data")
+            return
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         
         # 1. RMSE comparison
         ax = axes[0, 0]
@@ -318,15 +335,36 @@ class VolatilityVisualizer:
         return pd.DataFrame(data)
     
     def _plot_metric_bars(self, data: pd.DataFrame, metric: str, ax, title: str):
-        """Create grouped bar plot for a specific metric"""
-        pivot_data = data.pivot(index='Asset', columns='Model', values=metric)
-        pivot_data.plot(kind='bar', ax=ax, color=[self.model_colors.get(m, '#333333') 
-                                                  for m in pivot_data.columns])
-        ax.set_title(title, fontsize=14)
-        ax.set_xlabel('Asset')
-        ax.set_ylabel(metric)
-        ax.legend(loc='best', bbox_to_anchor=(1.05, 1))
-        ax.tick_params(axis='x', rotation=45)
+        """Plot metric bars with error handling"""
+        try:
+            if data.empty:
+                ax.text(0.5, 0.5, 'No data available', ha='center', va='center')
+                ax.set_title(title)
+                return
+            
+            if 'Asset' not in data.columns or metric not in data.columns:
+                ax.text(0.5, 0.5, f'Missing required columns: Asset or {metric}', ha='center', va='center')
+                ax.set_title(title)
+                return
+            
+            pivot_data = data.pivot(index='Asset', columns='Model', values=metric)
+            
+            if pivot_data.empty:
+                ax.text(0.5, 0.5, 'No data available after pivot', ha='center', va='center')
+                ax.set_title(title)
+                return
+            
+            pivot_data.plot(kind='bar', ax=ax, color=[self.model_colors.get(m, '#808080') for m in pivot_data.columns])
+            ax.set_title(title)
+            ax.set_xlabel('Asset')
+            ax.set_ylabel(metric)
+            plt.xticks(rotation=45)
+            ax.legend(title='Model', bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+        except Exception as e:
+            logger.error(f"Error plotting {metric} bars: {e}")
+            ax.text(0.5, 0.5, f'Error plotting {metric}', ha='center', va='center')
+            ax.set_title(title)
         
     def _plot_model_ranking(self, data: pd.DataFrame, ax):
         """Plot model rankings based on average performance"""

@@ -61,6 +61,12 @@ class PipelineRunner:
     
     def setup_logging(self):
         """Configure logging with both file and console output"""
+        # Clear any existing handlers to avoid conflicts
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        
+        # Create logs directory
         log_dir = Path('logs')
         log_dir.mkdir(exist_ok=True)
         
@@ -68,18 +74,38 @@ class PipelineRunner:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_file = log_dir / f'pipeline_run_{timestamp}.log'
         
-        # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler(sys.stdout)
-            ]
+        # Create formatter
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
         )
         
+        # File handler - this will capture ALL logs
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)  # Capture everything in file
+        file_handler.setFormatter(formatter)
+        
+        # Console handler - less verbose for console
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        
+        # Configure root logger
+        root_logger.setLevel(logging.DEBUG)
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
+        
+        # Create pipeline-specific logger
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Test logging
         self.logger.info(f"Logging initialized. Log file: {log_file}")
+        self.logger.debug("Debug logging is working")
+        self.logger.info("Info logging is working")
+        self.logger.warning("Warning logging is working")
+        
+        self.log_file_path = log_file
         
     def run_quick_test(self):
         """Run pipeline on subset of data for testing"""
@@ -91,21 +117,50 @@ class PipelineRunner:
         test_config = AssetConfig()
         test_config.START_DATE = '2023-01-01'
         test_config.END_DATE = '2024-03-31'
-        test_config.WALK_FORWARD_SPLITS = 2
+        test_config.WALK_FORWARD_SPLITS = 2  # Reduced for quick test
+        test_config.TEST_SIZE = 50  # Much smaller test size for limited data
         
-        # Use only one asset from each market
-        test_assets = ['AAPL', 'CBA.AX']
+        # Use only two assets (one from each market) + VIX
+        test_assets = ['AAPL', 'CBA.AX']  # Removed ^VIX from assets, it will be downloaded separately
         
         # Initialize and run pipeline
         pipeline = RiskPipeline(config=test_config)
-        pipeline.run_pipeline(assets=test_assets)
         
-        # Generate basic visualizations
-        visualizer = VolatilityVisualizer('visualizations/test')
-        visualizer.plot_performance_comparison(pipeline.results, 'regression')
+        try:
+            pipeline.run_pipeline(assets=test_assets)
+            
+            # Only generate visualizations if we have results
+            if pipeline.results and not self._is_results_empty(pipeline.results):
+                visualizer = VolatilityVisualizer('visualizations/test')
+                visualizer.plot_performance_comparison(pipeline.results, 'regression')
+                print("✅ Visualizations generated")
+            else:
+                print("⚠️ No results generated - skipping visualization")
+            
+        except Exception as e:
+            self.logger.error(f"Quick test failed: {e}", exc_info=True)
+            print(f"❌ Quick test failed: {e}")
+            return
         
         print("\n✅ Quick test completed!")
         print("Check results in 'results/' and 'visualizations/test/'")
+        
+    def _is_results_empty(self, results: dict) -> bool:
+        """Check if results dictionary is effectively empty"""
+        if not results:
+            return True
+        for asset_results in results.values():
+            if not asset_results:
+                continue
+            for task_results in asset_results.values():
+                if not task_results:
+                    continue
+                for model_results in task_results.values():
+                    if model_results and any(k not in ['predictions', 'actuals'] and 
+                                           v not in [float('inf'), -float('inf'), 0.0] 
+                                           for k, v in model_results.items()):
+                        return False
+        return True
         
     def run_full_pipeline(self, assets: list = None):
         """Run complete pipeline with all features"""

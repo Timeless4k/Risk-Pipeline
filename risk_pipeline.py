@@ -14,6 +14,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import joblib
 from pathlib import Path
 import logging
+import sys
 from dataclasses import dataclass
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
@@ -37,12 +38,105 @@ from tqdm import tqdm
 warnings.filterwarnings('ignore')
 tf.get_logger().setLevel('ERROR')
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# =============================================================================
+# LOGGING SETUP (REPLACES OLD SETUP)
+# =============================================================================
+def setup_logging(log_file_path: str = None, level: int = logging.INFO) -> logging.Logger:
+    """Setup comprehensive logging configuration with third-party filtering"""
+    # Clear any existing handlers to avoid conflicts
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create logs directory
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+    
+    # Generate log file path if not provided
+    if log_file_path is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file_path = log_dir / f'pipeline_run_{timestamp}.log'
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # File handler - captures ALL logs to file
+    file_handler = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)  # Capture everything in file
+    file_handler.setFormatter(formatter)
+    
+    # Console handler - less verbose for console
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    # ===== FIX: Reduce third-party library verbosity =====
+    # Set specific loggers to higher levels to reduce noise
+    third_party_loggers = {
+        'yfinance': logging.WARNING,        # Reduce yfinance verbosity
+        'peewee': logging.WARNING,          # Reduce database logs
+        'PIL': logging.WARNING,             # Reduce image processing logs
+        'matplotlib': logging.WARNING,      # Reduce matplotlib logs
+        'urllib3': logging.WARNING,         # Reduce HTTP request logs
+        'requests': logging.WARNING,        # Reduce requests logs
+        'tensorflow': logging.ERROR,        # Only show TF errors
+        'h5py': logging.WARNING,           # Reduce HDF5 logs
+        'numba': logging.WARNING,          # Reduce numba compilation logs
+    }
+    
+    for logger_name, log_level in third_party_loggers.items():
+        third_party_logger = logging.getLogger(logger_name)
+        third_party_logger.setLevel(log_level)
+    
+    # Create and return pipeline logger
+    logger = logging.getLogger('risk_pipeline')
+    logger.setLevel(logging.DEBUG)
+    
+    # Test the logging
+    logger.info(f"Logging initialized. Log file: {log_file_path}")
+    logger.debug("Debug logging is working")
+    logger.info("Third-party logging optimized for readability")
+    
+    return logger
+
+# =============================================================================
+# FIX: Add performance timing to key methods
+# =============================================================================
+def log_execution_time(func):
+    """Decorator to log function execution time"""
+    def wrapper(*args, **kwargs):
+        start_time = datetime.now()
+        
+        # Get logger from the instance if it's a method
+        if len(args) > 0 and hasattr(args[0], 'logger'):
+            logger = args[0].logger
+        else:
+            logger = logging.getLogger(f'{func.__module__}.{func.__name__}')
+        
+        logger.debug(f"⏱️ Starting {func.__name__}")
+        
+        try:
+            result = func(*args, **kwargs)
+            execution_time = (datetime.now() - start_time).total_seconds()
+            logger.info(f"✅ {func.__name__} completed in {execution_time:.2f} seconds")
+            return result
+        except Exception as e:
+            execution_time = (datetime.now() - start_time).total_seconds()
+            logger.error(f"❌ {func.__name__} failed after {execution_time:.2f} seconds: {e}")
+            raise
+    
+    return wrapper
+
+# Initialize the logger
+logger = setup_logging()
 
 @dataclass
 class AssetConfig:
@@ -72,21 +166,30 @@ class DataLoader:
     def __init__(self, cache_dir: str = 'data_cache'):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
+        self.logger = logging.getLogger('risk_pipeline.DataLoader')
+        self.logger.info(f"DataLoader initialized with cache_dir: {cache_dir}")
         
     def download_data(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
         """Download or load cached data for multiple symbols"""
         data = {}
         
+        self.logger.info(f"Starting data download for {len(symbols)} symbols: {symbols}")
+        self.logger.debug(f"Date range: {start_date} to {end_date}")
+        
         for symbol in tqdm(symbols, desc="Downloading data"):
             cache_file = self.cache_dir / f"{symbol.replace('^', '')}_data.pkl"
             
             if cache_file.exists():
-                logger.info(f"Loading cached data for {symbol}")
-                data[symbol] = pd.read_pickle(cache_file)
-            else:
-                logger.info(f"Downloading data for {symbol}")
+                self.logger.info(f"Loading cached data for {symbol}")
                 try:
-                    # Download the data for a single ticker
+                    data[symbol] = pd.read_pickle(cache_file)
+                    self.logger.debug(f"{symbol} - Loaded from cache, shape: {data[symbol].shape}")
+                except Exception as e:
+                    self.logger.error(f"Failed to load cached data for {symbol}: {e}")
+                    continue
+            else:
+                self.logger.info(f"Downloading data for {symbol}")
+                try:
                     df = yf.download(
                         tickers=symbol,
                         start=start_date,
@@ -94,55 +197,38 @@ class DataLoader:
                         progress=False,
                         auto_adjust=False
                     )
-
-                    # Debug: Print the full MultiIndex structure
+                    self.logger.debug(f"{symbol} - Download successful, shape: {df.shape}")
+                    self.logger.info(f"{symbol} - Successfully downloaded with shape {df.shape}")
                     if isinstance(df.columns, pd.MultiIndex):
-                        logger.info(f"{symbol} - Original MultiIndex levels: {df.columns.levels}")
-                        logger.info(f"{symbol} - Original MultiIndex names: {df.columns.names}")
-                        logger.info(f"{symbol} - Original columns: {df.columns.tolist()}")
-                        
-                        # Drop the ticker level (level 0) to get field names
-                        df.columns = df.columns.droplevel(0)
-                        logger.info(f"{symbol} - Flattened columns: {df.columns.tolist()}")
-                    else:
-                        logger.info(f"{symbol} - Flat columns: {df.columns.tolist()}")
-                    
-                    # Validate we have the required columns
-                    if 'Close' not in df.columns:
-                        logger.error(f"{symbol} - ❌ Still missing 'Close' column even after flattening.")
+                        df.columns = df.columns.droplevel(1)
+                    if 'Close' not in df.columns and 'Adj Close' not in df.columns:
+                        self.logger.error(f"{symbol} - Missing both 'Close' and 'Adj Close' columns")
                         continue
-                        
+                    if df.empty or df.isna().all().all():
+                        self.logger.warning(f"{symbol} - Downloaded data is empty or all NaN")
+                        continue
                     df.to_pickle(cache_file)
                     data[symbol] = df
-                    
-                    # Debug statement to verify columns
-                    logger.info(f"{symbol} - Final columns: {df.columns.tolist()}")
                 except Exception as e:
-                    logger.error(f"Error downloading {symbol}: {e}")
-            
-            # Log data shape and columns after download/load
-            if symbol in data:
-                df = data[symbol]
-                logger.info(f"{symbol} - Downloaded shape: {df.shape}, Columns: {df.columns.tolist()}")
-                if df.empty or df.isna().all().all():
-                    logger.warning(f"⚠️ {symbol} - WARNING: Downloaded DataFrame is empty or all NaNs.")
-                    
-        # Download VIX data
+                    self.logger.error(f"Error downloading {symbol}: {e}")
+                    continue
+        
+        # Handle VIX separately (same logic)
         vix_cache = self.cache_dir / "VIX_data.pkl"
         if vix_cache.exists():
             data['VIX'] = pd.read_pickle(vix_cache)
         else:
-            logger.info("Downloading VIX data")
-            vix_data = yf.download('^VIX', start=start_date, end=end_date, progress=False)
-            # Fix VIX data columns if needed
-            if isinstance(vix_data.columns, pd.MultiIndex):
-                logger.info("VIX - Original MultiIndex levels: {vix_data.columns.levels}")
-                logger.info("VIX - Original MultiIndex names: {vix_data.columns.names}")
-                vix_data.columns = vix_data.columns.droplevel(0)  # Drop the TICKER level
-                logger.info(f"VIX - Flattened columns: {vix_data.columns.tolist()}")
-            vix_data.to_pickle(vix_cache)
-            data['VIX'] = vix_data
-            
+            self.logger.info("Downloading VIX data")
+            try:
+                vix_data = yf.download('^VIX', start=start_date, end=end_date, progress=False)
+                if isinstance(vix_data.columns, pd.MultiIndex):
+                    vix_data.columns = vix_data.columns.droplevel(1)
+                vix_data.to_pickle(vix_cache)
+                data['VIX'] = vix_data
+                self.logger.info("VIX data downloaded successfully")
+            except Exception as e:
+                self.logger.error(f"Error downloading VIX data: {e}")
+        
         return data
 
 class FeatureEngineer:
@@ -150,12 +236,14 @@ class FeatureEngineer:
     
     def __init__(self, config: AssetConfig):
         self.config = config
+        self.logger = logging.getLogger('risk_pipeline.FeatureEngineer')
+        self.logger.info("FeatureEngineer initialized")
         
     def calculate_log_returns(self, prices: pd.Series) -> pd.Series:
         """Calculate log returns"""
         returns = np.log(prices / prices.shift(1))
         if returns.dropna().empty:
-            logger.warning(f"⚠️ Log returns are empty or invalid — check input prices:\n{prices.head()}")
+            self.logger.warning(f"⚠️ Log returns are empty or invalid — check input prices:\n{prices.head()}")
         return returns
     
     def calculate_volatility(self, returns: pd.Series, window: int) -> pd.Series:
@@ -164,7 +252,8 @@ class FeatureEngineer:
     
     def create_technical_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create technical features as specified in thesis"""
-        logger.info(f"Creating technical features from {df.shape[0]} rows")
+        self.logger.info(f"Creating technical features from {df.shape[0]} rows")
+        self.logger.debug(f"Input columns: {df.columns.tolist()}")
         features = pd.DataFrame(index=df.index)
         
         # Use Adj Close if available, otherwise fall back to Close
@@ -179,22 +268,28 @@ class FeatureEngineer:
         # Lagged returns (Lag1, Lag2, Lag3)
         for i in range(1, 4):
             features[f'Lag{i}'] = returns.shift(i)
+            self.logger.debug(f"Created Lag{i} feature")
         
         # Rate of Change over 5 days (ROC5)
         features['ROC5'] = (df[price_col] / df[price_col].shift(5) - 1) * 100
+        self.logger.debug("Created ROC5 feature")
         
         # Moving Averages (MA10, MA50)
         features['MA10'] = df[price_col].rolling(window=self.config.MA_SHORT).mean()
         features['MA50'] = df[price_col].rolling(window=self.config.MA_LONG).mean()
+        self.logger.debug("Created moving average features (MA10, MA50)")
         
         # Rolling Standard Deviation (RollingStd5)
         features['RollingStd5'] = returns.rolling(window=self.config.VOLATILITY_WINDOW).std()
+        self.logger.debug("Created RollingStd5 feature")
         
         # MA Ratio (MA10/MA50)
         features['MA_ratio'] = features['MA10'] / features['MA50']
+        self.logger.debug("Created MA_ratio feature")
         
-        logger.info(f"✅ Features created: {features.shape[1]} columns, {features.dropna().shape[0]} valid rows")
-        logger.debug(f"Feature preview:\n{features.head(3)}")
+        valid_rows = features.dropna().shape[0]
+        self.logger.info(f"✅ Features created: {features.shape[1]} columns, {valid_rows} valid rows")
+        self.logger.debug(f"All feature columns: {features.columns.tolist()}")
         return features
     
     def add_vix_features(self, features: pd.DataFrame, vix_data: pd.DataFrame) -> pd.DataFrame:
@@ -215,27 +310,30 @@ class FeatureEngineer:
     
     def calculate_correlations(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """Calculate inter-asset correlations"""
+        self.logger.info("Starting correlation calculation")
         correlations = pd.DataFrame()
         
         # Extract returns for correlation calculation
         returns = {}
         for symbol, df in data.items():
             if symbol != 'VIX':
+                # Use fallback logic for price column
                 price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
 
                 if price_col in df.columns and not df[price_col].dropna().empty:
                     log_ret = self.calculate_log_returns(df[price_col])
                     if isinstance(log_ret, pd.Series) and not log_ret.dropna().empty:
                         returns[symbol] = log_ret
-                        logger.info(f"✅ {symbol} - Valid log return series with {log_ret.dropna().shape[0]} non-NaN values")
+                        self.logger.info(f"✅ {symbol} - Valid return series with {log_ret.dropna().shape[0]} non-NaN values")
                     else:
-                        logger.warning(f"⚠️ {symbol} - Log returns are empty after calculation")
+                        self.logger.warning(f"⚠️ {symbol} - Log returns are empty after calculation")
                 else:
-                    logger.warning(f"⚠️ {symbol} - Missing or empty price column '{price_col}'")
+                    self.logger.warning(f"⚠️ {symbol} - Missing or empty price column '{price_col}'")
         
-        if not returns:
-            raise ValueError("No valid return series found. Correlation calculation skipped.")
-            
+        if len(returns) < 2:
+            self.logger.warning("Insufficient assets for correlation calculation. Skipping correlations.")
+            return pd.DataFrame()  # Return empty DataFrame instead of raising error
+        
         returns_df = pd.DataFrame(returns)
         
         # Calculate rolling correlations as specified in thesis
@@ -251,6 +349,8 @@ class FeatureEngineer:
             correlations['BHP_IOZ_corr'] = returns_df['BHP.AX'].rolling(
                 window=self.config.CORRELATION_WINDOW
             ).corr(returns_df['IOZ.AX'])
+        
+        self.logger.info(f"Created correlation features: {correlations.columns.tolist()}")
         return correlations
     
     def create_regime_labels(self, returns: pd.Series, window: int = 60) -> pd.Series:
@@ -272,9 +372,52 @@ class FeatureEngineer:
     
     def create_volatility_labels(self, volatility: pd.Series) -> pd.Series:
         """Create volatility regime labels using quantile binning"""
-        # Use quantiles to create balanced classes
-        labels = pd.qcut(volatility, q=3, labels=['Low', 'Medium', 'High'])
-        return labels
+        self.logger.debug(f"Creating volatility labels for {len(volatility)} samples")
+        
+        if len(volatility) == 0:
+            self.logger.error("Cannot create volatility labels: empty volatility series")
+            return pd.Series(dtype='object')
+        
+        if volatility.isna().all():
+            self.logger.error("Cannot create volatility labels: all values are NaN")
+            return pd.Series(dtype='object')
+        
+        # Remove any remaining NaN values
+        clean_volatility = volatility.dropna()
+        
+        if len(clean_volatility) < 3:
+            self.logger.warning(f"Insufficient data for quantile binning: {len(clean_volatility)} samples")
+            # Create simple labels based on mean
+            mean_vol = clean_volatility.mean()
+            labels = pd.Series(index=clean_volatility.index, dtype='object')
+            labels[clean_volatility <= mean_vol] = 'Low'
+            labels[clean_volatility > mean_vol] = 'High'
+            # Add medium category for middle values
+            median_vol = clean_volatility.median()
+            mask = (clean_volatility > median_vol * 0.9) & (clean_volatility <= median_vol * 1.1)
+            labels[mask] = 'Medium'
+            return labels
+        
+        try:
+            # Use quantiles to create balanced classes
+            labels = pd.qcut(clean_volatility, q=3, labels=['Low', 'Medium', 'High'], duplicates='drop')
+            self.logger.debug(f"Quantile-based labels created: {labels.value_counts().to_dict()}")
+            return labels
+            
+        except Exception as e:
+            self.logger.warning(f"Quantile binning failed: {e}. Using percentile-based approach")
+            
+            # Fallback to percentile-based labeling
+            p33 = clean_volatility.quantile(0.33)
+            p67 = clean_volatility.quantile(0.67)
+            
+            labels = pd.Series(index=clean_volatility.index, dtype='object')
+            labels[clean_volatility <= p33] = 'Low'
+            labels[(clean_volatility > p33) & (clean_volatility <= p67)] = 'Medium'
+            labels[clean_volatility > p67] = 'High'
+            
+            self.logger.debug(f"Percentile-based labels created: {labels.value_counts().to_dict()}")
+            return labels
 
 class ModelFactory:
     """Factory class for creating models"""
@@ -389,27 +532,79 @@ class WalkForwardValidator:
     def __init__(self, n_splits: int = 5, test_size: int = 252):
         self.n_splits = n_splits
         self.test_size = test_size
+        self.logger = logging.getLogger('risk_pipeline.WalkForwardValidator')
+        self.logger.info(f"WalkForwardValidator initialized: {n_splits} splits, test_size={test_size}")
         
     def split(self, X: pd.DataFrame) -> List[Tuple[pd.Index, pd.Index]]:
         """Generate train/test indices for walk-forward validation"""
         n_samples = len(X)
         splits = []
         
-        # Calculate size of each fold
-        fold_size = (n_samples - self.test_size) // self.n_splits
+        self.logger.info(f"WalkForward: Total samples={n_samples}, n_splits={self.n_splits}, test_size={self.test_size}")
         
-        for i in range(self.n_splits):
+        # Adjust for small datasets (like quick test)
+        if n_samples < self.test_size:
+            # For very small datasets, use a smaller test size
+            adjusted_test_size = max(20, n_samples // 4)  # At least 20 samples or 25% of data
+            self.logger.warning(f"Dataset too small. Adjusting test_size from {self.test_size} to {adjusted_test_size}")
+        else:
+            adjusted_test_size = self.test_size
+            
+        # Ensure we have enough data for at least one split
+        min_train_size = 60  # Minimum training samples needed for meaningful models
+        
+        if n_samples < min_train_size + adjusted_test_size:
+            self.logger.warning(f"Dataset too small for {self.n_splits} splits. Reducing to 1 split.")
+            # Single split with minimum viable sizes
+            train_size = max(min_train_size, n_samples - adjusted_test_size)
+            test_start = train_size
+            test_end = n_samples
+            
+            if test_start < test_end:
+                train_idx = X.index[:train_size]
+                test_idx = X.index[test_start:test_end]
+                splits.append((train_idx, test_idx))
+                self.logger.info(f"Single split: Train={len(train_idx)}, Test={len(test_idx)}")
+            
+            return splits
+        
+        # Calculate size of each fold for normal case
+        available_for_splits = n_samples - adjusted_test_size
+        fold_size = available_for_splits // self.n_splits
+        
+        # Ensure minimum fold size
+        if fold_size < min_train_size // 2:
+            # Reduce number of splits
+            max_splits = available_for_splits // (min_train_size // 2)
+            actual_n_splits = min(self.n_splits, max_splits, 3)  # Cap at 3 for quick test
+            self.logger.warning(f"Reducing splits from {self.n_splits} to {actual_n_splits} due to data constraints")
+        else:
+            actual_n_splits = self.n_splits
+        
+        # Recalculate fold size
+        fold_size = available_for_splits // actual_n_splits
+        
+        for i in range(actual_n_splits):
             train_end = fold_size * (i + 1)
             test_start = train_end
-            test_end = min(test_start + self.test_size, n_samples)
+            test_end = min(test_start + adjusted_test_size, n_samples)
             
-            if test_end > n_samples:
+            if test_end > n_samples or test_start >= test_end:
                 break
                 
             train_idx = X.index[:train_end]
             test_idx = X.index[test_start:test_end]
             
-            splits.append((train_idx, test_idx))
+            # Ensure minimum sizes
+            if len(train_idx) >= min_train_size and len(test_idx) >= 10:
+                splits.append((train_idx, test_idx))
+                self.logger.info(f"Split {i+1}: Train={len(train_idx)}, Test={len(test_idx)}")
+            else:
+                self.logger.warning(f"Split {i+1} skipped: insufficient data (Train={len(train_idx)}, Test={len(test_idx)})")
+                break
+        
+        if not splits:
+            self.logger.error("No valid splits generated!")
             
         return splits
 
@@ -418,6 +613,7 @@ class RiskPipeline:
     
     def __init__(self, config: AssetConfig = AssetConfig()):
         self.config = config
+        self.logger = logging.getLogger('risk_pipeline.RiskPipeline')
         self.data_loader = DataLoader()
         self.feature_engineer = FeatureEngineer(config)
         self.model_factory = ModelFactory()
@@ -428,99 +624,266 @@ class RiskPipeline:
         self.results = {}
         self.models = {}
         self.scalers = {}
+        self.logger.info("RiskPipeline initialized successfully")
         
+    @log_execution_time
     def run_pipeline(self, assets: List[str] = None, skip_correlations: bool = False, debug: bool = False):
-        """Execute the complete pipeline"""
+        """Execute the complete pipeline with enhanced timing"""
+        start_time = datetime.now()
+        
         if debug:
             logging.getLogger().setLevel(logging.DEBUG)
+            self.logger.debug("Debug mode enabled")
+            
         if assets is None:
             assets = self.config.ALL_ASSETS
         
-        logger.info("Starting RiskPipeline execution...")
+        self.logger.info("=" * 80)
+        self.logger.info("STARTING RISK PIPELINE EXECUTION")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Processing assets: {assets}")
+        self.logger.info(f"Date range: {self.config.START_DATE} to {self.config.END_DATE}")
+        self.logger.info(f"Walk-forward splits: {self.config.WALK_FORWARD_SPLITS}")
+        self.logger.info(f"Execution started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Step 1: Load data
-        logger.info("Step 1: Loading data...")
-        raw_data = self.data_loader.download_data(
-            assets + ['^VIX'], 
-            self.config.START_DATE, 
-            self.config.END_DATE
-        )
-        
-        # Step 2: Feature engineering for each asset
-        logger.info("Step 2: Engineering features...")
-        processed_data = {}
-        
-        for asset in assets:
-            if asset in raw_data:
-                logger.info(f"Processing features for {asset}")
-                
-                # Create technical features
-                features = self.feature_engineer.create_technical_features(raw_data[asset])
-                
-                # Add VIX features
-                if '^VIX' in raw_data:
-                    features = self.feature_engineer.add_vix_features(features, raw_data['^VIX'])
-                
-                # Add correlation features if not skipped
-                if not skip_correlations:
+        try:
+            # Step 1: Load data
+            step_start = datetime.now()
+            self.logger.info("Step 1: Loading data...")
+            raw_data = self.data_loader.download_data(
+                assets + ['^VIX'], 
+                self.config.START_DATE, 
+                self.config.END_DATE
+            )
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 1 completed in {step_time:.2f} seconds - Loaded {len(raw_data)} datasets")
+            
+            # Step 2: Feature engineering for each asset
+            step_start = datetime.now()
+            self.logger.info("Step 2: Engineering features...")
+            processed_data = {}
+
+            for asset in assets:
+                if asset in raw_data:
+                    asset_start = datetime.now()
+                    self.logger.info(f"Processing features for {asset}")
+                    
+                    # Create technical features
+                    features = self.feature_engineer.create_technical_features(raw_data[asset])
+                    self.logger.debug(f"{asset} - Technical features shape: {features.shape}")
+                    
+                    # Add VIX features
+                    if '^VIX' in raw_data:
+                        features = self.feature_engineer.add_vix_features(features, raw_data['^VIX'])
+                        self.logger.debug(f"{asset} - Added VIX features")
+                    
+                    # Add correlation features if not skipped
+                    if not skip_correlations:
+                        try:
+                            correlations = self.feature_engineer.calculate_correlations(raw_data)
+                            for col in correlations.columns:
+                                if col in correlations:
+                                    features[col] = correlations[col]
+                            self.logger.debug(f"{asset} - Added correlation features: {correlations.columns.tolist()}")
+                        except Exception as e:
+                            self.logger.warning(f"Skipping correlation features for {asset}: {e}")
+                    
+                    # ===== FIX: Create labels BEFORE cleaning data =====
+                    price_col = 'Adj Close' if 'Adj Close' in raw_data[asset].columns else 'Close'
+                    returns = self.feature_engineer.calculate_log_returns(raw_data[asset][price_col])
+                    
+                    # Create regime labels
+                    self.logger.debug(f"{asset} - Creating regime labels...")
+                    features['Regime'] = self.feature_engineer.create_regime_labels(returns)
+                    self.logger.debug(f"{asset} - Regime labels created")
+                    
+                    # Create volatility labels - CRITICAL FIX
+                    self.logger.debug(f"{asset} - Creating volatility labels...")
                     try:
-                        correlations = self.feature_engineer.calculate_correlations(raw_data)
-                        for col in correlations.columns:
-                            if col in correlations:
-                                features[col] = correlations[col]
-                    except ValueError as e:
-                        logger.warning(f"Skipping correlation features due to: {e}")
+                        # Make sure we have volatility data before creating labels
+                        if 'Volatility5D' in features.columns:
+                            volatility_series = features['Volatility5D'].dropna()
+                            if len(volatility_series) > 0:
+                                # Create labels using the clean volatility data
+                                volatility_labels = self.feature_engineer.create_volatility_labels(volatility_series)
+                                
+                                # Align the labels back to the original index
+                                features['VolatilityLabel'] = None  # Initialize with None
+                                features.loc[volatility_series.index, 'VolatilityLabel'] = volatility_labels
+                                
+                                self.logger.debug(f"{asset} - Volatility labels created: {features['VolatilityLabel'].value_counts().to_dict()}")
+                            else:
+                                self.logger.error(f"{asset} - No valid volatility data for label creation")
+                                continue
+                        else:
+                            self.logger.error(f"{asset} - Missing Volatility5D column")
+                            continue
+                            
+                    except Exception as e:
+                        self.logger.error(f"{asset} - Failed to create volatility labels: {e}", exc_info=True)
+                        continue
+                    
+                    # Verify all required columns exist before cleaning
+                    required_columns = ['Volatility5D', 'VolatilityLabel', 'Regime']
+                    missing_columns = [col for col in required_columns if col not in features.columns]
+                    
+                    if missing_columns:
+                        self.logger.error(f"{asset} - Missing required columns: {missing_columns}")
+                        continue
+                    
+                    # Clean data (remove NaNs)
+                    original_shape = features.shape
+                    features = features.dropna()
+                    self.logger.debug(f"{asset} - Data cleaned: {original_shape} -> {features.shape}")
+                    
+                    # Verify we still have data after cleaning
+                    if features.empty:
+                        self.logger.error(f"{asset} - No data remaining after cleaning")
+                        continue
+                    
+                    # Verify VolatilityLabel has valid values
+                    vol_label_counts = features['VolatilityLabel'].value_counts()
+                    if vol_label_counts.empty:
+                        self.logger.error(f"{asset} - No valid VolatilityLabel values after cleaning")
+                        continue
+                    
+                    self.logger.info(f"{asset} - Final processed data shape: {features.shape}")
+                    self.logger.debug(f"{asset} - VolatilityLabel distribution: {vol_label_counts.to_dict()}")
+                    
+                    processed_data[asset] = features
+                    
+                    asset_time = (datetime.now() - asset_start).total_seconds()
+                    self.logger.debug(f"{asset} feature engineering completed in {asset_time:.2f} seconds")
+
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 2 completed in {step_time:.2f} seconds")
+            
+            # Step 3: Model training and evaluation
+            step_start = datetime.now()
+            self.logger.info("Step 3: Training and evaluating models...")
+
+            total_models_trained = 0
+            for asset, data in processed_data.items():
+                self.logger.info(f"\nProcessing {asset}...")
+                self.results[asset] = {}
                 
-                # Create labels
-                price_col = 'Adj Close' if 'Adj Close' in raw_data[asset].columns else 'Close'
-                returns = self.feature_engineer.calculate_log_returns(raw_data[asset][price_col])
-                features['Regime'] = self.feature_engineer.create_regime_labels(returns)
-                features['VolatilityLabel'] = self.feature_engineer.create_volatility_labels(
-                    features['Volatility5D'].dropna()
-                )
+                # Prepare features and targets with validation
+                feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
+                              'RollingStd5', 'MA_ratio', 'VIX', 'VIX_change']
                 
-                # Clean data
-                features = features.dropna()
-                processed_data[asset] = features
+                # Add correlation features if available
+                for col in ['AAPL_GSPC_corr', 'IOZ_CBA_corr', 'BHP_IOZ_corr']:
+                    if col in data.columns:
+                        feature_cols.append(col)
                 
-        # Step 3: Model training and evaluation
-        logger.info("Step 3: Training and evaluating models...")
-        
-        for asset, data in processed_data.items():
-            logger.info(f"\nProcessing {asset}...")
-            self.results[asset] = {}
+                # Validate feature columns exist
+                available_features = [col for col in feature_cols if col in data.columns]
+                missing_features = [col for col in feature_cols if col not in data.columns]
+                
+                if missing_features:
+                    self.logger.warning(f"{asset} - Missing features: {missing_features}")
+                
+                self.logger.debug(f"{asset} - Using features: {available_features}")
+                
+                # Validate required columns exist
+                required_cols = ['Volatility5D', 'VolatilityLabel']
+                missing_required = [col for col in required_cols if col not in data.columns]
+                
+                if missing_required:
+                    self.logger.error(f"{asset} - Missing required columns: {missing_required}. Skipping asset.")
+                    continue
+                
+                try:
+                    X = data[available_features]
+                    y_reg = data['Volatility5D']
+                    
+                    # Validate VolatilityLabel before mapping
+                    vol_labels = data['VolatilityLabel']
+                    self.logger.debug(f"{asset} - VolatilityLabel unique values: {vol_labels.unique()}")
+                    
+                    # Check for valid label values
+                    valid_labels = {'Low', 'Medium', 'High'}
+                    actual_labels = set(vol_labels.dropna().unique())
+                    
+                    if not actual_labels.issubset(valid_labels):
+                        self.logger.error(f"{asset} - Invalid volatility labels: {actual_labels}. Expected: {valid_labels}")
+                        continue
+                    
+                    # Map labels to numbers
+                    y_clf = vol_labels.map({'Low': 0, 'Medium': 1, 'High': 2})
+                    
+                    # Validate we have valid data
+                    if X.empty or y_reg.empty or y_clf.empty:
+                        self.logger.error(f"{asset} - Empty data after processing. Skipping.")
+                        continue
+                    
+                    # Check for NaN values
+                    if X.isna().any().any():
+                        self.logger.warning(f"{asset} - Features contain NaN values")
+                        
+                    if y_reg.isna().any():
+                        self.logger.warning(f"{asset} - Regression target contains NaN values")
+                        
+                    if y_clf.isna().any():
+                        self.logger.warning(f"{asset} - Classification target contains NaN values")
+                    
+                    self.logger.info(f"{asset} - Feature matrix shape: {X.shape}, Regression target: {y_reg.shape}, Classification target: {y_clf.shape}")
+                    
+                    # Run regression models
+                    self.logger.info(f"Training regression models for {asset}...")
+                    self.results[asset]['regression'] = self._run_regression_models(X, y_reg, asset)
+                    
+                    # Run classification models
+                    self.logger.info(f"Training classification models for {asset}...")
+                    self.results[asset]['classification'] = self._run_classification_models(X, y_clf, asset)
+                    
+                    # Count models trained
+                    asset_models = len(self.results[asset]['regression']) + len(self.results[asset]['classification'])
+                    total_models_trained += asset_models
+                    self.logger.debug(f"{asset}: Trained {asset_models} models")
+                    
+                except Exception as e:
+                    self.logger.error(f"{asset} - Model training failed: {e}", exc_info=True)
+                    continue
             
-            # Prepare features and targets
-            feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
-                          'RollingStd5', 'MA_ratio', 'VIX', 'VIX_change']
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 3 completed in {step_time:.2f} seconds - Trained {total_models_trained} models")
             
-            # Add correlation features if available
-            for col in ['AAPL_GSPC_corr', 'IOZ_CBA_corr', 'BHP_IOZ_corr']:
-                if col in data.columns:
-                    feature_cols.append(col)
+            # Step 4: SHAP analysis
+            step_start = datetime.now()
+            self.logger.info("Step 4: Generating SHAP interpretability analysis...")
+            self._generate_shap_analysis()
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 4 completed in {step_time:.2f} seconds")
             
-            X = data[feature_cols]
-            y_reg = data['Volatility5D']
-            y_clf = data['VolatilityLabel'].map({'Low': 0, 'Medium': 1, 'High': 2})
+            # Step 5: Save results
+            step_start = datetime.now()
+            self.logger.info("Step 5: Saving results...")
+            self._save_results()
+            step_time = (datetime.now() - step_start).total_seconds()
+            self.logger.info(f"✅ Step 5 completed in {step_time:.2f} seconds")
             
-            # Run regression models
-            logger.info(f"Training regression models for {asset}...")
-            self.results[asset]['regression'] = self._run_regression_models(X, y_reg, asset)
+            # Final summary
+            total_time = (datetime.now() - start_time).total_seconds()
+            self.logger.info("=" * 80)
+            self.logger.info("PIPELINE EXECUTION SUMMARY")
+            self.logger.info("=" * 80)
+            self.logger.info(f"Total execution time: {total_time:.2f} seconds ({total_time/60:.1f} minutes)")
+            self.logger.info(f"Assets processed: {len(processed_data)}")
+            self.logger.info(f"Models trained: {total_models_trained}")
+            self.logger.info(f"Completion time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info("=" * 80)
+            self.logger.info("✅ Pipeline execution completed successfully!")
             
-            # Run classification models
-            logger.info(f"Training classification models for {asset}...")
-            self.results[asset]['classification'] = self._run_classification_models(X, y_clf, asset)
-            
-        # Step 4: Generate interpretability analysis
-        logger.info("Step 4: Generating SHAP interpretability analysis...")
-        self._generate_shap_analysis()
-        
-        # Step 5: Save results
-        logger.info("Step 5: Saving results...")
-        self._save_results()
-        
-        logger.info("Pipeline execution completed successfully!")
-        
+        except Exception as e:
+            total_time = (datetime.now() - start_time).total_seconds()
+            self.logger.error("=" * 80)
+            self.logger.error("PIPELINE EXECUTION FAILED")
+            self.logger.error("=" * 80)
+            self.logger.error(f"Error after {total_time:.2f} seconds: {e}")
+            self.logger.error("=" * 80)
+            raise
+    
     def _run_regression_models(self, X: pd.DataFrame, y: pd.Series, asset: str) -> Dict:
         """Run all regression models with walk-forward validation"""
         results = {}
@@ -534,7 +897,7 @@ class RiskPipeline:
         }
         
         for model_name, model_type in models.items():
-            logger.info(f"  Training {model_name}...")
+            self.logger.info(f"  Training {model_name}...")
             
             if model_name == 'Naive_MA':
                 # Naive baseline: use previous value
@@ -577,7 +940,7 @@ class RiskPipeline:
         }
         
         for model_name, model in models.items():
-            logger.info(f"  Training {model_name}...")
+            self.logger.info(f"  Training {model_name}...")
             
             if isinstance(model, str):
                 # Deep learning model
@@ -642,7 +1005,7 @@ class RiskPipeline:
                 actuals.extend(y_test.values)
                 
             except Exception as e:
-                logger.warning(f"ARIMA failed for fold: {e}")
+                self.logger.warning(f"ARIMA failed for fold: {e}")
                 # Use naive fallback
                 y_pred = [y_train.iloc[-1]] * len(test_idx)
                 predictions.extend(y_pred)
@@ -671,9 +1034,26 @@ class RiskPipeline:
         # Prepare data for LSTM (requires 3D input)
         sequence_length = 20  # Look back 20 days
         
+        self.logger.info(f"Starting DL model evaluation for {model_type} on {asset}")
+        self.logger.info(f"Total data shape: X={X.shape}, y={y.shape}")
+        self.logger.info(f"Number of CV splits: {len(splits)}")
+        
         for fold_idx, (train_idx, test_idx) in enumerate(splits):
+            self.logger.info(f"Processing fold {fold_idx + 1}/{len(splits)}")
+            
             X_train, X_test = X.loc[train_idx], X.loc[test_idx]
             y_train, y_test = y.loc[train_idx], y.loc[test_idx]
+            
+            self.logger.info(f"Fold {fold_idx + 1}: Train shape={X_train.shape}, Test shape={X_test.shape}")
+            
+            # Check if we have enough data
+            if len(X_train) < sequence_length + 10:  # Need minimum data for sequences + some buffer
+                self.logger.warning(f"Fold {fold_idx + 1}: Insufficient training data ({len(X_train)} samples), skipping")
+                continue
+            
+            if len(X_test) < sequence_length:
+                self.logger.warning(f"Fold {fold_idx + 1}: Insufficient test data ({len(X_test)} samples), skipping")
+                continue
             
             # Scale features
             scaler = StandardScaler()
@@ -688,79 +1068,141 @@ class RiskPipeline:
                 X_test_scaled, y_test.values, sequence_length
             )
             
+            self.logger.info(f"Fold {fold_idx + 1}: Sequences created - Train: {X_train_seq.shape}, Test: {X_test_seq.shape}")
+            
             if len(X_train_seq) == 0 or len(X_test_seq) == 0:
+                self.logger.warning(f"Fold {fold_idx + 1}: Empty sequences after creation, skipping")
                 continue
             
             # Create model
             input_shape = (X_train_seq.shape[1], X_train_seq.shape[2])
             
-            if model_type == 'lstm':
-                if task == 'regression':
-                    model = self.model_factory.create_lstm_regressor(input_shape)
-                else:
+            try:
+                if model_type == 'lstm':
+                    if task == 'regression':
+                        model = self.model_factory.create_lstm_regressor(input_shape)
+                    else:
+                        model = self.model_factory.create_lstm_classifier(input_shape)
+                elif model_type == 'stockmixer':
+                    model = self.model_factory.create_stockmixer(input_shape, task)
+                elif model_type == 'lstm_clf':
                     model = self.model_factory.create_lstm_classifier(input_shape)
-            elif model_type == 'stockmixer':
-                model = self.model_factory.create_stockmixer(input_shape, task)
-            elif model_type == 'lstm_clf':
-                model = self.model_factory.create_lstm_classifier(input_shape)
-            
-            # Train model
-            early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-            reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
-            
-            history = model.fit(
-                X_train_seq, y_train_seq,
-                epochs=50,
-                batch_size=32,
-                validation_split=0.2,
-                callbacks=[early_stop, reduce_lr],
-                verbose=0
-            )
-            
-            # Make predictions
-            y_pred = model.predict(X_test_seq, verbose=0)
-            
-            if task == 'classification':
-                y_pred = np.argmax(y_pred, axis=1)
+                
+                self.logger.info(f"Fold {fold_idx + 1}: Model created successfully")
+                
+                # Train model
+                early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+                reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=0.00001)
+                
+                # Reduce epochs for quick test
+                epochs = 20 if hasattr(self.config, 'START_DATE') and '2023' in self.config.START_DATE else 50
+                
+                history = model.fit(
+                    X_train_seq, y_train_seq,
+                    epochs=epochs,
+                    batch_size=16,  # Smaller batch size for limited data
+                    validation_split=0.2,
+                    callbacks=[early_stop, reduce_lr],
+                    verbose=0
+                )
+                
+                self.logger.info(f"Fold {fold_idx + 1}: Model training completed")
+                
+                # Make predictions
+                y_pred = model.predict(X_test_seq, verbose=0)
+                
+                if task == 'classification':
+                    y_pred = np.argmax(y_pred, axis=1)
+                else:
+                    y_pred = y_pred.flatten()
+                
+                self.logger.info(f"Fold {fold_idx + 1}: Predictions shape={y_pred.shape}, Test targets shape={y_test_seq.shape}")
+                
+                predictions.extend(y_pred)
+                actuals.extend(y_test_seq)
+                
+                # Save model for last fold (for SHAP analysis)
+                if fold_idx == len(splits) - 1:
+                    model_key = f"{asset}_{model_type}_{task}"
+                    self.models[model_key] = model
+                    self.scalers[model_key] = scaler
+                
+            except Exception as e:
+                self.logger.error(f"Fold {fold_idx + 1}: Model training failed: {e}")
+                continue
+        
+        # Check if we have any predictions
+        if len(predictions) == 0 or len(actuals) == 0:
+            self.logger.error(f"No predictions generated for {model_type} on {asset}")
+            # Return default metrics indicating failure
+            if task == 'regression':
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'),
+                    'R2': -float('inf'),
+                    'predictions': [],
+                    'actuals': []
+                }
             else:
-                y_pred = y_pred.flatten()
-            
-            predictions.extend(y_pred)
-            actuals.extend(y_test_seq)
-            
-            # Save model for last fold (for SHAP analysis)
-            if fold_idx == len(splits) - 1:
-                model_key = f"{asset}_{model_type}_{task}"
-                self.models[model_key] = model
-                self.scalers[model_key] = scaler
+                return {
+                    'Accuracy': 0.0,
+                    'F1': 0.0,
+                    'Precision': 0.0,
+                    'Recall': 0.0,
+                    'predictions': [],
+                    'actuals': []
+                }
+        
+        self.logger.info(f"Final results for {model_type}: {len(predictions)} predictions, {len(actuals)} actuals")
         
         # Calculate metrics
-        if task == 'regression':
-            rmse = np.sqrt(mean_squared_error(actuals, predictions))
-            mae = mean_absolute_error(actuals, predictions)
-            r2 = r2_score(actuals, predictions)
-            
-            return {
-                'RMSE': rmse,
-                'MAE': mae,
-                'R2': r2,
-                'predictions': predictions,
-                'actuals': actuals
-            }
-        else:
-            accuracy = accuracy_score(actuals, predictions)
-            f1 = f1_score(actuals, predictions, average='weighted')
-            precision = precision_score(actuals, predictions, average='weighted')
-            recall = recall_score(actuals, predictions, average='weighted')
-            
-            return {
-                'Accuracy': accuracy,
-                'F1': f1,
-                'Precision': precision,
-                'Recall': recall,
-                'predictions': predictions,
-                'actuals': actuals
-            }
+        try:
+            if task == 'regression':
+                rmse = np.sqrt(mean_squared_error(actuals, predictions))
+                mae = mean_absolute_error(actuals, predictions)
+                r2 = r2_score(actuals, predictions)
+                
+                return {
+                    'RMSE': rmse,
+                    'MAE': mae,
+                    'R2': r2,
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
+            else:
+                accuracy = accuracy_score(actuals, predictions)
+                f1 = f1_score(actuals, predictions, average='weighted', zero_division=0)
+                precision = precision_score(actuals, predictions, average='weighted', zero_division=0)
+                recall = recall_score(actuals, predictions, average='weighted', zero_division=0)
+                
+                return {
+                    'Accuracy': accuracy,
+                    'F1': f1,
+                    'Precision': precision,
+                    'Recall': recall,
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
+        except Exception as e:
+            self.logger.error(f"Metrics calculation failed for {model_type}: {e}")
+            # Return safe default values
+            if task == 'regression':
+                return {
+                    'RMSE': float('inf'),
+                    'MAE': float('inf'),
+                    'R2': -float('inf'),
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
+            else:
+                return {
+                    'Accuracy': 0.0,
+                    'F1': 0.0,
+                    'Precision': 0.0,
+                    'Recall': 0.0,
+                    'predictions': predictions,
+                    'actuals': actuals
+                }
     
     def _evaluate_sklearn_model(self, X: pd.DataFrame, y: pd.Series, 
                                model, asset: str, model_name: str) -> Dict:
@@ -820,52 +1262,181 @@ class RiskPipeline:
             
         return np.array(X_seq), np.array(y_seq)
     
+    @log_execution_time
     def _generate_shap_analysis(self):
         """Generate SHAP interpretability analysis"""
-        logger.info("Generating SHAP analysis...")
+        self.logger.info("Generating SHAP analysis...")
+        
+        shap_results = {}  # Track SHAP results
         
         # Focus on XGBoost for classification (as it's most interpretable)
-        for asset in self.config.ALL_ASSETS:
+        for asset in self.results.keys():
             model_key = f"{asset}_xgboost_classification"
             
             if model_key in self.models:
-                model = self.models[model_key]
-                scaler = self.scalers[model_key]
-                
-                # Get some test data
-                data = self.data_loader.download_data([asset], 
-                                                    self.config.START_DATE, 
-                                                    self.config.END_DATE)
-                features = self.feature_engineer.create_technical_features(data[asset])
-                
-                # Prepare features
-                feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
-                              'RollingStd5', 'MA_ratio', 'VIX', 'VIX_change']
-                
-                X = features[feature_cols].dropna().iloc[-100:]  # Last 100 samples
-                X_scaled = scaler.transform(X)
-                
-                # Create SHAP explainer
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(X_scaled)
-                
-                # Save SHAP plots
-                self._save_shap_plots(shap_values, X, asset)
-    
-    def _save_shap_plots(self, shap_values: np.ndarray, X: pd.DataFrame, asset: str):
-        """Save SHAP visualization plots"""
-        output_dir = Path('shap_plots')
-        output_dir.mkdir(exist_ok=True)
+                self.logger.info(f"Starting SHAP analysis for {asset}")
+                try:
+                    model = self.models[model_key]
+                    scaler = self.scalers[model_key]
+                    
+                    # Get some test data - reuse the processed data from the pipeline
+                    asset_data = self.data_loader.download_data([asset], 
+                                                              self.config.START_DATE, 
+                                                              self.config.END_DATE)
+                    
+                    if asset not in asset_data:
+                        self.logger.warning(f"No data available for {asset} in SHAP analysis")
+                        continue
+                    
+                    # Create technical features
+                    features = self.feature_engineer.create_technical_features(asset_data[asset])
+                    
+                    # Add VIX features if VIX data is available
+                    vix_data = self.data_loader.download_data(['^VIX'], 
+                                                            self.config.START_DATE, 
+                                                            self.config.END_DATE)
+                    if '^VIX' in vix_data:
+                        features = self.feature_engineer.add_vix_features(features, vix_data['^VIX'])
+                        self.logger.debug(f"{asset} - VIX features added successfully")
+                    
+                    # Use the EXACT same feature list as used during training
+                    base_feature_cols = ['Lag1', 'Lag2', 'Lag3', 'ROC5', 'MA10', 'MA50', 
+                                       'RollingStd5', 'MA_ratio']
+                    
+                    # Add VIX features if they exist
+                    vix_feature_cols = ['VIX', 'VIX_change']
+                    for col in vix_feature_cols:
+                        if col in features.columns:
+                            base_feature_cols.append(col)
+                    
+                    feature_cols = base_feature_cols
+                    self.logger.info(f"SHAP analysis for {asset}: Using features {feature_cols}")
+                    
+                    # Validate all features exist
+                    missing_features = [col for col in feature_cols if col not in features.columns]
+                    if missing_features:
+                        self.logger.warning(f"Missing features for {asset} SHAP analysis: {missing_features}")
+                        feature_cols = [col for col in feature_cols if col in features.columns]
+                    
+                    if not feature_cols:
+                        self.logger.warning(f"No valid features available for {asset} SHAP analysis")
+                        continue
+                    
+                    # Get the data
+                    X = features[feature_cols].dropna().iloc[-100:]  # Last 100 samples
+                    
+                    if X.empty:
+                        self.logger.warning(f"No valid data for {asset} SHAP analysis after dropna()")
+                        continue
+                    
+                    self.logger.debug(f"{asset} - SHAP data shape: {X.shape}")
+                    
+                    # Scale using the same scaler from training
+                    X_scaled = scaler.transform(X)
+                    self.logger.debug(f"{asset} - Features scaled for SHAP analysis")
+                    
+                    # Create SHAP explainer
+                    self.logger.info(f"{asset} - Creating SHAP explainer...")
+                    explainer = shap.TreeExplainer(model)
+                    self.logger.debug(f"{asset} - SHAP explainer created")
+                    
+                    # Calculate SHAP values
+                    self.logger.info(f"{asset} - Computing SHAP values...")
+                    shap_values = explainer.shap_values(X_scaled)
+                    self.logger.debug(f"{asset} - SHAP values computed, shape: {np.array(shap_values).shape}")
+                    
+                    # Save SHAP plots
+                    self.logger.info(f"{asset} - Generating SHAP plots...")
+                    plot_files = self._save_shap_plots(shap_values, X, asset)
+                    
+                    # Store results
+                    shap_results[asset] = {
+                        'feature_count': len(feature_cols),
+                        'sample_count': len(X),
+                        'plot_files': plot_files
+                    }
+                    
+                    self.logger.info(f"✅ SHAP analysis completed for {asset}")
+                    
+                except Exception as e:
+                    self.logger.error(f"SHAP analysis failed for {asset}: {e}", exc_info=True)
+                    continue
+            else:
+                self.logger.info(f"No XGBoost model available for {asset} - skipping SHAP analysis")
         
-        # Summary plot
-        plt.figure(figsize=(10, 6))
-        shap.summary_plot(shap_values[1], X, show=False)  # Class 1 (Medium volatility)
-        plt.title(f'SHAP Summary Plot - {asset}')
-        plt.tight_layout()
-        plt.savefig(output_dir / f'{asset}_shap_summary.png', dpi=300, bbox_inches='tight')
-        plt.close()
+        # Summary of SHAP analysis
+        if shap_results:
+            self.logger.info("="*50)
+            self.logger.info("SHAP ANALYSIS SUMMARY")
+            self.logger.info("="*50)
+            for asset, results in shap_results.items():
+                self.logger.info(f"{asset}: {results['feature_count']} features, "
+                               f"{results['sample_count']} samples, "
+                               f"{len(results['plot_files'])} plots generated")
+            self.logger.info("="*50)
+        else:
+            self.logger.warning("No SHAP analysis results generated")
+
+    @log_execution_time
+    def _save_shap_plots(self, shap_values: np.ndarray, X: pd.DataFrame, asset: str) -> list:
+        """Save SHAP visualization plots with enhanced logging"""
+        plot_files = []
         
-        logger.info(f"SHAP plots saved for {asset}")
+        try:
+            output_dir = Path('shap_plots')
+            output_dir.mkdir(exist_ok=True)
+            self.logger.debug(f"{asset} - SHAP plots directory: {output_dir}")
+            
+            # Handle different SHAP value formats
+            if isinstance(shap_values, list) and len(shap_values) > 1:
+                # Multi-class case - use class 1 (Medium volatility)
+                shap_vals_to_plot = shap_values[1]
+                self.logger.debug(f"{asset} - Using SHAP values for class 1 (Medium volatility)")
+            elif isinstance(shap_values, list):
+                # Single class or binary case
+                shap_vals_to_plot = shap_values[0]
+                self.logger.debug(f"{asset} - Using SHAP values for single class")
+            else:
+                # Single array case
+                shap_vals_to_plot = shap_values
+                self.logger.debug(f"{asset} - Using direct SHAP values")
+            
+            # Create figure
+            self.logger.debug(f"{asset} - Creating SHAP summary plot...")
+            plt.figure(figsize=(10, 8))
+            
+            # Create summary plot
+            shap.summary_plot(shap_vals_to_plot, X, show=False, plot_type='bar')
+            plt.title(f'SHAP Feature Importance - {asset}', fontsize=16, pad=20)
+            plt.xlabel('Mean |SHAP value|', fontsize=12)
+            plt.tight_layout()
+            
+            # Save plot
+            plot_path = output_dir / f'{asset}_shap_summary.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            plot_files.append(plot_path.name)
+            self.logger.debug(f"{asset} - Summary plot saved: {plot_path.name}")
+            
+            # Also create a detailed summary plot
+            self.logger.debug(f"{asset} - Creating detailed SHAP plot...")
+            plt.figure(figsize=(10, 8))
+            shap.summary_plot(shap_vals_to_plot, X, show=False)
+            plt.title(f'SHAP Value Distribution - {asset}', fontsize=16, pad=20)
+            plt.tight_layout()
+            
+            detailed_path = output_dir / f'{asset}_shap_detailed.png'
+            plt.savefig(detailed_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            plot_files.append(detailed_path.name)
+            self.logger.debug(f"{asset} - Detailed plot saved: {detailed_path.name}")
+            
+            self.logger.info(f"SHAP plots saved for {asset}: {', '.join(plot_files)}")
+            return plot_files
+            
+        except Exception as e:
+            self.logger.error(f"Failed to save SHAP plots for {asset}: {e}", exc_info=True)
+            return []
     
     def _save_results(self):
         """Save all results to files"""
@@ -877,18 +1448,55 @@ class RiskPipeline:
         
         # Check if results dataframe is empty
         if results_df.empty:
-            logger.warning("No results to save - results dataframe is empty")
-            return
+            self.logger.warning("No results to save - results dataframe is empty")
+            # Create a minimal CSV with headers
+            empty_df = pd.DataFrame(columns=['Asset', 'Task', 'Model', 'RMSE', 'MAE', 'R2', 'Accuracy', 'F1', 'Precision', 'Recall'])
+            empty_df.to_csv(output_dir / 'model_performance.csv', index=False)
             
-        results_df.to_csv(output_dir / 'model_performance.csv')
+            # Create a basic summary
+            with open(output_dir / 'summary_report.txt', 'w') as f:
+                f.write("="*80 + "\n")
+                f.write("VOLATILITY FORECASTING RESULTS SUMMARY\n")
+                f.write("="*80 + "\n\n")
+                f.write("No results were generated. This could be due to:\n")
+                f.write("- Insufficient data for model training\n")
+                f.write("- Model training failures\n")
+                f.write("- Data quality issues\n\n")
+                f.write("Check the log files for detailed error information.\n")
+            
+            return
+        
+        # Log summary of results
+        self.logger.info(f"Saving results: {len(results_df)} model evaluations across {len(results_df['Asset'].unique())} assets")
+        
+        results_df.to_csv(output_dir / 'model_performance.csv', index=False)
         
         # Save detailed results
         joblib.dump(self.results, output_dir / 'detailed_results.pkl')
         
-        # Generate summary report
-        self._generate_summary_report(results_df, output_dir)
+        # Generate summary report only if we have meaningful results
+        valid_results = results_df[
+            (results_df['R2'].notna() & (results_df['R2'] > -1)) |  # Valid R2 scores
+            (results_df['Accuracy'].notna() & (results_df['Accuracy'] > 0))  # Valid accuracy scores
+        ]
         
-        logger.info(f"Results saved to {output_dir}")
+        if not valid_results.empty:
+            self._generate_summary_report(results_df, output_dir)
+        else:
+            self.logger.warning("No meaningful results to generate summary report")
+            # Create a basic summary anyway
+            with open(output_dir / 'summary_report.txt', 'w') as f:
+                f.write("="*80 + "\n")
+                f.write("VOLATILITY FORECASTING RESULTS SUMMARY\n")
+                f.write("="*80 + "\n\n")
+                f.write("Models were trained but did not produce meaningful results.\n")
+                f.write("This could indicate:\n")
+                f.write("- Models need more training data\n")
+                f.write("- Hyperparameter tuning required\n")
+                f.write("- Feature engineering improvements needed\n\n")
+                f.write("See model_performance.csv for raw results.\n")
+        
+        self.logger.info(f"Results saved to {output_dir}")
     
     def _format_results_dataframe(self) -> pd.DataFrame:
         """Format results into a summary dataframe"""
@@ -903,20 +1511,40 @@ class RiskPipeline:
                         'Model': model
                     }
                     
-                    # Add metrics (excluding predictions)
+                    # Add metrics (excluding predictions and actuals)
                     for metric, value in metrics.items():
                         if metric not in ['predictions', 'actuals']:
+                            # Handle inf and -inf values
+                            if isinstance(value, float):
+                                if value == float('inf'):
+                                    value = None  # Will become NaN in pandas
+                                elif value == -float('inf'):
+                                    value = None
                             row[metric] = value
-                            
+                        
                     rows.append(row)
         
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        
+        # Log some statistics about the results
+        if not df.empty:
+            self.logger.info(f"Results summary: {len(df)} total evaluations")
+            if 'R2' in df.columns:
+                valid_r2 = df['R2'].dropna()
+                if not valid_r2.empty:
+                    self.logger.info(f"R2 scores - Mean: {valid_r2.mean():.3f}, Best: {valid_r2.max():.3f}")
+            if 'Accuracy' in df.columns:
+                valid_acc = df['Accuracy'].dropna()
+                if not valid_acc.empty:
+                    self.logger.info(f"Accuracy scores - Mean: {valid_acc.mean():.3f}, Best: {valid_acc.max():.3f}")
+        
+        return df
     
     def _generate_summary_report(self, results_df: pd.DataFrame, output_dir: Path):
         """Generate a summary report with visualizations"""
         # Check if results dataframe is empty
         if results_df.empty:
-            logger.warning("Cannot generate summary report - results dataframe is empty")
+            self.logger.warning("Cannot generate summary report - results dataframe is empty")
             return
             
         # Create visualizations
@@ -1015,7 +1643,16 @@ class RiskPipeline:
             f.write("Detailed results saved in 'model_performance.csv'\n")
             f.write("SHAP interpretability plots saved in 'shap_plots/'\n")
         
-        logger.info("Summary report generated")
+        self.logger.info("Summary report generated")
+
+def test_logging():
+    """Test function to verify logging is working"""
+    logger = logging.getLogger('test')
+    logger.debug("This is a DEBUG message")
+    logger.info("This is an INFO message")
+    logger.warning("This is a WARNING message")
+    logger.error("This is an ERROR message")
+    print("Logging test completed. Check the log file for all messages.")
 
 def main():
     """Main execution function"""
@@ -1039,4 +1676,5 @@ def main():
         raise
 
 if __name__ == "__main__":
-    main()
+    test_logging()
+    # main()  # Uncomment this to run the main pipeline

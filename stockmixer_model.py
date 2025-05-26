@@ -12,6 +12,12 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l1_l2
 import numpy as np
 from typing import Tuple, Optional, Dict
+import logging
+
+# Setup logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.addHandler(logging.NullHandler())
 
 
 class TemporalMixing(layers.Layer):
