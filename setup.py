@@ -72,10 +72,9 @@ class PipelineSetup:
         print("Installing requirements...")
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'])
         
-        # Install GPU-specific packages if requested
+        # Note: TensorFlow now includes GPU support by default if CUDA is properly configured
         if use_gpu:
-            print("Installing GPU support...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'tensorflow-gpu==2.13.0'])
+            print("Note: TensorFlow will automatically use GPU if CUDA is properly configured")
             
     def create_config_file(self):
         """Create default configuration file"""

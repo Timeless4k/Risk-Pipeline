@@ -1,0 +1,5 @@
+cd /mnt/c/Users/guru1/Documents/Github/Risk\ Pipeline
+source venv/bin/activate
+
+
+rm -rf data_cache/

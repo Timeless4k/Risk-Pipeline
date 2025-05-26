@@ -86,11 +86,36 @@ class DataLoader:
             else:
                 logger.info(f"Downloading data for {symbol}")
                 try:
-                    df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+                    # Download the data
+                    df = yf.download(
+                        tickers=symbol,
+                        start=start_date,
+                        end=end_date,
+                        progress=False,
+                        auto_adjust=False
+                    )
+
+                    # If columns are MultiIndex (as with single-ticker), fix them properly
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(1)  # ✅ This gives ['Open', 'High', ...]
+                        logger.info(f"{symbol} - Cleaned MultiIndex columns: {df.columns.tolist()}")
+                    else:
+                        logger.info(f"{symbol} - Flat columns: {df.columns.tolist()}")
+                        
                     df.to_pickle(cache_file)
                     data[symbol] = df
+                    
+                    # Debug statement to verify columns
+                    logger.info(f"{symbol} - Final columns: {df.columns.tolist()}")
                 except Exception as e:
                     logger.error(f"Error downloading {symbol}: {e}")
+            
+            # Log data shape and columns after download/load
+            if symbol in data:
+                df = data[symbol]
+                logger.info(f"{symbol} - Downloaded shape: {df.shape}, Columns: {df.columns.tolist()}")
+                if df.empty or df.isna().all().all():
+                    logger.warning(f"⚠️ {symbol} - WARNING: Downloaded DataFrame is empty or all NaNs.")
                     
         # Download VIX data
         vix_cache = self.cache_dir / "VIX_data.pkl"
@@ -112,7 +137,10 @@ class FeatureEngineer:
         
     def calculate_log_returns(self, prices: pd.Series) -> pd.Series:
         """Calculate log returns"""
-        return np.log(prices / prices.shift(1))
+        returns = np.log(prices / prices.shift(1))
+        if returns.dropna().empty:
+            logger.warning(f"⚠️ Log returns are empty or invalid — check input prices:\n{prices.head()}")
+        return returns
     
     def calculate_volatility(self, returns: pd.Series, window: int) -> pd.Series:
         """Calculate rolling volatility (standard deviation)"""
@@ -120,10 +148,14 @@ class FeatureEngineer:
     
     def create_technical_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create technical features as specified in thesis"""
+        logger.info(f"Creating technical features from {df.shape[0]} rows")
         features = pd.DataFrame(index=df.index)
         
+        # Use Adj Close if available, otherwise fall back to Close
+        price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+        
         # Calculate returns
-        returns = self.calculate_log_returns(df['Adj Close'])
+        returns = self.calculate_log_returns(df[price_col])
         
         # Target variable: 5-day volatility
         features['Volatility5D'] = self.calculate_volatility(returns, self.config.VOLATILITY_WINDOW)
@@ -133,11 +165,11 @@ class FeatureEngineer:
             features[f'Lag{i}'] = returns.shift(i)
         
         # Rate of Change over 5 days (ROC5)
-        features['ROC5'] = (df['Adj Close'] / df['Adj Close'].shift(5) - 1) * 100
+        features['ROC5'] = (df[price_col] / df[price_col].shift(5) - 1) * 100
         
         # Moving Averages (MA10, MA50)
-        features['MA10'] = df['Adj Close'].rolling(window=self.config.MA_SHORT).mean()
-        features['MA50'] = df['Adj Close'].rolling(window=self.config.MA_LONG).mean()
+        features['MA10'] = df[price_col].rolling(window=self.config.MA_SHORT).mean()
+        features['MA50'] = df[price_col].rolling(window=self.config.MA_LONG).mean()
         
         # Rolling Standard Deviation (RollingStd5)
         features['RollingStd5'] = returns.rolling(window=self.config.VOLATILITY_WINDOW).std()
@@ -145,12 +177,17 @@ class FeatureEngineer:
         # MA Ratio (MA10/MA50)
         features['MA_ratio'] = features['MA10'] / features['MA50']
         
+        logger.info(f"✅ Features created: {features.shape[1]} columns, {features.dropna().shape[0]} valid rows")
+        logger.debug(f"Feature preview:\n{features.head(3)}")
         return features
     
     def add_vix_features(self, features: pd.DataFrame, vix_data: pd.DataFrame) -> pd.DataFrame:
         """Add VIX-related features"""
+        # Use Adj Close if available, otherwise fall back to Close
+        vix_price_col = 'Adj Close' if 'Adj Close' in vix_data.columns else 'Close'
+        
         # Align VIX data with features index
-        vix_aligned = vix_data['Adj Close'].reindex(features.index, method='ffill')
+        vix_aligned = vix_data[vix_price_col].reindex(features.index, method='ffill')
         
         features['VIX'] = vix_aligned
         features['VIX_change'] = vix_aligned.pct_change()
@@ -168,30 +205,36 @@ class FeatureEngineer:
         returns = {}
         for symbol, df in data.items():
             if symbol != 'VIX':
-                returns[symbol] = self.calculate_log_returns(df['Adj Close'])
+                price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
+
+                if price_col in df.columns and not df[price_col].dropna().empty:
+                    log_ret = self.calculate_log_returns(df[price_col])
+                    if isinstance(log_ret, pd.Series) and not log_ret.dropna().empty:
+                        returns[symbol] = log_ret
+                        logger.info(f"✅ {symbol} - Valid log return series with {log_ret.dropna().shape[0]} non-NaN values")
+                    else:
+                        logger.warning(f"⚠️ {symbol} - Log returns are empty after calculation")
+                else:
+                    logger.warning(f"⚠️ {symbol} - Missing or empty price column '{price_col}'")
         
-        # Combine returns into single DataFrame
+        if not returns:
+            raise ValueError("No valid return series found. Correlation calculation skipped.")
+            
         returns_df = pd.DataFrame(returns)
         
         # Calculate rolling correlations as specified in thesis
-        # AAPL-GSPC correlation
         if 'AAPL' in returns_df.columns and '^GSPC' in returns_df.columns:
             correlations['AAPL_GSPC_corr'] = returns_df['AAPL'].rolling(
                 window=self.config.CORRELATION_WINDOW
             ).corr(returns_df['^GSPC'])
-        
-        # IOZ-CBA correlation
         if 'IOZ.AX' in returns_df.columns and 'CBA.AX' in returns_df.columns:
             correlations['IOZ_CBA_corr'] = returns_df['IOZ.AX'].rolling(
                 window=self.config.CORRELATION_WINDOW
             ).corr(returns_df['CBA.AX'])
-        
-        # BHP-IOZ correlation
         if 'BHP.AX' in returns_df.columns and 'IOZ.AX' in returns_df.columns:
             correlations['BHP_IOZ_corr'] = returns_df['BHP.AX'].rolling(
                 window=self.config.CORRELATION_WINDOW
             ).corr(returns_df['IOZ.AX'])
-        
         return correlations
     
     def create_regime_labels(self, returns: pd.Series, window: int = 60) -> pd.Series:
@@ -370,11 +413,13 @@ class RiskPipeline:
         self.models = {}
         self.scalers = {}
         
-    def run_pipeline(self, assets: List[str] = None):
+    def run_pipeline(self, assets: List[str] = None, skip_correlations: bool = False, debug: bool = False):
         """Execute the complete pipeline"""
+        if debug:
+            logging.getLogger().setLevel(logging.DEBUG)
         if assets is None:
             assets = self.config.ALL_ASSETS
-            
+        
         logger.info("Starting RiskPipeline execution...")
         
         # Step 1: Load data
@@ -400,14 +445,19 @@ class RiskPipeline:
                 if '^VIX' in raw_data:
                     features = self.feature_engineer.add_vix_features(features, raw_data['^VIX'])
                 
-                # Add correlation features
-                correlations = self.feature_engineer.calculate_correlations(raw_data)
-                for col in correlations.columns:
-                    if col in correlations:
-                        features[col] = correlations[col]
+                # Add correlation features if not skipped
+                if not skip_correlations:
+                    try:
+                        correlations = self.feature_engineer.calculate_correlations(raw_data)
+                        for col in correlations.columns:
+                            if col in correlations:
+                                features[col] = correlations[col]
+                    except ValueError as e:
+                        logger.warning(f"Skipping correlation features due to: {e}")
                 
                 # Create labels
-                returns = self.feature_engineer.calculate_log_returns(raw_data[asset]['Adj Close'])
+                price_col = 'Adj Close' if 'Adj Close' in raw_data[asset].columns else 'Close'
+                returns = self.feature_engineer.calculate_log_returns(raw_data[asset][price_col])
                 features['Regime'] = self.feature_engineer.create_regime_labels(returns)
                 features['VolatilityLabel'] = self.feature_engineer.create_volatility_labels(
                     features['Volatility5D'].dropna()
