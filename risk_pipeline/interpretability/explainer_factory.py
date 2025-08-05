@@ -1,0 +1,618 @@
+"""
+Explainer Factory for RiskPipeline - Comprehensive SHAP Analysis.
+
+This module provides a factory for creating appropriate SHAP explainers
+for different model types in the RiskPipeline.
+"""
+
+import logging
+import numpy as np
+import pandas as pd
+import shap
+import warnings
+from typing import Dict, List, Any, Optional, Union, Tuple
+from statsmodels.tsa.arima.model import ARIMA
+import tensorflow as tf
+from tensorflow.keras.models import Model
+import xgboost as xgb
+
+# Suppress SHAP warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='shap')
+
+logger = logging.getLogger(__name__)
+
+
+class ExplainerFactory:
+    """
+    Factory for creating appropriate SHAP explainers for different model types.
+    
+    Supports:
+    - ARIMA: Statistical interpretability and time series decomposition
+    - LSTM: DeepExplainer for sequence-based SHAP analysis
+    - StockMixer: DeepExplainer with pathway-specific analysis
+    - XGBoost: TreeExplainer for tree-based models
+    """
+    
+    def __init__(self, config: Any):
+        """
+        Initialize the explainer factory.
+        
+        Args:
+            config: Pipeline configuration object
+        """
+        self.config = config
+        self._explainers = {}
+        self._background_data = {}
+        
+        logger.info("ExplainerFactory initialized")
+    
+    def create_explainer(self,
+                        model: Any,
+                        model_type: str,
+                        task: str,
+                        X: Union[np.ndarray, pd.DataFrame],
+                        **kwargs) -> Any:
+        """
+        Create appropriate SHAP explainer for the given model.
+        
+        Args:
+            model: Trained model instance
+            model_type: Type of model ('arima', 'lstm', 'stockmixer', 'xgboost')
+            task: Task type ('regression' or 'classification')
+            X: Feature data for background
+            **kwargs: Additional arguments for specific explainers
+            
+        Returns:
+            SHAP explainer instance
+        """
+        logger.info(f"Creating SHAP explainer for {model_type} {task}")
+        
+        try:
+            if model_type == 'arima':
+                return self._create_arima_explainer(model, X, task, **kwargs)
+            elif model_type == 'lstm':
+                return self._create_lstm_explainer(model, X, task, **kwargs)
+            elif model_type == 'stockmixer':
+                return self._create_stockmixer_explainer(model, X, task, **kwargs)
+            elif model_type == 'xgboost':
+                return self._create_xgboost_explainer(model, X, task, **kwargs)
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
+                
+        except Exception as e:
+            logger.error(f"Failed to create explainer for {model_type}: {str(e)}")
+            raise
+    
+    def _create_arima_explainer(self,
+                               model: ARIMA,
+                               X: Union[np.ndarray, pd.DataFrame],
+                               task: str,
+                               **kwargs) -> 'ARIMAExplainer':
+        """
+        Create ARIMA-specific explainer for statistical interpretability.
+        
+        Args:
+            model: Fitted ARIMA model
+            X: Feature data
+            task: Task type
+            **kwargs: Additional arguments
+            
+        Returns:
+            ARIMAExplainer instance
+        """
+        return ARIMAExplainer(model, X, task, self.config)
+    
+    def _create_lstm_explainer(self,
+                              model: tf.keras.Model,
+                              X: Union[np.ndarray, pd.DataFrame],
+                              task: str,
+                              **kwargs) -> shap.DeepExplainer:
+        """
+        Create DeepExplainer for LSTM models.
+        
+        Args:
+            model: Trained LSTM model
+            X: Feature data
+            task: Task type
+            **kwargs: Additional arguments
+            
+        Returns:
+            DeepExplainer instance
+        """
+        # Prepare background data
+        background_data = self._prepare_deep_background_data(X, model_type='lstm')
+        
+        # Create DeepExplainer
+        explainer = shap.DeepExplainer(model, background_data)
+        
+        # Store for later use
+        explainer_key = f"lstm_{task}"
+        self._explainers[explainer_key] = explainer
+        self._background_data[explainer_key] = background_data
+        
+        return explainer
+    
+    def _create_stockmixer_explainer(self,
+                                    model: tf.keras.Model,
+                                    X: Union[np.ndarray, pd.DataFrame],
+                                    task: str,
+                                    **kwargs) -> 'StockMixerExplainer':
+        """
+        Create StockMixer-specific explainer with pathway analysis.
+        
+        Args:
+            model: Trained StockMixer model
+            X: Feature data
+            task: Task type
+            **kwargs: Additional arguments
+            
+        Returns:
+            StockMixerExplainer instance
+        """
+        return StockMixerExplainer(model, X, task, self.config)
+    
+    def _create_xgboost_explainer(self,
+                                 model: xgb.XGBModel,
+                                 X: Union[np.ndarray, pd.DataFrame],
+                                 task: str,
+                                 **kwargs) -> shap.TreeExplainer:
+        """
+        Create TreeExplainer for XGBoost models.
+        
+        Args:
+            model: Trained XGBoost model
+            X: Feature data
+            task: Task type
+            **kwargs: Additional arguments
+            
+        Returns:
+            TreeExplainer instance
+        """
+        # Create TreeExplainer
+        explainer = shap.TreeExplainer(model)
+        
+        # Store for later use
+        explainer_key = f"xgboost_{task}"
+        self._explainers[explainer_key] = explainer
+        
+        return explainer
+    
+    def _prepare_deep_background_data(self,
+                                     X: Union[np.ndarray, pd.DataFrame],
+                                     model_type: str) -> np.ndarray:
+        """
+        Prepare background data for deep learning explainers.
+        
+        Args:
+            X: Feature data
+            model_type: Type of model
+            
+        Returns:
+            Background data array
+        """
+        # Convert to numpy if needed
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+        
+        # For deep learning models, use a subset for background
+        n_samples = min(
+            getattr(self.config.shap, 'background_samples', 100),
+            len(X)
+        )
+        
+        # Sample background data
+        indices = np.random.choice(len(X), n_samples, replace=False)
+        background_data = X[indices]
+        
+        # Ensure proper shape for LSTM/StockMixer
+        if model_type in ['lstm', 'stockmixer'] and len(background_data.shape) == 2:
+            # Add time dimension if needed
+            background_data = background_data.reshape(
+                background_data.shape[0], 1, background_data.shape[1]
+            )
+        
+        return background_data
+    
+    def get_explainer(self, model_type: str, task: str) -> Optional[Any]:
+        """
+        Get stored explainer for a specific model type and task.
+        
+        Args:
+            model_type: Type of model
+            task: Task type
+            
+        Returns:
+            Stored explainer or None
+        """
+        key = f"{model_type}_{task}"
+        return self._explainers.get(key)
+    
+    def get_background_data(self, model_type: str, task: str) -> Optional[np.ndarray]:
+        """
+        Get stored background data for a specific model type and task.
+        
+        Args:
+            model_type: Type of model
+            task: Task type
+            
+        Returns:
+            Stored background data or None
+        """
+        key = f"{model_type}_{task}"
+        return self._background_data.get(key)
+
+
+class ARIMAExplainer:
+    """
+    ARIMA-specific explainer for statistical interpretability.
+    
+    Provides:
+    - Coefficient analysis
+    - Residual diagnostics
+    - Time series decomposition
+    - Forecast confidence intervals
+    """
+    
+    def __init__(self, model: ARIMA, X: Union[np.ndarray, pd.DataFrame], 
+                 task: str, config: Any):
+        """
+        Initialize ARIMA explainer.
+        
+        Args:
+            model: Fitted ARIMA model
+            X: Feature data
+            task: Task type
+            config: Configuration object
+        """
+        self.model = model
+        self.X = X
+        self.task = task
+        self.config = config
+        self.fitted_model = model.fit() if hasattr(model, 'fit') else model
+        
+        logger.info("ARIMAExplainer initialized")
+    
+    def explain(self, X: Union[np.ndarray, pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Generate comprehensive ARIMA explanations.
+        
+        Args:
+            X: Data to explain
+            
+        Returns:
+            Dictionary containing ARIMA explanations
+        """
+        explanations = {}
+        
+        try:
+            # Coefficient analysis
+            explanations['coefficients'] = self._analyze_coefficients()
+            
+            # Residual diagnostics
+            explanations['residuals'] = self._analyze_residuals()
+            
+            # Time series decomposition
+            explanations['decomposition'] = self._analyze_decomposition()
+            
+            # Forecast confidence intervals
+            explanations['forecast_intervals'] = self._analyze_forecast_intervals()
+            
+            # Model diagnostics
+            explanations['diagnostics'] = self._analyze_diagnostics()
+            
+        except Exception as e:
+            logger.error(f"ARIMA explanation failed: {str(e)}")
+            explanations['error'] = str(e)
+        
+        return explanations
+    
+    def _analyze_coefficients(self) -> Dict[str, Any]:
+        """Analyze ARIMA model coefficients."""
+        try:
+            summary = self.fitted_model.summary()
+            params = self.fitted_model.params
+            
+            return {
+                'summary': str(summary),
+                'parameters': params.to_dict(),
+                'aic': self.fitted_model.aic,
+                'bic': self.fitted_model.bic
+            }
+        except Exception as e:
+            logger.error(f"Coefficient analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _analyze_residuals(self) -> Dict[str, Any]:
+        """Analyze model residuals."""
+        try:
+            residuals = self.fitted_model.resid
+            
+            return {
+                'residuals': residuals.tolist(),
+                'mean': float(residuals.mean()),
+                'std': float(residuals.std()),
+                'skewness': float(residuals.skew()),
+                'kurtosis': float(residuals.kurtosis())
+            }
+        except Exception as e:
+            logger.error(f"Residual analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _analyze_decomposition(self) -> Dict[str, Any]:
+        """Analyze time series decomposition."""
+        try:
+            from statsmodels.tsa.seasonal import seasonal_decompose
+            
+            # Use the original time series data
+            if hasattr(self.model, 'endog'):
+                data = self.model.endog
+            else:
+                data = self.X.flatten() if hasattr(self.X, 'flatten') else self.X
+            
+            # Perform decomposition
+            decomposition = seasonal_decompose(
+                data, 
+                period=min(12, len(data) // 4),  # Adaptive period
+                extrapolate_trend='freq'
+            )
+            
+            return {
+                'trend': decomposition.trend.tolist(),
+                'seasonal': decomposition.seasonal.tolist(),
+                'residual': decomposition.resid.tolist()
+            }
+        except Exception as e:
+            logger.error(f"Decomposition analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _analyze_forecast_intervals(self) -> Dict[str, Any]:
+        """Analyze forecast confidence intervals."""
+        try:
+            # Generate forecast with confidence intervals
+            forecast = self.fitted_model.forecast(steps=10)
+            conf_int = self.fitted_model.get_forecast(steps=10).conf_int()
+            
+            return {
+                'forecast': forecast.tolist(),
+                'confidence_intervals': {
+                    'lower': conf_int.iloc[:, 0].tolist(),
+                    'upper': conf_int.iloc[:, 1].tolist()
+                }
+            }
+        except Exception as e:
+            logger.error(f"Forecast interval analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _analyze_diagnostics(self) -> Dict[str, Any]:
+        """Analyze model diagnostics and assumptions."""
+        try:
+            # Ljung-Box test for residuals
+            from statsmodels.stats.diagnostic import acorr_ljungbox
+            
+            residuals = self.fitted_model.resid
+            lb_test = acorr_ljungbox(residuals, lags=10, return_df=True)
+            
+            return {
+                'ljung_box_test': {
+                    'statistic': lb_test['lb_stat'].tolist(),
+                    'p_value': lb_test['lb_pvalue'].tolist()
+                },
+                'residual_autocorrelation': self._calculate_autocorrelation(residuals)
+            }
+        except Exception as e:
+            logger.error(f"Diagnostics analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _calculate_autocorrelation(self, residuals: pd.Series) -> List[float]:
+        """Calculate residual autocorrelation."""
+        try:
+            return [residuals.autocorr(lag=i) for i in range(1, 11)]
+        except:
+            return []
+    
+    def shap_values(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """
+        Generate SHAP-like values for ARIMA (statistical importance).
+        
+        Args:
+            X: Data to explain
+            
+        Returns:
+            Array of statistical importance values
+        """
+        try:
+            # For ARIMA, we use coefficient importance as SHAP-like values
+            params = self.fitted_model.params
+            
+            # Create importance array based on parameter magnitudes
+            importance = np.abs(params.values)
+            
+            # Normalize to sum to 1
+            importance = importance / importance.sum()
+            
+            # Repeat for each sample
+            return np.tile(importance, (len(X), 1))
+            
+        except Exception as e:
+            logger.error(f"ARIMA SHAP values failed: {str(e)}")
+            return np.zeros((len(X), 1))
+
+
+class StockMixerExplainer:
+    """
+    StockMixer-specific explainer with pathway analysis.
+    
+    Provides:
+    - Pathway-specific SHAP analysis
+    - Feature mixing interpretability
+    - Temporal vs indicator vs cross-stock analysis
+    """
+    
+    def __init__(self, model: tf.keras.Model, X: Union[np.ndarray, pd.DataFrame], 
+                 task: str, config: Any):
+        """
+        Initialize StockMixer explainer.
+        
+        Args:
+            model: Trained StockMixer model
+            X: Feature data
+            task: Task type
+            config: Configuration object
+        """
+        self.model = model
+        self.X = X
+        self.task = task
+        self.config = config
+        
+        # Create DeepExplainer for the main model
+        background_data = self._prepare_background_data(X)
+        self.deep_explainer = shap.DeepExplainer(model, background_data)
+        
+        logger.info("StockMixerExplainer initialized")
+    
+    def _prepare_background_data(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """Prepare background data for StockMixer."""
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+        
+        # Ensure proper shape for StockMixer
+        if len(X.shape) == 2:
+            X = X.reshape(X.shape[0], 1, X.shape[1])
+        
+        # Sample background data
+        n_samples = min(
+            getattr(self.config.shap, 'background_samples', 100),
+            len(X)
+        )
+        
+        indices = np.random.choice(len(X), n_samples, replace=False)
+        return X[indices]
+    
+    def explain(self, X: Union[np.ndarray, pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Generate comprehensive StockMixer explanations.
+        
+        Args:
+            X: Data to explain
+            
+        Returns:
+            Dictionary containing StockMixer explanations
+        """
+        explanations = {}
+        
+        try:
+            # Main SHAP values
+            explanations['main_shap'] = self.deep_explainer.shap_values(X)
+            
+            # Pathway analysis
+            explanations['pathways'] = self._analyze_pathways(X)
+            
+            # Feature mixing analysis
+            explanations['feature_mixing'] = self._analyze_feature_mixing(X)
+            
+        except Exception as e:
+            logger.error(f"StockMixer explanation failed: {str(e)}")
+            explanations['error'] = str(e)
+        
+        return explanations
+    
+    def _analyze_pathways(self, X: Union[np.ndarray, pd.DataFrame]) -> Dict[str, Any]:
+        """Analyze pathway-specific contributions."""
+        try:
+            # Get pathway outputs if available
+            if hasattr(self.model, 'get_pathway_outputs'):
+                pathway_outputs = self.model.get_pathway_outputs(X)
+                
+                pathway_analysis = {}
+                for pathway_name, pathway_output in pathway_outputs.items():
+                    pathway_analysis[pathway_name] = {
+                        'output_shape': pathway_output.shape,
+                        'mean_activation': float(np.mean(pathway_output)),
+                        'std_activation': float(np.std(pathway_output)),
+                        'max_activation': float(np.max(pathway_output)),
+                        'min_activation': float(np.min(pathway_output))
+                    }
+                
+                return pathway_analysis
+            else:
+                return {'error': 'Pathway outputs not available'}
+                
+        except Exception as e:
+            logger.error(f"Pathway analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def _analyze_feature_mixing(self, X: Union[np.ndarray, pd.DataFrame]) -> Dict[str, Any]:
+        """Analyze feature mixing patterns."""
+        try:
+            # Analyze how features are mixed across pathways
+            if hasattr(self.model, 'temporal_mixing') and hasattr(self.model, 'indicator_mixing'):
+                # Get intermediate layer outputs
+                temporal_layer = self.model.temporal_mixing
+                indicator_layer = self.model.indicator_mixing
+                cross_stock_layer = self.model.cross_stock_mixing
+                
+                # Create intermediate models to get layer outputs
+                temporal_model = tf.keras.Model(
+                    inputs=self.model.input,
+                    outputs=temporal_layer.output
+                )
+                indicator_model = tf.keras.Model(
+                    inputs=self.model.input,
+                    outputs=indicator_layer.output
+                )
+                cross_stock_model = tf.keras.Model(
+                    inputs=self.model.input,
+                    outputs=cross_stock_layer.output
+                )
+                
+                # Get pathway activations
+                temporal_activations = temporal_model.predict(X, verbose=0)
+                indicator_activations = indicator_model.predict(X, verbose=0)
+                cross_stock_activations = cross_stock_model.predict(X, verbose=0)
+                
+                return {
+                    'temporal_activations': {
+                        'mean': float(np.mean(temporal_activations)),
+                        'std': float(np.std(temporal_activations)),
+                        'shape': temporal_activations.shape
+                    },
+                    'indicator_activations': {
+                        'mean': float(np.mean(indicator_activations)),
+                        'std': float(np.std(indicator_activations)),
+                        'shape': indicator_activations.shape
+                    },
+                    'cross_stock_activations': {
+                        'mean': float(np.mean(cross_stock_activations)),
+                        'std': float(np.std(cross_stock_activations)),
+                        'shape': cross_stock_activations.shape
+                    }
+                }
+            else:
+                return {'error': 'Pathway layers not accessible'}
+                
+        except Exception as e:
+            logger.error(f"Feature mixing analysis failed: {str(e)}")
+            return {'error': str(e)}
+    
+    def shap_values(self, X: Union[np.ndarray, pd.DataFrame]) -> np.ndarray:
+        """
+        Generate SHAP values for StockMixer.
+        
+        Args:
+            X: Data to explain
+            
+        Returns:
+            SHAP values array
+        """
+        try:
+            shap_values = self.deep_explainer.shap_values(X)
+            
+            # Handle classification case
+            if isinstance(shap_values, list):
+                shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+            
+            return shap_values
+            
+        except Exception as e:
+            logger.error(f"StockMixer SHAP values failed: {str(e)}")
+            return np.zeros((len(X), 1)) 

@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 
 # Import pipeline components
 try:
-    from risk_pipeline import RiskPipeline, AssetConfig
+    from risk_pipeline import RiskPipeline, PipelineConfig
     from visualization import VolatilityVisualizer, create_publication_quality_plots
     from stockmixer_model import StockMixerExplainer
 except ImportError as e:
@@ -26,7 +26,7 @@ except ImportError as e:
 
 
 class PipelineRunner:
-    """Orchestrates pipeline execution with configuration management"""
+    """Orchestrates pipeline execution with configuration management and advanced features"""
     
     def __init__(self, config_path: str = None):
         self.config = self._load_config(config_path)
@@ -56,6 +56,11 @@ class PipelineRunner:
                 "walk_forward_splits": 5,
                 "test_size": 252,
                 "random_state": 42
+            },
+            "experiment": {
+                "save_models": True,
+                "run_shap": True,
+                "parallel_training": False
             }
         }
     
@@ -113,26 +118,16 @@ class PipelineRunner:
         print("Running Quick Test Mode")
         print("="*60)
         
-        # Override configuration for quick test
-        test_config = AssetConfig()
-        test_config.START_DATE = '2023-01-01'
-        test_config.END_DATE = '2024-03-31'
-        test_config.WALK_FORWARD_SPLITS = 2  # Reduced for quick test
-        test_config.TEST_SIZE = 50  # Much smaller test size for limited data
-        
-        # Use only two assets (one from each market) + VIX
-        test_assets = ['AAPL', 'CBA.AX']  # Removed ^VIX from assets, it will be downloaded separately
-        
-        # Initialize and run pipeline
-        pipeline = RiskPipeline(config=test_config)
+        # Initialize pipeline with quick test configuration
+        pipeline = RiskPipeline(experiment_name="quick_test")
         
         try:
-            pipeline.run_pipeline(assets=test_assets)
+            results = pipeline.run_quick_test()
             
-            # Only generate visualizations if we have results
-            if pipeline.results and not self._is_results_empty(pipeline.results):
+            # Generate basic visualizations
+            if results and not self._is_results_empty(results):
                 visualizer = VolatilityVisualizer('visualizations/test')
-                visualizer.plot_performance_comparison(pipeline.results, 'regression')
+                visualizer.plot_performance_comparison(results, 'regression')
                 print("✅ Visualizations generated")
             else:
                 print("⚠️ No results generated - skipping visualization")
@@ -143,7 +138,7 @@ class PipelineRunner:
             return
         
         print("\n✅ Quick test completed!")
-        print("Check results in 'results/' and 'visualizations/test/'")
+        print("Check results in 'experiments/' and 'visualizations/test/'")
         
     def _is_results_empty(self, results: dict) -> bool:
         """Check if results dictionary is effectively empty"""
@@ -162,44 +157,51 @@ class PipelineRunner:
                         return False
         return True
         
-    def run_full_pipeline(self, assets: list = None):
+    def run_full_pipeline(self, assets: list = None, models: list = None, 
+                         save_models: bool = True, run_shap: bool = True,
+                         experiment_name: str = None):
         """Run complete pipeline with all features"""
         print("\n" + "="*60)
         print("Running Full Pipeline")
         print("="*60)
         
-        # Initialize pipeline with configuration
-        asset_config = AssetConfig()
-        
-        # Update from loaded configuration
-        asset_config.START_DATE = self.config['data']['start_date']
-        asset_config.END_DATE = self.config['data']['end_date']
-        asset_config.WALK_FORWARD_SPLITS = self.config['training']['walk_forward_splits']
-        asset_config.TEST_SIZE = self.config['training']['test_size']
-        asset_config.RANDOM_STATE = self.config['training']['random_state']
+        # Initialize pipeline with experiment tracking
+        experiment_name = experiment_name or f"full_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        pipeline = RiskPipeline(experiment_name=experiment_name)
         
         # Determine assets to process
         if assets is None:
             assets = self.config['data']['us_assets'] + self.config['data']['au_assets']
         
-        print(f"\nProcessing assets: {', '.join(assets)}")
-        print(f"Date range: {asset_config.START_DATE} to {asset_config.END_DATE}")
-        print(f"Walk-forward splits: {asset_config.WALK_FORWARD_SPLITS}")
+        # Determine models to run
+        if models is None:
+            models = ['arima', 'lstm', 'stockmixer', 'xgboost']
         
-        # Initialize pipeline
-        pipeline = RiskPipeline(config=asset_config)
+        print(f"\nProcessing assets: {', '.join(assets)}")
+        print(f"Running models: {', '.join(models)}")
+        print(f"Save models: {save_models}")
+        print(f"Run SHAP: {run_shap}")
+        print(f"Experiment: {experiment_name}")
         
         # Run pipeline
         try:
-            pipeline.run_pipeline(assets=assets)
+            results = pipeline.run_complete_pipeline(
+                assets=assets,
+                models=models,
+                save_models=save_models,
+                run_shap=run_shap,
+                description=f"Full pipeline run with {len(assets)} assets and {len(models)} models"
+            )
             
             # Generate comprehensive visualizations
-            self._generate_visualizations(pipeline.results)
+            self._generate_visualizations(results)
             
             # Generate summary report
-            self._generate_summary_report(pipeline.results)
+            self._generate_summary_report(results, experiment_name)
             
             print("\n✅ Pipeline completed successfully!")
+            print(f"Experiment ID: {experiment_name}")
+            print(f"Results saved in: experiments/{experiment_name}/")
             
         except Exception as e:
             self.logger.error(f"Pipeline failed: {e}", exc_info=True)
@@ -207,13 +209,109 @@ class PipelineRunner:
             print("Check logs for detailed error information.")
             sys.exit(1)
             
-    def run_single_asset(self, asset: str):
+    def run_single_asset(self, asset: str, models: list = None, run_shap: bool = True):
         """Run pipeline for a single asset"""
         print(f"\n" + "="*60)
         print(f"Running Pipeline for {asset}")
         print("="*60)
         
-        self.run_full_pipeline(assets=[asset])
+        experiment_name = f"single_asset_{asset}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.run_full_pipeline(
+            assets=[asset], 
+            models=models,
+            save_models=True,
+            run_shap=run_shap,
+            experiment_name=experiment_name
+        )
+    
+    def run_models_only(self, assets: list, models: list, save_models: bool = True):
+        """Run models-only training without SHAP analysis"""
+        print(f"\n" + "="*60)
+        print("Running Models-Only Training")
+        print("="*60)
+        
+        experiment_name = f"models_only_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        pipeline = RiskPipeline(experiment_name=experiment_name)
+        
+        print(f"Training models for assets: {', '.join(assets)}")
+        print(f"Models: {', '.join(models)}")
+        print(f"Save models: {save_models}")
+        
+        try:
+            results = pipeline.train_models_only(
+                assets=assets,
+                models=models,
+                save=save_models
+            )
+            
+            print("\n✅ Models-only training completed!")
+            print(f"Experiment ID: {experiment_name}")
+            
+        except Exception as e:
+            self.logger.error(f"Models-only training failed: {e}", exc_info=True)
+            print(f"\n❌ Models-only training failed: {e}")
+            sys.exit(1)
+    
+    def analyze_experiment(self, experiment_id: str, run_additional_shap: bool = False):
+        """Analyze a previously saved experiment"""
+        print(f"\n" + "="*60)
+        print(f"Analyzing Experiment: {experiment_id}")
+        print("="*60)
+        
+        pipeline = RiskPipeline()
+        
+        try:
+            results = pipeline.analyze_saved_models(
+                experiment_id=experiment_id,
+                run_additional_shap=run_additional_shap
+            )
+            
+            print("\n✅ Experiment analysis completed!")
+            
+        except Exception as e:
+            self.logger.error(f"Experiment analysis failed: {e}", exc_info=True)
+            print(f"\n❌ Experiment analysis failed: {e}")
+            sys.exit(1)
+    
+    def compare_experiments(self, experiment_ids: list):
+        """Compare multiple experiments"""
+        print(f"\n" + "="*60)
+        print(f"Comparing Experiments: {', '.join(experiment_ids)}")
+        print("="*60)
+        
+        pipeline = RiskPipeline()
+        
+        try:
+            results = pipeline.compare_experiments(experiment_ids=experiment_ids)
+            
+            print("\n✅ Experiment comparison completed!")
+            
+        except Exception as e:
+            self.logger.error(f"Experiment comparison failed: {e}", exc_info=True)
+            print(f"\n❌ Experiment comparison failed: {e}")
+            sys.exit(1)
+    
+    def get_best_models(self, metric: str = "R2", task: str = "regression"):
+        """Get best performing models across all experiments"""
+        print(f"\n" + "="*60)
+        print(f"Finding Best Models ({task}, {metric})")
+        print("="*60)
+        
+        pipeline = RiskPipeline()
+        
+        try:
+            best_models = pipeline.get_best_models(metric=metric, task=task)
+            
+            if not best_models.empty:
+                print("\nBest Models:")
+                print(best_models.to_string(index=False))
+            else:
+                print("\nNo models found.")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get best models: {e}", exc_info=True)
+            print(f"\n❌ Failed to get best models: {e}")
+            sys.exit(1)
         
     def _generate_visualizations(self, results: dict):
         """Generate all visualization outputs"""
@@ -246,7 +344,7 @@ class PipelineRunner:
         
         print("✅ Visualizations generated")
         
-    def _generate_summary_report(self, results: dict):
+    def _generate_summary_report(self, results: dict, experiment_name: str):
         """Generate comprehensive summary report"""
         print("\nGenerating summary report...")
         
@@ -255,7 +353,8 @@ class PipelineRunner:
         with open(report_path, 'w') as f:
             # Header
             f.write("# Volatility Forecasting Pipeline - Summary Report\n\n")
-            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Experiment: {experiment_name}\n\n")
             
             # Configuration summary
             f.write("## Configuration\n\n")
@@ -408,11 +507,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage (backward compatible)
   python run_pipeline.py --quick           # Quick test with subset of data
   python run_pipeline.py --full            # Full pipeline on all assets
   python run_pipeline.py --asset AAPL      # Single asset analysis
-  python run_pipeline.py --us-only         # US markets only
-  python run_pipeline.py --au-only         # Australian markets only
+  
+  # Advanced usage (new features)
+  python run_pipeline.py --full --save-models --run-shap --experiment-name "thesis_final"
+  python run_pipeline.py --models lstm,stockmixer --assets AAPL,CBA.AX
+  python run_pipeline.py --models-only --assets AAPL,MSFT --models xgboost,lstm
+  python run_pipeline.py --analyze-experiment experiment_20250805_143022
+  python run_pipeline.py --compare-experiments expr1,expr2,expr3
+  python run_pipeline.py --get-best-models --metric R2 --task regression
         """
     )
     
@@ -424,12 +530,47 @@ Examples:
                            help='Run full pipeline on all assets')
     mode_group.add_argument('--asset', type=str,
                            help='Run pipeline for single asset (e.g., AAPL)')
+    mode_group.add_argument('--models-only', action='store_true',
+                           help='Run models-only training (no SHAP analysis)')
+    mode_group.add_argument('--analyze-experiment', type=str,
+                           help='Analyze a previously saved experiment')
+    mode_group.add_argument('--compare-experiments', type=str,
+                           help='Compare multiple experiments (comma-separated IDs)')
+    mode_group.add_argument('--get-best-models', action='store_true',
+                           help='Get best performing models across experiments')
     
-    # Asset selection
+    # Asset and model selection
+    parser.add_argument('--assets', type=str,
+                       help='Comma-separated list of assets to process')
+    parser.add_argument('--models', type=str,
+                       help='Comma-separated list of models to run (arima,lstm,stockmixer,xgboost)')
+    
+    # Experiment management
+    parser.add_argument('--experiment-name', type=str,
+                       help='Name for the experiment (auto-generated if not provided)')
+    parser.add_argument('--save-models', action='store_true', default=True,
+                       help='Save trained models (default: True)')
+    parser.add_argument('--no-save-models', action='store_true',
+                       help='Do not save trained models')
+    parser.add_argument('--run-shap', action='store_true', default=True,
+                       help='Run SHAP analysis (default: True)')
+    parser.add_argument('--no-shap', action='store_true',
+                       help='Do not run SHAP analysis')
+    parser.add_argument('--run-additional-shap', action='store_true',
+                       help='Run additional SHAP analysis for experiment analysis')
+    
+    # Asset selection (backward compatibility)
     parser.add_argument('--us-only', action='store_true',
                        help='Process US assets only')
     parser.add_argument('--au-only', action='store_true',
                        help='Process Australian assets only')
+    
+    # Best models options
+    parser.add_argument('--metric', type=str, default='R2',
+                       help='Metric for best models (default: R2)')
+    parser.add_argument('--task', type=str, default='regression',
+                       choices=['regression', 'classification'],
+                       help='Task type for best models (default: regression)')
     
     # Configuration
     parser.add_argument('--config', type=str,
@@ -447,18 +588,38 @@ Examples:
     # Initialize runner
     runner = PipelineRunner(config_path=args.config)
     
-    # Determine assets to process
-    assets = None
-    if args.us_only:
-        assets = runner.config['data']['us_assets']
-    elif args.au_only:
-        assets = runner.config['data']['au_assets']
+    # Handle save models flag
+    save_models = args.save_models and not args.no_save_models
+    
+    # Handle SHAP flag
+    run_shap = args.run_shap and not args.no_shap
     
     # Execute based on mode
     if args.quick:
         runner.run_quick_test()
+        
     elif args.full:
-        runner.run_full_pipeline(assets=assets)
+        # Parse assets and models
+        assets = None
+        if args.assets:
+            assets = [a.strip() for a in args.assets.split(',')]
+        elif args.us_only:
+            assets = runner.config['data']['us_assets']
+        elif args.au_only:
+            assets = runner.config['data']['au_assets']
+        
+        models = None
+        if args.models:
+            models = [m.strip() for m in args.models.split(',')]
+        
+        runner.run_full_pipeline(
+            assets=assets,
+            models=models,
+            save_models=save_models,
+            run_shap=run_shap,
+            experiment_name=args.experiment_name
+        )
+        
     elif args.asset:
         # Validate asset
         all_assets = runner.config['data']['us_assets'] + runner.config['data']['au_assets']
@@ -466,7 +627,37 @@ Examples:
             print(f"❌ Unknown asset: {args.asset}")
             print(f"Available assets: {', '.join(all_assets)}")
             sys.exit(1)
-        runner.run_single_asset(args.asset)
+        
+        models = None
+        if args.models:
+            models = [m.strip() for m in args.models.split(',')]
+        
+        runner.run_single_asset(args.asset, models=models, run_shap=run_shap)
+        
+    elif args.models_only:
+        if not args.assets:
+            print("❌ --assets required for models-only mode")
+            sys.exit(1)
+        
+        assets = [a.strip() for a in args.assets.split(',')]
+        models = ['xgboost', 'lstm']  # Default models for quick training
+        if args.models:
+            models = [m.strip() for m in args.models.split(',')]
+        
+        runner.run_models_only(assets=assets, models=models, save_models=save_models)
+        
+    elif args.analyze_experiment:
+        runner.analyze_experiment(
+            experiment_id=args.analyze_experiment,
+            run_additional_shap=args.run_additional_shap
+        )
+        
+    elif args.compare_experiments:
+        experiment_ids = [eid.strip() for eid in args.compare_experiments.split(',')]
+        runner.compare_experiments(experiment_ids=experiment_ids)
+        
+    elif args.get_best_models:
+        runner.get_best_models(metric=args.metric, task=args.task)
     
     print("\n" + "="*60)
     print("Pipeline execution completed!")
