@@ -1,9 +1,9 @@
 {
     "data": {
-        "start_date": "2000-01-01",
-        "end_date": "2025-01-05",
-        "us_assets": ["AAPL", "MSFT", "^GSPC"],
-        "au_assets": ["IOZ.AX", "CBA.AX", "BHP.AX"],
+        "start_date": "2020-01-01",
+        "end_date": "2024-01-01",
+        "us_assets": ["AAPL"],
+        "au_assets": ["CBA.AX"],
         "cache_dir": "data_cache"
     },
     "features": {
@@ -14,24 +14,24 @@
         "sequence_length": 15
     },
     "models": {
-        "lstm_units": [50, 30],
+        "lstm_units": [30, 20],
         "lstm_dropout": 0.2,
-        "stockmixer_temporal_units": 64,
-        "stockmixer_indicator_units": 64,
-        "stockmixer_cross_stock_units": 64,
-        "stockmixer_fusion_units": 128,
-        "xgboost_n_estimators": 100,
-        "xgboost_max_depth": 5,
+        "stockmixer_temporal_units": 32,
+        "stockmixer_indicator_units": 32,
+        "stockmixer_cross_stock_units": 32,
+        "stockmixer_fusion_units": 64,
+        "xgboost_n_estimators": 50,
+        "xgboost_max_depth": 3,
         "xgboost_learning_rate": 0.1,
         "arima_order": [1, 1, 1]
     },
     "training": {
-        "walk_forward_splits": 5,
-        "test_size": 63,
+        "walk_forward_splits": 2,
+        "test_size": 50,
         "batch_size": 16,
-        "epochs": 100,
-        "early_stopping_patience": 5,
-        "reduce_lr_patience": 5,
+        "epochs": 10,
+        "early_stopping_patience": 3,
+        "reduce_lr_patience": 3,
         "random_state": 42
     },
     "output": {
@@ -47,9 +47,9 @@
         "date_format": "%Y-%m-%d %H:%M:%S"
     },
     "shap": {
-        "background_samples": 100,
-        "max_display": 20,
+        "background_samples": 50,
+        "max_display": 10,
         "plot_type": "bar",
         "save_plots": true
     }
-}
+} 

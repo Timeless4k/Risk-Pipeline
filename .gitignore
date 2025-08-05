@@ -36,7 +36,17 @@ env/
 # Project specific
 data_cache/
 logs/
-models/
+# Ignore saved model files but not source code
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+*.pb
+*.onnx
+*.pt
+*.pth
+saved_models/
+trained_models/
 results/
 shap_plots/
 publication_plots/

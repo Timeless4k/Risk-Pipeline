@@ -14,24 +14,24 @@
         "sequence_length": 15
     },
     "models": {
-        "lstm_units": [50, 30],
+        "lstm_units": [100, 50],
         "lstm_dropout": 0.2,
-        "stockmixer_temporal_units": 64,
-        "stockmixer_indicator_units": 64,
-        "stockmixer_cross_stock_units": 64,
-        "stockmixer_fusion_units": 128,
-        "xgboost_n_estimators": 100,
-        "xgboost_max_depth": 5,
-        "xgboost_learning_rate": 0.1,
-        "arima_order": [1, 1, 1]
+        "stockmixer_temporal_units": 128,
+        "stockmixer_indicator_units": 128,
+        "stockmixer_cross_stock_units": 128,
+        "stockmixer_fusion_units": 256,
+        "xgboost_n_estimators": 200,
+        "xgboost_max_depth": 8,
+        "xgboost_learning_rate": 0.05,
+        "arima_order": [2, 1, 2]
     },
     "training": {
-        "walk_forward_splits": 5,
+        "walk_forward_splits": 10,
         "test_size": 63,
-        "batch_size": 16,
-        "epochs": 100,
-        "early_stopping_patience": 5,
-        "reduce_lr_patience": 5,
+        "batch_size": 32,
+        "epochs": 200,
+        "early_stopping_patience": 10,
+        "reduce_lr_patience": 8,
         "random_state": 42
     },
     "output": {
@@ -47,9 +47,9 @@
         "date_format": "%Y-%m-%d %H:%M:%S"
     },
     "shap": {
-        "background_samples": 100,
-        "max_display": 20,
+        "background_samples": 200,
+        "max_display": 30,
         "plot_type": "bar",
         "save_plots": true
     }
-}
+} 
