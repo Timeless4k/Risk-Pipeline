@@ -39,6 +39,7 @@ except ImportError:
     ARIMA_AVAILABLE = False
     ARIMAModel = None
 from risk_pipeline.core.feature_engineer import FeatureEngineer
+from risk_pipeline.core.io_utils import write_atomic
 
 
 SEQ_MODELS = {"lstm", "stockmixer"}
@@ -97,7 +98,7 @@ def evaluate_all(models: Dict[str, any], raw_df: pd.DataFrame, target: pd.Series
     # Persist
     os.makedirs(cfg.artifacts_dir, exist_ok=True)
     out_csv = os.path.join(cfg.artifacts_dir, "results.csv")
-    agg.to_csv(out_csv, index=False)
+    write_atomic(out_csv, agg.to_csv(index=False))
 
     # Markdown
     out_md = os.path.join(cfg.artifacts_dir, "RESULTS.md")
@@ -105,9 +106,7 @@ def evaluate_all(models: Dict[str, any], raw_df: pd.DataFrame, target: pd.Series
         md = agg.to_markdown(index=False)
     except Exception:
         md = agg.to_csv(index=False)
-    with open(out_md, "w") as f:
-        f.write("# Model Comparison Results\n\n")
-        f.write(md)
+    write_atomic(out_md, "# Model Comparison Results\n\n" + md)
 
     return agg
 
