@@ -14,6 +14,8 @@ import logging
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any, Union
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from risk_pipeline.config.global_config import GlobalConfig
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -448,6 +450,67 @@ class FeatureEngineer:
                 'scaler': None,
             }
         return structured
+
+    # New canonical path for fairness framework
+    def create_canonical_views(
+        self,
+        df: pd.DataFrame,
+        y: pd.Series,
+        cfg: GlobalConfig,
+        train_slice: slice,
+        val_slice: slice,
+    ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Produce canonical X_seq and X_flat from the same source with identical scaling.
+
+        Returns: ((X_seq_train, X_flat_train, y_train), (X_seq_val, X_flat_val, y_val))
+        """
+        close = df["Close"].astype(float).values
+        T = cfg.lookback_T
+        n = len(close)
+        if n < T + 1:
+            raise ValueError("Not enough data for lookback window")
+
+        def to_seq(slc: slice) -> Tuple[np.ndarray, np.ndarray]:
+            idx = np.arange(slc.start, slc.stop)
+            windows: List[np.ndarray] = []
+            targets: List[float] = []
+            for t in idx:
+                start = t - T
+                if start < 0 or t >= len(y):
+                    continue
+                windows.append(close[start:t])
+                targets.append(float(y.iloc[t]))
+            if not windows:
+                return np.zeros((0, T, 1), dtype=float), np.zeros((0,), dtype=float)
+            X_seq = np.array(windows, dtype=float)[:, :, None]  # [N, T, F=1]
+            y_arr = np.array(targets, dtype=float)
+            return X_seq, y_arr
+
+        X_seq_train, y_train = to_seq(train_slice)
+        X_seq_val, y_val = to_seq(val_slice)
+
+        # scaling on train only
+        scaler = None
+        if cfg.scaling == "standard":
+            scaler = StandardScaler()
+        elif cfg.scaling == "minmax":
+            scaler = MinMaxScaler()
+        if scaler is not None and X_seq_train.size > 0:
+            shp = X_seq_train.shape
+            Xf = X_seq_train.reshape(shp[0], -1)
+            Xf = scaler.fit_transform(Xf)
+            X_seq_train = Xf.reshape(shp)
+            if X_seq_val.size > 0:
+                shp_v = X_seq_val.shape
+                Xfv = X_seq_val.reshape(shp_v[0], -1)
+                Xfv = scaler.transform(Xfv)
+                X_seq_val = Xfv.reshape(shp_v)
+
+        # flat views from the same scaled tensors
+        X_flat_train = X_seq_train.reshape(X_seq_train.shape[0], -1)
+        X_flat_val = X_seq_val.reshape(X_seq_val.shape[0], -1)
+
+        return (X_seq_train, X_flat_train, y_train), (X_seq_val, X_flat_val, y_val)
     
     def create_asset_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create features for a single asset."""
