@@ -81,7 +81,19 @@ def main():
         if original_models != models_to_run:
             print(f"[INFO] Filtered out LSTM models due to missing TensorFlow. Available models: {models_to_run}")
     
-    cfg = GlobalConfig(models_to_run=models_to_run, artifacts_dir=args.artifacts)
+    # Create config with appropriate defaults for demo mode
+    if args.data == "demo":
+        # Use smaller defaults for demo data (which has ~239 rows)
+        cfg = GlobalConfig(
+            models_to_run=models_to_run, 
+            artifacts_dir=args.artifacts,
+            train_size=100,  # Smaller train size for demo
+            val_size=30,     # Smaller val size for demo
+            step=10          # Larger step for demo
+        )
+        print(f"[INFO] Using demo-optimized config: train_size={cfg.train_size}, val_size={cfg.val_size}, step={cfg.step}")
+    else:
+        cfg = GlobalConfig(models_to_run=models_to_run, artifacts_dir=args.artifacts)
 
     # Load data
     if args.data == "demo":

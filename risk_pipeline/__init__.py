@@ -25,6 +25,22 @@ from .core.results_manager import ResultsManager
 from .models.base_model import BaseModel
 from .models.model_factory import ModelFactory
 
+# Import models conditionally to handle missing dependencies
+try:
+    from .models.arima_model import ARIMAModel
+    from .models.xgboost_model import XGBoostModel
+    from .models.stockmixer_model import StockMixerModel
+    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
+except ImportError as e:
+    print(f"[WARNING] Some models not available: {e}")
+    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
+
+try:
+    from .models.lstm_model import LSTMModel
+    LSTM_AVAILABLE = True
+except ImportError:
+    LSTM_AVAILABLE = False
+
 # Import interpretability components
 from .interpretability.shap_analyzer import SHAPAnalyzer
 from .interpretability.explainer_factory import ExplainerFactory
@@ -715,4 +731,14 @@ __all__ = [
     'ModelPersistence',
     'VolatilityVisualizer',
     'SHAPVisualizer'
-] 
+]
+
+# Add available models to exports
+if ARIMA_AVAILABLE:
+    __all__.append('ARIMAModel')
+if XGBOOST_AVAILABLE:
+    __all__.append('XGBoostModel')
+if STOCKMIXER_AVAILABLE:
+    __all__.append('StockMixerModel')
+if LSTM_AVAILABLE:
+    __all__.append('LSTMModel') 

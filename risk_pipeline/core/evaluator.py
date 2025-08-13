@@ -10,10 +10,34 @@ from risk_pipeline.config.global_config import GlobalConfig
 from risk_pipeline.core.splits import generate_sliding_splits
 from risk_pipeline.core.trainer import train_once
 from risk_pipeline.core.adapters import SeqAdapterModel, FlatAdapterModel
-from risk_pipeline.models.lstm_model import LSTMModel
-from risk_pipeline.models.stockmixer_model import StockMixerModel
-from risk_pipeline.models.xgboost_model import XGBoostModel
-from risk_pipeline.models.arima_model import ARIMAModel
+# Import models conditionally to handle missing dependencies
+try:
+    from risk_pipeline.models.lstm_model import LSTMModel
+    LSTM_AVAILABLE = True
+except ImportError:
+    LSTM_AVAILABLE = False
+    LSTMModel = None
+
+try:
+    from risk_pipeline.models.stockmixer_model import StockMixerModel
+    STOCKMIXER_AVAILABLE = True
+except ImportError:
+    STOCKMIXER_AVAILABLE = False
+    StockMixerModel = None
+
+try:
+    from risk_pipeline.models.xgboost_model import XGBoostModel
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    XGBoostModel = None
+
+try:
+    from risk_pipeline.models.arima_model import ARIMAModel
+    ARIMA_AVAILABLE = True
+except ImportError:
+    ARIMA_AVAILABLE = False
+    ARIMAModel = None
 from risk_pipeline.core.feature_engineer import FeatureEngineer
 
 
@@ -90,12 +114,12 @@ def evaluate_all(models: Dict[str, any], raw_df: pd.DataFrame, target: pd.Series
 
 def build_models(cfg: GlobalConfig) -> Dict[str, any]:
     models: Dict[str, any] = {}
-    if "lstm" in cfg.models_to_run:
+    if "lstm" in cfg.models_to_run and LSTM_AVAILABLE:
         models["lstm"] = SeqAdapterModel(LSTMModel(model_type='lstm', task='regression'), "lstm")
-    if "stockmixer" in cfg.models_to_run:
+    if "stockmixer" in cfg.models_to_run and STOCKMIXER_AVAILABLE:
         models["stockmixer"] = SeqAdapterModel(StockMixerModel(model_type='stockmixer', task='regression'), "stockmixer")
-    if "xgb" in cfg.models_to_run:
+    if "xgb" in cfg.models_to_run and XGBOOST_AVAILABLE:
         models["xgb"] = FlatAdapterModel(XGBoostModel(task='regression'), "xgb")
-    if "arima" in cfg.models_to_run:
+    if "arima" in cfg.models_to_run and ARIMA_AVAILABLE:
         models["arima"] = FlatAdapterModel(ARIMAModel(model_type='arima', task='regression'), "arima")
     return models

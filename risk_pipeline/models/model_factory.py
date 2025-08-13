@@ -8,10 +8,35 @@ import numpy as np
 import pandas as pd
 
 from .base_model import BaseModel
-from .arima_model import ARIMAModel
-from .lstm_model import LSTMModel
-from .xgboost_model import XGBoostModel
-from .stockmixer_model import StockMixerModel
+
+# Import models conditionally to handle missing dependencies
+try:
+    from .arima_model import ARIMAModel
+    ARIMA_AVAILABLE = True
+except ImportError:
+    ARIMA_AVAILABLE = False
+    ARIMAModel = None
+
+try:
+    from .xgboost_model import XGBoostModel
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    XGBoostModel = None
+
+try:
+    from .stockmixer_model import StockMixerModel
+    STOCKMIXER_AVAILABLE = True
+except ImportError:
+    STOCKMIXER_AVAILABLE = False
+    StockMixerModel = None
+
+try:
+    from .lstm_model import LSTMModel
+    LSTM_AVAILABLE = True
+except ImportError:
+    LSTM_AVAILABLE = False
+    LSTMModel = None
 
 
 class ModelFactory:
@@ -28,13 +53,19 @@ class ModelFactory:
         self.logger = logging.getLogger('risk_pipeline.models.ModelFactory')
         self.logger.info("ModelFactory initialized")
         
-        # Available model types
-        self.available_models = {
-            'arima': ARIMAModel,
-            'lstm': LSTMModel,
-            'xgboost': XGBoostModel,
-            'stockmixer': StockMixerModel
-        }
+        # Available model types - only include models that are available
+        self.available_models = {}
+        
+        if ARIMA_AVAILABLE:
+            self.available_models['arima'] = ARIMAModel
+        if LSTM_AVAILABLE:
+            self.available_models['lstm'] = LSTMModel
+        if XGBOOST_AVAILABLE:
+            self.available_models['xgboost'] = XGBoostModel
+        if STOCKMIXER_AVAILABLE:
+            self.available_models['stockmixer'] = StockMixerModel
+            
+        self.logger.info(f"Available models: {list(self.available_models.keys())}")
     
     def create_model(self, model_type: str, task: str = 'regression', 
                     **kwargs) -> BaseModel:

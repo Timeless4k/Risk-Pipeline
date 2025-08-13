@@ -12,8 +12,15 @@ import shap
 import warnings
 from typing import Dict, List, Any, Optional, Union, Tuple
 from statsmodels.tsa.arima.model import ARIMA
-import tensorflow as tf
-from tensorflow.keras.models import Model
+# Import TensorFlow conditionally
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Model
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+    tf = None
+    Model = None
 import xgboost as xgb
 
 # Suppress SHAP warnings
@@ -71,8 +78,12 @@ class ExplainerFactory:
             if model_type == 'arima':
                 return self._create_arima_explainer(model, X, task, **kwargs)
             elif model_type == 'lstm':
+                if not TENSORFLOW_AVAILABLE:
+                    logger.warning("TensorFlow not available for LSTM explainer, using mock")
                 return self._create_lstm_explainer(model, X, task, **kwargs)
             elif model_type == 'stockmixer':
+                if not TENSORFLOW_AVAILABLE:
+                    logger.warning("TensorFlow not available for StockMixer explainer, using mock")
                 return self._create_stockmixer_explainer(model, X, task, **kwargs)
             elif model_type == 'xgboost':
                 return self._create_xgboost_explainer(model, X, task, **kwargs)
@@ -103,7 +114,7 @@ class ExplainerFactory:
         return ARIMAExplainer(model, X, task, self.config)
     
     def _create_lstm_explainer(self,
-                              model: tf.keras.Model,
+                              model: Any,
                               X: Union[np.ndarray, pd.DataFrame],
                               task: str,
                               **kwargs) -> Any:
@@ -117,11 +128,12 @@ class ExplainerFactory:
             **kwargs: Additional arguments
             
         Returns:
-            DeepExplainer instance
+            DeepExplainer instance or mock explainer if TensorFlow unavailable
         """
-        # If model is a unittest.mock.Mock, return a lightweight explainer
-        from unittest.mock import Mock
-        if isinstance(model, Mock):
+        if not TENSORFLOW_AVAILABLE:
+            logger.warning("TensorFlow not available, returning mock LSTM explainer")
+            # Return a lightweight mock explainer
+            from unittest.mock import Mock
             def _mock_shap_values(data):
                 arr = data if isinstance(data, np.ndarray) else np.asarray(data)
                 flat = arr.reshape(arr.shape[0], -1)
@@ -132,10 +144,23 @@ class ExplainerFactory:
             explainer = mock_explainer
             background_data = self._prepare_deep_background_data(X, model_type='lstm')
         else:
-            # Prepare background data
-            background_data = self._prepare_deep_background_data(X, model_type='lstm')
-            # Create DeepExplainer
-            explainer = shap.DeepExplainer(model, background_data)
+            # If model is a unittest.mock.Mock, return a lightweight explainer
+            from unittest.mock import Mock
+            if isinstance(model, Mock):
+                def _mock_shap_values(data):
+                    arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                    flat = arr.reshape(arr.shape[0], -1)
+                    return np.zeros_like(flat)
+                mock_explainer = Mock()
+                mock_explainer.shap_values.side_effect = lambda data: _mock_shap_values(data)
+                mock_explainer.expected_value = 0.0
+                explainer = mock_explainer
+                background_data = self._prepare_deep_background_data(X, model_type='lstm')
+            else:
+                # Prepare background data
+                background_data = self._prepare_deep_background_data(X, model_type='lstm')
+                # Create DeepExplainer
+                explainer = shap.DeepExplainer(model, background_data)
         
         # Store for later use
         explainer_key = f"lstm_{task}"
@@ -145,7 +170,7 @@ class ExplainerFactory:
         return explainer
     
     def _create_stockmixer_explainer(self,
-                                    model: tf.keras.Model,
+                                    model: Any,
                                     X: Union[np.ndarray, pd.DataFrame],
                                     task: str,
                                     **kwargs) -> 'StockMixerExplainer':
@@ -505,7 +530,7 @@ class StockMixerExplainer:
     - Temporal vs indicator vs cross-stock analysis
     """
     
-    def __init__(self, model: tf.keras.Model, X: Union[np.ndarray, pd.DataFrame], 
+    def __init__(self, model: Any, X: Union[np.ndarray, pd.DataFrame], 
                  task: str, config: Any):
         """
         Initialize StockMixer explainer.
@@ -524,7 +549,7 @@ class StockMixerExplainer:
         # Create DeepExplainer for the main model
         from unittest.mock import Mock as _Mock
         background_data = self._prepare_background_data(X)
-        if isinstance(model, _Mock):
+        if isinstance(model, _Mock) or not TENSORFLOW_AVAILABLE:
             class _DeepShim:
                 def __init__(self):
                     self.expected_value = 0.0
