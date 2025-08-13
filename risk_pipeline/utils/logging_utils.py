@@ -30,7 +30,7 @@ def setup_logging(log_file_path: Optional[str] = None,
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Create logs directory
+    # Create logs directory (ensure file path, not dir, is passed below)
     log_dir = Path('logs')
     log_dir.mkdir(exist_ok=True)
     
@@ -40,6 +40,10 @@ def setup_logging(log_file_path: Optional[str] = None,
         log_file_path = log_dir / f'pipeline_run_{timestamp}.log'
     else:
         log_file_path = Path(log_file_path)
+        # If a directory path is provided, create a default log file inside it
+        if log_file_path.is_dir() or str(log_file_path).endswith('/'):
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            log_file_path = log_file_path / f'pipeline_run_{timestamp}.log'
         log_file_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Create formatter

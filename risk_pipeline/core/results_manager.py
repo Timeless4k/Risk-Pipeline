@@ -23,8 +23,12 @@ class ResultsManager:
     It implements a thread-safe singleton pattern for shared state management.
     """
     
-    def __init__(self):
-        """Initialize the results manager."""
+    def __init__(self, base_dir: Optional[Union[str, Path]] = None):
+        """Initialize the results manager.
+
+        Args:
+            base_dir: Base directory where experiments and artifacts are stored
+        """
         self._results: Dict[str, Any] = {}
         self._shap_results: Dict[str, Any] = {}
         self._metadata: Dict[str, Any] = {}
@@ -32,12 +36,53 @@ class ResultsManager:
         self._features: Dict[str, Any] = {}
         self._predictions: Dict[str, Any] = {}
         self._metrics: Dict[str, Any] = {}
+        self.base_dir: Path = Path(base_dir) if base_dir else Path('experiments')
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.current_experiment_id: Optional[str] = None
+        self.current_experiment_path: Optional[Path] = None
         
         # Initialize timestamp
         self._metadata['created_at'] = datetime.now().isoformat()
         self._metadata['version'] = '2.0.0'  # Modular version
         
         logger.info("ResultsManager initialized")
+
+    # Experiment lifecycle
+    def start_experiment(self, name: str, config: Dict[str, Any], description: str = "") -> str:
+        """Create a new experiment directory and persist config. Returns experiment id."""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        exp_id = f"experiment_{timestamp}"
+        exp_path = self.base_dir / exp_id
+        exp_path.mkdir(parents=True, exist_ok=True)
+
+        with open(exp_path / 'config.json', 'w') as f:
+            json.dump(config, f, indent=2, default=str)
+
+        metadata = {
+            'name': name,
+            'description': description,
+            'created_at': datetime.now().isoformat(),
+        }
+        with open(exp_path / 'metadata.json', 'w') as f:
+            json.dump(metadata, f, indent=2, default=str)
+
+        self.current_experiment_id = exp_id
+        self.current_experiment_path = exp_path
+        return exp_id
+
+    def save_experiment_metadata(self, metadata: Dict[str, Any]) -> None:
+        """Merge and persist experiment metadata for the active experiment."""
+        if not self.current_experiment_path:
+            logger.warning("No active experiment to save metadata")
+            return
+        meta_path = self.current_experiment_path / 'metadata.json'
+        try:
+            existing = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        except Exception:
+            existing = {}
+        existing.update(metadata)
+        with open(meta_path, 'w') as f:
+            json.dump(existing, f, indent=2, default=str)
     
     def store_results(self, results: Dict[str, Any], asset: Optional[str] = None):
         """
@@ -354,23 +399,59 @@ class ResultsManager:
         
         logger.info(f"Saved results to {output_path}")
     
-    def save_shap_results(self, shap_results: Dict[str, Any], output_dir: str):
+    def save_shap_results(self, *args, **kwargs):
+        """Save SHAP results.
+
+        Two call styles are supported:
+        - save_shap_results(asset, model_name, shap_values, explainer_metadata, feature_importance, task='regression')
+        - save_shap_results(shap_results_dict, output_dir)
         """
-        Save SHAP results to disk.
-        
-        Args:
-            shap_results: SHAP results to save
-            output_dir: Output directory
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save SHAP results
-        shap_file = output_path / 'shap_results.pkl'
-        with open(shap_file, 'wb') as f:
-            pickle.dump(shap_results, f)
-        
-        logger.info(f"Saved SHAP results to {output_path}")
+        if len(args) >= 2 and isinstance(args[0], str) and isinstance(args[1], str):
+            # New API: granular save under current experiment
+            asset: str = args[0]
+            model_name: str = args[1]
+            shap_values = kwargs.get('shap_values') if 'shap_values' in kwargs else (args[2] if len(args) > 2 else None)
+            explainer_metadata = kwargs.get('explainer_metadata') if 'explainer_metadata' in kwargs else (args[3] if len(args) > 3 else {})
+            feature_importance = kwargs.get('feature_importance') if 'feature_importance' in kwargs else (args[4] if len(args) > 4 else {})
+            task: str = kwargs.get('task', 'regression')
+
+            # Update in-memory store
+            if asset not in self._shap_results:
+                self._shap_results[asset] = {}
+            if task not in self._shap_results[asset]:
+                self._shap_results[asset][task] = {}
+            self._shap_results[asset][task][model_name] = {
+                'shap_values': shap_values,
+                'explainer_metadata': explainer_metadata,
+                'feature_importance': feature_importance,
+            }
+
+            # Persist to disk if experiment is active
+            base = self.current_experiment_path or (self.base_dir / 'temp')
+            output_path = base / 'shap' / asset / model_name / task
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            with open(output_path / 'shap_values.pkl', 'wb') as f:
+                pickle.dump(shap_values, f)
+            with open(output_path / 'explainer_metadata.json', 'w') as f:
+                json.dump(explainer_metadata, f, indent=2, default=str)
+            with open(output_path / 'feature_importance.json', 'w') as f:
+                json.dump(feature_importance, f, indent=2)
+
+            logger.info(f"Saved SHAP artifacts: {output_path}")
+            return
+
+        # Legacy API: (shap_results_dict, output_dir)
+        if len(args) == 2 and isinstance(args[0], dict):
+            shap_results: Dict[str, Any] = args[0]
+            output_dir: Union[str, Path] = args[1]
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            with open(output_path / 'shap_results.pkl', 'wb') as f:
+                pickle.dump(shap_results, f)
+            logger.info(f"Saved SHAP results to {output_path}")
+            return
+        raise TypeError("Invalid arguments to save_shap_results")
     
     def load_results(self, results_file: str):
         """
@@ -446,6 +527,47 @@ class ResultsManager:
                         all_results.append(row)
         
         return pd.DataFrame(all_results)
+
+    def export_results_table(self, format: str = 'csv') -> str:
+        """Export aggregated metrics to the active experiment directory.
+
+        Returns the path to the exported file.
+        """
+        df = self.get_all_metrics()
+        export_dir = self.current_experiment_path or (self.base_dir / 'temp')
+        export_dir.mkdir(parents=True, exist_ok=True)
+        out_path = export_dir / f"model_performance.{ 'csv' if format == 'csv' else 'json'}"
+        if format == 'csv':
+            df.to_csv(out_path, index=False)
+        else:
+            df.to_json(out_path, orient='records')
+        logger.info(f"Exported results table to {out_path}")
+        return str(out_path)
+
+    def get_best_models(self, metric: str = 'R2', task: str = 'regression') -> pd.DataFrame:
+        """Return rows sorted by metric for the given task."""
+        df = self.get_all_metrics()
+        if df.empty or metric not in df.columns:
+            return pd.DataFrame()
+        df_task = df[df['task'] == task].copy()
+        return df_task.sort_values(by=metric, ascending=False).reset_index(drop=True)
+
+    def load_experiment(self, experiment_id: str) -> Dict[str, Any]:
+        """Load experiment config, metadata, and summary metrics."""
+        exp_path = self.base_dir / experiment_id
+        out: Dict[str, Any] = {}
+        cfg = exp_path / 'config.json'
+        meta = exp_path / 'metadata.json'
+        metrics_csv = exp_path / 'model_performance.csv'
+        if cfg.exists():
+            out['config'] = json.loads(cfg.read_text())
+        if meta.exists():
+            out['metadata'] = json.loads(meta.read_text())
+        if metrics_csv.exists():
+            out['summary'] = pd.read_csv(metrics_csv)
+        else:
+            out['summary'] = self.get_all_metrics()
+        return out
 
 
 # Global results manager instance for dependency injection

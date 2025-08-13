@@ -88,6 +88,18 @@ class LSTMModel(BaseModel):
             # Set input shape
             self.input_shape = (X_seq.shape[1], X_seq.shape[2])
             
+            # Prefer GPU if available
+            try:
+                gpus = tf.config.list_physical_devices('GPU')
+                if gpus:
+                    self.logger.info(f"Using GPU for LSTM: {[d.name for d in gpus]}")
+                    for gpu in gpus:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                else:
+                    self.logger.info("No GPU detected; using CPU for LSTM")
+            except Exception as _e:
+                self.logger.debug(f"GPU config skipped: {_e}")
+
             # Create model
             self.model = self._create_model(n_classes)
             

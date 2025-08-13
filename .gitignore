@@ -88,3 +88,7 @@ coverage.xml
 
 # Logs
 *.log 
+
+[pytest]
+python_files = test_*.py
+exclude = .*\.png|.*\.jpg|.*\.jpeg

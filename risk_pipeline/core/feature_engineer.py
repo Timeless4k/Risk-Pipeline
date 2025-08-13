@@ -407,6 +407,47 @@ class FeatureEngineer:
                 all_features[asset] = vix_features
         
         return all_features
+
+    def create_features(self, data: Dict[str, pd.DataFrame], skip_correlations: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Backward-compatible API expected by pipeline/tests.
+
+        Returns a mapping per asset with keys: 'features' (np.ndarray or DataFrame),
+        'volatility_target' (np.ndarray/Series), 'regime_target' (np.ndarray/Series),
+        'feature_names' (List[str]), and optional 'scaler'.
+        """
+        all_feature_frames = self.create_all_features(data, skip_correlations=skip_correlations)
+        structured: Dict[str, Dict[str, Any]] = {}
+        for asset, feat_df in all_feature_frames.items():
+            if feat_df.empty:
+                continue
+            # Choose a volatility target proxy
+            target_series = None
+            for candidate in [
+                'Volatility20D', 'Volatility10D', 'Volatility5D',
+                'RollingStd5'
+            ]:
+                if candidate in feat_df.columns:
+                    target_series = feat_df[candidate]
+                    break
+            if target_series is None:
+                # Fallback: rolling std of first numeric column
+                numeric_cols = feat_df.select_dtypes(include=[np.number]).columns
+                if len(numeric_cols) > 0:
+                    target_series = feat_df[numeric_cols[0]].rolling(window=5, min_periods=1).std().fillna(0)
+                else:
+                    continue
+            # Binary regime by median split
+            median_val = float(np.median(target_series.values)) if len(target_series) else 0.0
+            regime = (target_series > median_val).astype(int)
+
+            structured[asset] = {
+                'features': feat_df.copy(),
+                'volatility_target': target_series.copy(),
+                'regime_target': regime,
+                'feature_names': feat_df.columns.tolist(),
+                'scaler': None,
+            }
+        return structured
     
     def create_asset_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create features for a single asset."""
@@ -537,10 +578,12 @@ class FeatureEngineer:
             self.logger.debug(f"Percentile-based labels created: {labels.value_counts().to_dict()}")
             return labels
     
-    def select_features(self, features: pd.DataFrame, target: pd.Series, 
+    def select_features(self, features: pd.DataFrame, target: Optional[pd.Series] = None, 
                        method: str = 'correlation', **kwargs) -> pd.DataFrame:
         """Select features based on various criteria."""
         if method == 'correlation':
+            if target is None:
+                raise TypeError("target is required for correlation-based selection")
             return self._select_by_correlation(features, target, **kwargs)
         elif method == 'variance':
             return self._select_by_variance(features, **kwargs)

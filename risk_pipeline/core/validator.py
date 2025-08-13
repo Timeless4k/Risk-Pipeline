@@ -121,6 +121,55 @@ class WalkForwardValidator:
         
         self.logger.info(f"Generated {len(splits)} valid splits")
         return splits
+
+    def evaluate_model(self,
+                       model: Any,
+                       X: pd.DataFrame,
+                       y: pd.Series,
+                       splits: List[Tuple[pd.Index, pd.Index]],
+                       asset: str,
+                       model_type: str) -> Dict[str, Any]:
+        """Train/evaluate a model across splits and return aggregated metrics.
+
+        Expects model implements train, predict, evaluate compatible with BaseModel.
+        """
+        try:
+            all_predictions: List[float] = []
+            all_actuals: List[float] = []
+
+            # Ensure inputs are aligned DataFrame/Series
+            X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+            y_ser = y if isinstance(y, pd.Series) else pd.Series(y, index=X_df.index[:len(y)])
+
+            for train_idx, test_idx in splits:
+                X_train, X_test = X_df.loc[train_idx], X_df.loc[test_idx]
+                y_train, y_test = y_ser.loc[train_idx], y_ser.loc[test_idx]
+
+                # Train
+                model.train(X_train, y_train)
+
+                # Predict
+                y_pred = model.predict(X_test)
+
+                # Accumulate
+                all_predictions.extend(list(np.asarray(y_pred).ravel()))
+                all_actuals.extend(list(np.asarray(y_test).ravel()))
+
+            # Evaluate overall
+            metrics = model.evaluate(np.array(all_predictions), np.array(all_actuals))
+
+            return {
+                'metrics': metrics,
+                'predictions': all_predictions,
+                'actuals': all_actuals,
+                'config': {
+                    'n_splits': self.config.n_splits,
+                    'test_size': self.config.test_size,
+                }
+            }
+        except Exception as e:
+            logger.error(f"Model evaluation failed for {asset}_{model_type}: {e}")
+            return {'error': str(e), 'metrics': {}, 'predictions': [], 'actuals': []}
     
     def _generate_expanding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int) -> List[Tuple[pd.Index, pd.Index]]:
         """Generate expanding window splits."""

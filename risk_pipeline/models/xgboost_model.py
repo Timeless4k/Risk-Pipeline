@@ -43,6 +43,26 @@ class XGBoostModel(BaseModel):
         # Update with any additional parameters
         self.params.update(kwargs)
         
+        # Prefer GPU if available for XGBoost
+        try:
+            import subprocess
+            gpu_available = False
+            try:
+                # Simple CUDA presence check
+                subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                gpu_available = True
+            except Exception:
+                gpu_available = False
+            if gpu_available:
+                self.params.setdefault('tree_method', 'gpu_hist')
+                self.params.setdefault('predictor', 'gpu_predictor')
+                self.params.setdefault('gpu_id', 0)
+                self.logger.info("Using GPU for XGBoost (gpu_hist)")
+            else:
+                self.params.setdefault('tree_method', 'hist')
+        except Exception as _e:
+            self.logger.debug(f"GPU check for XGBoost skipped: {_e}")
+
         # Create model
         if task == 'classification':
             self.model = xgb.XGBClassifier(**self.params)

@@ -50,7 +50,7 @@ class RiskPipeline:
     model persistence while maintaining backward compatibility.
     """
     
-    def __init__(self, config_path: Optional[str] = None, experiment_name: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None, experiment_name: Optional[str] = None):
         """
         Initialize the RiskPipeline with configuration and experiment tracking.
         
@@ -58,9 +58,11 @@ class RiskPipeline:
             config_path: Path to configuration file. If None, uses default config.
             experiment_name: Name for the current experiment session.
         """
-        # Load configuration
+        # Load configuration (path takes precedence, else dict, else defaults)
         if config_path:
             self.config = PipelineConfig.from_file(config_path)
+        elif config is not None:
+            self.config = PipelineConfig(config_dict=config)
         else:
             self.config = PipelineConfig()
         
@@ -72,7 +74,9 @@ class RiskPipeline:
         
         # Initialize experiment tracking
         self.experiment_name = experiment_name or f"pipeline_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.results_manager = ResultsManager(base_dir="experiments")
+        # Results/experiments directory co-located with configured outputs
+        experiments_base = Path(self.config.output.results_dir).parent / "experiments"
+        self.results_manager = ResultsManager(base_dir=str(experiments_base))
         
         # Initialize core components
         self.data_loader = DataLoader(
@@ -89,9 +93,9 @@ class RiskPipeline:
         )
         
         # Initialize model factory
+        # Pass plain dict config to model factory
         self.model_factory = ModelFactory(
-            config=self.config,
-            results_manager=self.results_manager
+            config=self.config.to_dict()
         )
         
         # Initialize SHAP analyzer
@@ -116,7 +120,7 @@ class RiskPipeline:
         )
         
         self.shap_visualizer = SHAPVisualizer(
-            output_dir=self.config.output.shap_plots_dir
+            config=self.config
         )
         
         # Performance tracking
@@ -177,7 +181,7 @@ class RiskPipeline:
             
             # Engineer features
             logger.info("Engineering features")
-            features = self.feature_engineer.create_features(
+            features = self.feature_engineer.create_all_features(
                 data=data,
                 skip_correlations=kwargs.get('skip_correlations', False)
             )
@@ -195,6 +199,9 @@ class RiskPipeline:
                 
                 asset_features = features[asset]
                 
+                # Persist features for downstream analysis (e.g., SHAP)
+                self.results_manager.store_features(asset_features, asset)
+
                 # Run regression models
                 regression_results = self._run_models(
                     features=asset_features,
@@ -221,19 +228,12 @@ class RiskPipeline:
                 # Run SHAP analysis if requested
                 if run_shap:
                     logger.info(f"Running SHAP analysis for {asset}")
-                    asset_shap = self.shap_analyzer.analyze_all_models(
-                        features=asset_features,
-                        results=results[asset]
-                    )
-                    shap_results[asset] = asset_shap
-                    
-                    # Save SHAP results
-                    self.results_manager.save_shap_results(
+                    # Analyze both tasks using the analyzer's public API
+                    shap_results[asset] = self.shap_analyzer._analyze_task_models(
                         asset=asset,
-                        model_name="all",
-                        shap_values=asset_shap,
-                        explainer_metadata={},
-                        feature_importance=self._extract_feature_importance(asset_shap)
+                        task_results={**results[asset].get('regression', {}), **results[asset].get('classification', {})},
+                        features=asset_features,
+                        task='regression'
                     )
             
             # Store results centrally
@@ -467,6 +467,12 @@ class RiskPipeline:
         
         results = {}
         
+        # Ensure X is a DataFrame for splitting/indexing
+        X_df = pd.DataFrame(X) if isinstance(X, np.ndarray) else X
+
+        # Get train/test splits
+        splits = self.validator.split(X_df)
+
         # Run each model type
         for model_type in models:
             try:
@@ -475,13 +481,13 @@ class RiskPipeline:
                 model = self.model_factory.create_model(
                     model_type=model_type,
                     task=task,
-                    input_shape=X.shape,
-                    n_classes=len(y.unique()) if task == 'classification' else None
+                    input_shape=X_df.shape,
+                    n_classes=(len(pd.Series(y).unique()) if task == 'classification' else None)
                 )
                 
                 model_results = self.validator.evaluate_model(
                     model=model,
-                    X=X,
+                    X=X_df,
                     y=y,
                     splits=splits,
                     asset=asset,
@@ -517,8 +523,27 @@ class RiskPipeline:
         """Generate comprehensive visualizations including SHAP plots."""
         logger.info("Generating comprehensive visualizations")
         
-        # Standard visualizations
-        self.visualizer.generate_all_plots(results=results, shap_results=shap_results)
+        # Convert results to DataFrame and generate standard plots
+        try:
+            results_df = []
+            for asset, asset_results in results.items():
+                for task, task_results in asset_results.items():
+                    for model, model_result in task_results.items():
+                        metrics = model_result.get('metrics', {}) if isinstance(model_result, dict) else {}
+                        row = {
+                            'Asset': asset,
+                            'Task': task,
+                            'Model': model,
+                            **metrics
+                        }
+                        results_df.append(row)
+            import pandas as _pd
+            results_df = _pd.DataFrame(results_df)
+            # Use visualizer utilities if available
+            if hasattr(self.visualizer, 'generate_summary_report'):
+                self.visualizer.generate_summary_report(results_df, self.config.to_dict(), Path(self.config.output.plots_dir))
+        except Exception as _e:
+            logger.debug(f"Visualization summary generation skipped: {_e}")
         
         # SHAP visualizations if available
         if shap_results:
