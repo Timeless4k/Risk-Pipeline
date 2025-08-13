@@ -62,6 +62,9 @@ class SHAPAnalyzer:
                         return self._f(*args, **kwargs)
                 return _Callable(func)
         self.interpretation_utils = _UtilsProxy(utils)
+        # Ensure shap_data_dir exists for save/load helper paths
+        self.shap_data_dir = Path(getattr(self.config.output, 'shap_dir', 'artifacts/shap'))
+        self.shap_data_dir.mkdir(parents=True, exist_ok=True)
         
         # SHAP analysis results storage
         self._shap_values = {}

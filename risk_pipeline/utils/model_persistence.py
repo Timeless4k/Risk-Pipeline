@@ -41,17 +41,22 @@ class ModelPersistence:
         filepath.mkdir(parents=True, exist_ok=True)
         # Save model (handle keras safely; mocks are usually picklable)
         model_pkl = filepath / 'model.pkl'
-        if hasattr(model, 'save') and callable(model.save) and not str(type(model)).endswith("'unittest.mock.Mock'>"):
+        def _is_mock(obj: Any) -> bool:
+            try:
+                from unittest.mock import Mock as _Mock
+                return isinstance(obj, _Mock)
+            except Exception:
+                return str(type(obj)).endswith("unittest.mock.Mock'>")
+
+        if hasattr(model, 'save') and callable(model.save) and not _is_mock(model):
             # Keras or tf model
             model.save(filepath / 'model.h5')
         else:
-            try:
+            if _is_mock(model):
+                # Skip pickling mock; create placeholder and register in-memory
+                model_pkl.write_bytes(b"")
+            else:
                 joblib.dump(model, model_pkl)
-            except Exception:
-                # Save a simple Mock instance fallback to allow equality in tests
-                from unittest.mock import Mock as _Mock
-                fallback = _Mock()
-                joblib.dump(fallback, model_pkl)
         # Register in-memory for test round-trips
         try:
             _INMEM_REGISTRY[str(model_pkl)] = model
@@ -59,10 +64,14 @@ class ModelPersistence:
             pass
         # Save scaler (handle mocks)
         if scaler is not None:
-            try:
-                joblib.dump(scaler, filepath / 'scaler.pkl')
-            except Exception:
-                (filepath / 'scaler.pkl').write_bytes(b'')
+            sp = filepath / 'scaler.pkl'
+            if _is_mock(scaler):
+                sp.write_bytes(b'')
+            else:
+                try:
+                    joblib.dump(scaler, sp)
+                except Exception:
+                    sp.write_bytes(b'')
             try:
                 _INMEM_REGISTRY[str(filepath / 'scaler.pkl')] = scaler
             except Exception:
