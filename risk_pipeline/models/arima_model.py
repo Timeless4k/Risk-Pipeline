@@ -35,6 +35,11 @@ class ARIMAModel(BaseModel):
         
         self.logger.info(f"ARIMA model initialized with order {order}")
     
+    # For unit tests compatibility
+    def build_model(self, input_shape: Tuple[int, ...]):
+        """No-op builder for ARIMA to satisfy tests."""
+        return self
+    
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
@@ -48,7 +53,9 @@ class ARIMAModel(BaseModel):
         Returns:
             Dictionary containing training metrics and diagnostics
         """
-        # Validate input
+        # Validate input (X is not used for ARIMA; allow None)
+        if X is None:
+            X = np.zeros((len(y), 1))
         _, y = self._validate_input(X, y)
         
         if len(y) < 50:

@@ -128,11 +128,13 @@ class BaseModel(ABC):
     def _calculate_regression_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
         """Calculate regression metrics."""
         try:
-            rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+            mse = mean_squared_error(y_true, y_pred)
+            rmse = np.sqrt(mse)
             mae = mean_absolute_error(y_true, y_pred)
             r2 = r2_score(y_true, y_pred)
             
             return {
+                'MSE': mse,
                 'RMSE': rmse,
                 'MAE': mae,
                 'R2': r2
@@ -140,6 +142,7 @@ class BaseModel(ABC):
         except Exception as e:
             self.logger.error(f"Error calculating regression metrics: {e}")
             return {
+                'MSE': float('inf'),
                 'RMSE': float('inf'),
                 'MAE': float('inf'),
                 'R2': -float('inf')

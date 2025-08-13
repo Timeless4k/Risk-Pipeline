@@ -53,6 +53,12 @@ class StockMixerModel(BaseModel):
                         f"temporal={temporal_units}, indicator={indicator_units}, "
                         f"cross_stock={cross_stock_units}, fusion={fusion_units}")
     
+    # For unit tests compatibility
+    def build_model(self, input_shape: Tuple[int, ...]):
+        self.input_shape = input_shape
+        self.model = self._create_model(n_classes=1)
+        return self
+    
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
@@ -86,8 +92,14 @@ class StockMixerModel(BaseModel):
                 n_classes = 1
                 self.logger.info("Regression task")
             
+            # Flatten potential 3D input to 2D for scaling
+            if isinstance(X, np.ndarray) and X.ndim == 3:
+                num_samples, time_steps, num_features = X.shape
+                X_flat = X.reshape(num_samples, time_steps * num_features)
+            else:
+                X_flat = X
             # Scale features
-            X_scaled = self.scaler.fit_transform(X)
+            X_scaled = self.scaler.fit_transform(X_flat)
             
             # Set input shape
             self.input_shape = (X_scaled.shape[1],)
@@ -164,8 +176,14 @@ class StockMixerModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
+            # Flatten potential 3D input
+            if isinstance(X, np.ndarray) and X.ndim == 3:
+                num_samples, time_steps, num_features = X.shape
+                X_flat = X.reshape(num_samples, time_steps * num_features)
+            else:
+                X_flat = X
             # Scale features
-            X_scaled = self.scaler.transform(X)
+            X_scaled = self.scaler.transform(X_flat)
             
             # Make predictions
             y_pred = self.model.predict(X_scaled, verbose=0)

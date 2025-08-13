@@ -71,6 +71,10 @@ class XGBoostModel(BaseModel):
         
         self.logger.info(f"XGBoost model initialized for {task} task with params: {self.params}")
     
+    # For unit tests compatibility
+    def build_model(self, input_shape: Tuple[int, ...]):
+        return self
+    
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """

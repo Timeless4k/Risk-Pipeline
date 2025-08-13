@@ -211,16 +211,21 @@ class WalkForwardValidator:
         
         # Calculate step size for sliding window
         total_available = n_samples - test_size - self.config.gap
-        step_size = max(1, total_available // n_splits)
+        if total_available <= self.config.min_train_size:
+            return []
+        step_size = max(1, (total_available - self.config.min_train_size - (n_splits - 1) * (test_size + self.config.gap)) // max(1, n_splits))
         
         for i in range(n_splits):
-            train_start = i * step_size
-            train_end = train_start + self.config.min_train_size + (total_available - self.config.min_train_size) // n_splits
+            # Sliding window: maintain fixed train length and slide by test size
+            train_end = self.config.min_train_size + i * (test_size + self.config.gap)
+            train_start = max(0, train_end - self.config.min_train_size)
             test_start = train_end + self.config.gap
-            test_end = min(test_start + test_size, n_samples)
+            test_end = test_start + test_size
+            if test_end > n_samples:
+                break
             
             # Ensure we have valid indices
-            if not self._validate_split_indices(train_start, train_end, test_start, test_end, n_samples):
+            if not self._validate_split_indices(train_end, test_start, test_end, n_samples, train_start=train_start):
                 self.logger.warning(f"Split {i+1}: Invalid indices, skipping")
                 continue
                 

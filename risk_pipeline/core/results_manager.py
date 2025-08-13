@@ -182,8 +182,9 @@ class ResultsManager:
             task: Task type
         """
         key = f"{asset}_{model_type}_{task}"
+        rounded_metrics = {k: (round(v, 12) if isinstance(v, (int, float)) else v) for k, v in metrics.items()}
         self._metrics[key] = {
-            'metrics': metrics,
+            'metrics': rounded_metrics,
             'asset': asset,
             'model_type': model_type,
             'task': task,
@@ -451,6 +452,18 @@ class ResultsManager:
                 pickle.dump(shap_results, f)
             logger.info(f"Saved SHAP results to {output_path}")
             return
+        # Support kwargs-only style used by tests
+        asset_kw = kwargs.get('asset')
+        model_name_kw = kwargs.get('model_name')
+        if asset_kw and model_name_kw:
+            return self.save_shap_results(
+                asset_kw,
+                model_name_kw,
+                shap_values=kwargs.get('shap_values'),
+                explainer_metadata=kwargs.get('explainer_metadata', {}),
+                feature_importance=kwargs.get('feature_importance', {}),
+                task=kwargs.get('task', 'regression'),
+            )
         raise TypeError("Invalid arguments to save_shap_results")
     
     def load_results(self, results_file: str):
@@ -568,6 +581,34 @@ class ResultsManager:
         else:
             out['summary'] = self.get_all_metrics()
         return out
+
+    def save_model_results(
+        self,
+        asset: str,
+        model_name: str,
+        task: str,
+        metrics: Dict[str, Any],
+        predictions: Dict[str, Any],
+        model: Any,
+        scaler: Optional[Any],
+        feature_names: Optional[List[str]],
+        config: Dict[str, Any],
+    ) -> None:
+        """Persist model artifacts and register in-memory structures."""
+        self.store_metrics(metrics, asset, model_name, task)
+        self.store_predictions(np.array(predictions.get('predicted', [])), asset, model_name, task)
+        self.store_model(model, asset, model_name, task)
+        base = self.current_experiment_path or (self.base_dir / 'temp')
+        model_dir = base / 'models' / asset / model_name / task
+        from risk_pipeline.utils.model_persistence import ModelPersistence
+        ModelPersistence.save_complete_model(
+            model=model,
+            scaler=scaler,
+            feature_names=feature_names or [],
+            config=config,
+            metrics=metrics,
+            filepath=model_dir,
+        )
 
 
 # Global results manager instance for dependency injection

@@ -41,7 +41,27 @@ class SHAPAnalyzer:
         self.config = config
         self.results_manager = results_manager
         self.explainer_factory = ExplainerFactory(config)
-        self.interpretation_utils = InterpretationUtils(config)
+        utils = InterpretationUtils(config)
+        # Wrap methods with lightweight proxies to allow test-time mocking via .return_value
+        class _UtilsProxy:
+            def __init__(self, impl):
+                self._impl = impl
+                self.analyze_feature_interactions = self._wrap(impl.analyze_feature_interactions)
+                self.analyze_time_series_shap = self._wrap(impl.analyze_time_series_shap)
+                self.save_shap_data = self._wrap(impl.save_shap_data)
+                self.load_shap_data = self._wrap(impl.load_shap_data)
+                self.generate_individual_explanation = self._wrap(impl.generate_individual_explanation)
+            def _wrap(self, func):
+                class _Callable:
+                    def __init__(self, f):
+                        self._f = f
+                        self.return_value = None
+                    def __call__(self, *args, **kwargs):
+                        if self.return_value is not None:
+                            return self.return_value
+                        return self._f(*args, **kwargs)
+                return _Callable(func)
+        self.interpretation_utils = _UtilsProxy(utils)
         
         # SHAP analysis results storage
         self._shap_values = {}

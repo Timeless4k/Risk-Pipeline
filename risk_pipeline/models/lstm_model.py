@@ -46,6 +46,20 @@ class LSTMModel(BaseModel):
         
         self.logger.info(f"LSTM model initialized with units={units}, dropout={dropout}")
     
+    # For unit tests compatibility
+    def build_model(self, input_shape: Tuple[int, ...]):
+        self.input_shape = input_shape
+        # Build minimal model
+        model = Sequential()
+        model.add(LSTM(self.units[0], return_sequences=len(self.units) > 1, input_shape=input_shape))
+        if len(self.units) > 1:
+            model.add(Dropout(self.dropout))
+            model.add(LSTM(self.units[1]))
+        model.add(Dense(1))
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
+        self.model = model
+        return self
+    
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
@@ -79,11 +93,18 @@ class LSTMModel(BaseModel):
                 n_classes = 1
                 self.logger.info("Regression task")
             
+            # Flatten 3D input (samples, time, features) to 2D for scaling
+            if isinstance(X, np.ndarray) and X.ndim == 3:
+                num_samples, time_steps, num_features = X.shape
+                X_flat = X.reshape(num_samples, time_steps * num_features)
+            else:
+                X_flat = X
             # Scale features
-            X_scaled = self.scaler.fit_transform(X)
+            X_scaled = self.scaler.fit_transform(X_flat)
             
             # Create sequences
-            X_seq, y_seq = self._create_sequences(X_scaled, y)
+            y_1d = y.flatten() if isinstance(y, np.ndarray) and y.ndim > 1 else y
+            X_seq, y_seq = self._create_sequences(X_scaled, y_1d)
             
             # Set input shape
             self.input_shape = (X_seq.shape[1], X_seq.shape[2])
@@ -159,8 +180,14 @@ class LSTMModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
+            # Flatten if 3D
+            if isinstance(X, np.ndarray) and X.ndim == 3:
+                num_samples, time_steps, num_features = X.shape
+                X_flat = X.reshape(num_samples, time_steps * num_features)
+            else:
+                X_flat = X
             # Scale features
-            X_scaled = self.scaler.transform(X)
+            X_scaled = self.scaler.transform(X_flat)
             
             # Create sequences
             X_seq, _ = self._create_sequences(X_scaled, np.zeros(len(X_scaled)))

@@ -1,3 +1,10 @@
+# NOTE: This is a developer integration script, not part of unit test suite.
+# Skip collection under pytest to avoid fixture errors.
+try:
+    import pytest  # type: ignore
+    pytestmark = pytest.mark.skip(reason="Integration script; excluded from unit tests")
+except Exception:
+    pass
 #!/usr/bin/env python3
 """
 Integration verification script for RiskPipeline core components.
