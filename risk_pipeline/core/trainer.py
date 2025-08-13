@@ -47,7 +47,12 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, cfg: GlobalConfig) -
 def train_once(model, X_train, y_train, X_val, y_val, cfg: GlobalConfig) -> Tuple[TrainResult, Dict[str, float]]:
     set_global_seeds(cfg.random_seed)
     start_fit = time.time()
-    model.fit(X_train, y_train, cfg)
+    # Fit model
+    if hasattr(model, 'fit'):
+        model.fit(X_train, y_train, cfg)
+    else:
+        # legacy fallback
+        model.train(X_train, y_train)
     fit_time = time.time() - start_fit
 
     start_pred = time.time()
@@ -56,6 +61,10 @@ def train_once(model, X_train, y_train, X_val, y_val, cfg: GlobalConfig) -> Tupl
 
     y_val_pred = np.asarray(y_val_pred).reshape(-1)
     y_val_true = np.asarray(y_val).reshape(-1)
+    # Align lengths defensively in case a model emits fewer preds
+    n = min(len(y_val_true), len(y_val_pred))
+    y_val_true = y_val_true[:n]
+    y_val_pred = y_val_pred[:n]
 
     result = TrainResult(y_val_pred=y_val_pred, y_val_true=y_val_true, fit_time_s=fit_time, pred_time_s=pred_time)
     metrics = compute_metrics(y_val_true, y_val_pred, cfg)

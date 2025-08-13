@@ -4,6 +4,7 @@ import pandas as pd
 from risk_pipeline.config.global_config import GlobalConfig
 from risk_pipeline.core.splits import generate_sliding_splits
 from risk_pipeline.core.feature_engineer import FeatureEngineer
+from risk_pipeline.core.evaluator import evaluate_all, build_models
 
 
 def _synthetic_df(n=400):
@@ -62,3 +63,21 @@ def test_no_leakage():
 
     # val set should not include the injected region (no leakage)
     assert val_slc.start >= cfg.train_size
+
+
+def test_evaluator_metrics_rows(tmp_path):
+    np.random.seed(1337)
+    cfg = GlobalConfig()
+    cfg.artifacts_dir = str(tmp_path / "artifacts")
+    df = _synthetic_df(400)
+    ret = df['Close'].pct_change().shift(-1).dropna()
+
+    models = build_models(cfg)
+    res = evaluate_all(models, df, ret, cfg)
+    # Columns exist
+    for col in ["mse_mean", "mae_mean", "ic_mean"]:
+        assert col in res.columns
+    # Each requested model present
+    present = set(res["model"].tolist())
+    for m in cfg.models_to_run:
+        assert m in present

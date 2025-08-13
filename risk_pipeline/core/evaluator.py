@@ -9,6 +9,11 @@ import pandas as pd
 from risk_pipeline.config.global_config import GlobalConfig
 from risk_pipeline.core.splits import generate_sliding_splits
 from risk_pipeline.core.trainer import train_once
+from risk_pipeline.core.adapters import SeqAdapterModel, FlatAdapterModel
+from risk_pipeline.models.lstm_model import LSTMModel
+from risk_pipeline.models.stockmixer_model import StockMixerModel
+from risk_pipeline.models.xgboost_model import XGBoostModel
+from risk_pipeline.models.arima_model import ARIMAModel
 from risk_pipeline.core.feature_engineer import FeatureEngineer
 
 
@@ -72,8 +77,25 @@ def evaluate_all(models: Dict[str, any], raw_df: pd.DataFrame, target: pd.Series
 
     # Markdown
     out_md = os.path.join(cfg.artifacts_dir, "RESULTS.md")
+    try:
+        md = agg.to_markdown(index=False)
+    except Exception:
+        md = agg.to_csv(index=False)
     with open(out_md, "w") as f:
         f.write("# Model Comparison Results\n\n")
-        f.write(agg.to_markdown(index=False))
+        f.write(md)
 
     return agg
+
+
+def build_models(cfg: GlobalConfig) -> Dict[str, any]:
+    models: Dict[str, any] = {}
+    if "lstm" in cfg.models_to_run:
+        models["lstm"] = SeqAdapterModel(LSTMModel(model_type='lstm', task='regression'), "lstm")
+    if "stockmixer" in cfg.models_to_run:
+        models["stockmixer"] = SeqAdapterModel(StockMixerModel(model_type='stockmixer', task='regression'), "stockmixer")
+    if "xgb" in cfg.models_to_run:
+        models["xgb"] = FlatAdapterModel(XGBoostModel(task='regression'), "xgb")
+    if "arima" in cfg.models_to_run:
+        models["arima"] = FlatAdapterModel(ARIMAModel(model_type='arima', task='regression'), "arima")
+    return models
