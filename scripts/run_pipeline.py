@@ -16,6 +16,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 
+# Check for TensorFlow availability and adjust models accordingly
+try:
+    import tensorflow as tf
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+    print("[WARNING] TensorFlow not available. LSTM models will be excluded.")
+
 from risk_pipeline.config.global_config import GlobalConfig
 from risk_pipeline.core.evaluator import evaluate_all, build_models
 from risk_pipeline.core.io_utils import write_atomic, tee_logger, setup_basic_logging
@@ -27,7 +35,11 @@ def parse_args():
     p.add_argument("--data", choices=["demo", "csv"], default="demo", help="Use built-in demo data or provide a CSV")
     p.add_argument("--csv-path", type=str, default=None, help="Path to CSV with columns Close,High,Low and a datetime index/column")
     p.add_argument("--date-col", type=str, default=None, help="Name of datetime column if CSV index is not datetime")
-    p.add_argument("--models", type=str, default="lstm,stockmixer,xgb,arima", help="Comma-separated models to run")
+    
+    # Default models - exclude LSTM if TensorFlow not available
+    default_models = "stockmixer,xgb,arima" if not TENSORFLOW_AVAILABLE else "lstm,stockmixer,xgb,arima"
+    p.add_argument("--models", type=str, default=default_models, help="Comma-separated models to run")
+    
     p.add_argument("--artifacts", type=str, default="artifacts/compare_run", help="Directory to store results and logs")
     p.add_argument("--cpu-only", action="store_true", help="Force CPU only (unset CUDA_VISIBLE_DEVICES)")
     p.add_argument("--dry-run", action="store_true", help="Build first split, print shapes, and exit without training")
@@ -61,6 +73,14 @@ def main():
         print("[INFO] Forcing CPU-only mode (CUDA_VISIBLE_DEVICES cleared)")
 
     models_to_run = [m.strip() for m in args.models.split(",") if m.strip()]
+    
+    # Filter out LSTM models if TensorFlow is not available
+    if not TENSORFLOW_AVAILABLE:
+        original_models = models_to_run.copy()
+        models_to_run = [m for m in models_to_run if m.lower() != 'lstm']
+        if original_models != models_to_run:
+            print(f"[INFO] Filtered out LSTM models due to missing TensorFlow. Available models: {models_to_run}")
+    
     cfg = GlobalConfig(models_to_run=models_to_run, artifacts_dir=args.artifacts)
 
     # Load data
