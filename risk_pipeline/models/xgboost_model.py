@@ -30,14 +30,22 @@ class XGBoostModel(BaseModel):
         self.task = task
         self.scaler = StandardScaler()
         
-        # Default parameters
+        # Default parameters with regularization to prevent overfitting
         self.params = {
             'n_estimators': kwargs.get('n_estimators', 100),
-            'max_depth': kwargs.get('max_depth', 5),
-            'learning_rate': kwargs.get('learning_rate', 0.1),
+            'max_depth': kwargs.get('max_depth', 3),  # Reduced from 5 to prevent overfitting
+            'learning_rate': kwargs.get('learning_rate', 0.05),  # Reduced from 0.1 for better generalization
             'random_state': kwargs.get('random_state', 42),
             'use_label_encoder': False,
-            'eval_metric': 'mlogloss' if task == 'classification' else 'rmse'
+            'eval_metric': 'mlogloss' if task == 'classification' else 'rmse',
+            
+            # Regularization parameters
+            'reg_alpha': kwargs.get('reg_alpha', 0.1),  # L1 regularization
+            'reg_lambda': kwargs.get('reg_lambda', 1.0),  # L2 regularization
+            'subsample': kwargs.get('subsample', 0.8),  # Row sampling
+            'colsample_bytree': kwargs.get('colsample_bytree', 0.8),  # Column sampling
+            'min_child_weight': kwargs.get('min_child_weight', 3),  # Minimum sum of instance weight
+            'gamma': kwargs.get('gamma', 0.1),  # Minimum loss reduction for split
         }
         
         # Update with any additional parameters
@@ -146,11 +154,21 @@ class XGBoostModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
+            # Ensure X is 2D array
+            if X.ndim == 1:
+                X = X.reshape(-1, 1)
+            elif X.ndim > 2:
+                X = X.reshape(X.shape[0], -1)
+            
             # Scale features
             X_scaled = self.scaler.transform(X)
             
             # Make predictions
             y_pred = self.model.predict(X_scaled)
+            
+            # Ensure output is 1D
+            if y_pred.ndim > 1:
+                y_pred = y_pred.ravel()
             
             return y_pred
             
@@ -178,6 +196,12 @@ class XGBoostModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
+            # Ensure X is 2D array
+            if X.ndim == 1:
+                X = X.reshape(-1, 1)
+            elif X.ndim > 2:
+                X = X.reshape(X.shape[0], -1)
+            
             # Scale features
             X_scaled = self.scaler.transform(X)
             
@@ -376,8 +400,8 @@ class XGBoostModel(BaseModel):
             raise
     
     def cross_validate(self, X: Union[pd.DataFrame, np.ndarray], 
-                      y: Union[pd.Series, np.ndarray], 
-                      cv_folds: int = 5) -> Dict[str, List[float]]:
+                       y: Union[pd.Series, np.ndarray], 
+                       cv_folds: int = 5) -> Dict[str, List[float]]:
         """
         Perform cross-validation.
         
@@ -389,7 +413,7 @@ class XGBoostModel(BaseModel):
         Returns:
             Dictionary containing CV results
         """
-        from sklearn.model_selection import cross_val_score
+        from sklearn.model_selection import cross_val_score, TimeSeriesSplit
         
         # Validate input
         X, y = self._validate_input(X, y)
@@ -398,11 +422,18 @@ class XGBoostModel(BaseModel):
             # Scale features
             X_scaled = self.scaler.fit_transform(X)
             
+            # Use TimeSeriesSplit for financial data to prevent data leakage
+            if cv_folds > 1:
+                tscv = TimeSeriesSplit(n_splits=cv_folds)
+                cv = tscv
+            else:
+                cv = cv_folds
+            
             # Perform cross-validation
             if self.task == 'classification':
-                cv_scores = cross_val_score(self.model, X_scaled, y, cv=cv_folds, scoring='accuracy')
+                cv_scores = cross_val_score(self.model, X_scaled, y, cv=cv, scoring='accuracy')
             else:
-                cv_scores = cross_val_score(self.model, X_scaled, y, cv=cv_folds, scoring='r2')
+                cv_scores = cross_val_score(self.model, X_scaled, y, cv=cv, scoring='r2')
             
             results = {
                 'cv_scores': cv_scores.tolist(),
@@ -420,4 +451,95 @@ class XGBoostModel(BaseModel):
                 'cv_scores': [],
                 'mean_score': 0.0,
                 'std_score': 0.0
+            }
+    
+    def tune_hyperparameters(self, X: Union[pd.DataFrame, np.ndarray], 
+                           y: Union[pd.Series, np.ndarray]) -> Dict[str, Any]:
+        """
+        Tune hyperparameters using grid search with time series cross-validation.
+        
+        Args:
+            X: Training features
+            y: Training targets
+            
+        Returns:
+            Dictionary with best parameters and scores
+        """
+        from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+        
+        # Validate input
+        X, y = self._validate_input(X, y)
+        
+        try:
+            # Scale features
+            X_scaled = self.scaler.fit_transform(X)
+            
+            # Define parameter grid for tuning
+            param_grid = {
+                'max_depth': [2, 3, 4],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'n_estimators': [50, 100, 200],
+                'reg_alpha': [0.01, 0.1, 1.0],
+                'reg_lambda': [0.5, 1.0, 2.0],
+                'subsample': [0.7, 0.8, 0.9],
+                'colsample_bytree': [0.7, 0.8, 0.9]
+            }
+            
+            # Use TimeSeriesSplit for financial data
+            tscv = TimeSeriesSplit(n_splits=3)
+            
+            # Create base model for tuning
+            if self.task == 'classification':
+                base_model = xgb.XGBClassifier(
+                    random_state=self.params['random_state'],
+                    use_label_encoder=False,
+                    eval_metric='mlogloss'
+                )
+                scoring = 'accuracy'
+            else:
+                base_model = xgb.XGBRegressor(
+                    random_state=self.params['random_state'],
+                    eval_metric='rmse'
+                )
+                scoring = 'r2'
+            
+            # Perform grid search
+            grid_search = GridSearchCV(
+                base_model, 
+                param_grid, 
+                cv=tscv, 
+                scoring=scoring,
+                n_jobs=-1,
+                verbose=0
+            )
+            
+            grid_search.fit(X_scaled, y)
+            
+            # Update model with best parameters
+            best_params = grid_search.best_params_
+            self.params.update(best_params)
+            
+            # Recreate model with best parameters
+            if self.task == 'classification':
+                self.model = xgb.XGBClassifier(**self.params)
+            else:
+                self.model = xgb.XGBRegressor(**self.params)
+            
+            results = {
+                'best_params': best_params,
+                'best_score': grid_search.best_score_,
+                'cv_results': grid_search.cv_results_
+            }
+            
+            self.logger.info(f"Hyperparameter tuning completed. Best score: {results['best_score']:.4f}")
+            self.logger.info(f"Best parameters: {best_params}")
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Hyperparameter tuning failed: {e}")
+            return {
+                'best_params': self.params,
+                'best_score': 0.0,
+                'cv_results': {}
             } 

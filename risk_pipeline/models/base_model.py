@@ -33,6 +33,33 @@ class BaseModel(ABC):
         self.params = kwargs
         self.logger.info(f"Initialized {self.name} with parameters: {kwargs}")
     
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], 
+            y: Union[pd.Series, np.ndarray], config: Any = None) -> Dict[str, Any]:
+        """
+        Fit the model (alias for train to match adapter interface).
+        
+        Args:
+            X: Training features
+            y: Training targets
+            config: Configuration object (optional)
+            
+        Returns:
+            Dictionary containing training metrics and history
+        """
+        # Extract parameters from config if provided
+        kwargs = {}
+        if config:
+            if hasattr(config, 'max_epochs'):
+                kwargs['epochs'] = config.max_epochs
+            if hasattr(config, 'batch_size'):
+                kwargs['batch_size'] = config.batch_size
+            if hasattr(config, 'patience'):
+                kwargs['early_stopping_patience'] = config.patience
+            if hasattr(config, 'lr'):
+                kwargs['learning_rate'] = config.lr
+        
+        return self.train(X, y, **kwargs)
+
     @abstractmethod
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:

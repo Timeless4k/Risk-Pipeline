@@ -14,49 +14,67 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
 
 from .base_model import BaseModel
+from ..utils.tensorflow_utils import (
+    configure_tensorflow_memory, 
+    get_optimal_device, 
+    safe_tensorflow_operation,
+    cleanup_tensorflow_memory
+)
 
 
 class StockMixerModel(BaseModel):
     """StockMixer model with parallel pathways for temporal, indicator, and cross-stock mixing."""
     
-    def __init__(self, temporal_units: int = 64, indicator_units: int = 64, 
-                 cross_stock_units: int = 64, fusion_units: int = 128, 
-                 dropout: float = 0.2, **kwargs):
+    def __init__(self, task: str = 'regression', **kwargs):
         """
         Initialize StockMixer model.
         
         Args:
-            temporal_units: Units for temporal pathway
-            indicator_units: Units for indicator pathway
-            cross_stock_units: Units for cross-stock pathway
-            fusion_units: Units for fusion layer
-            dropout: Dropout rate
+            task: 'regression' or 'classification'
             **kwargs: Additional parameters
         """
         super().__init__(name="StockMixer", **kwargs)
-        self.temporal_units = temporal_units
-        self.indicator_units = indicator_units
-        self.cross_stock_units = cross_stock_units
-        self.fusion_units = fusion_units
-        self.dropout = dropout
+        self.task = task
+        self.temporal_units = kwargs.get('temporal_units', 64)
+        self.indicator_units = kwargs.get('indicator_units', 64)
+        self.cross_stock_units = kwargs.get('cross_stock_units', 64)
+        self.fusion_units = kwargs.get('fusion_units', 128)
+        self.dropout = kwargs.get('dropout', 0.2)
         self.scaler = StandardScaler()
         self.input_shape = None
+        self.model = None
         
         # Training parameters
-        self.batch_size = kwargs.get('batch_size', 16)
-        self.epochs = kwargs.get('epochs', 100)
-        self.validation_split = kwargs.get('validation_split', 0.2)
-        self.early_stopping_patience = kwargs.get('early_stopping_patience', 5)
-        self.reduce_lr_patience = kwargs.get('reduce_lr_patience', 5)
+        self.params = {
+            'batch_size': kwargs.get('batch_size', 16),
+            'epochs': kwargs.get('epochs', 100),
+            'validation_split': kwargs.get('validation_split', 0.2),
+            'early_stopping_patience': kwargs.get('early_stopping_patience', 5),
+            'reduce_lr_patience': kwargs.get('reduce_lr_patience', 5),
+            'learning_rate': kwargs.get('learning_rate', 0.001)
+        }
         
         self.logger.info(f"StockMixer model initialized with pathways: "
-                        f"temporal={temporal_units}, indicator={indicator_units}, "
-                        f"cross_stock={cross_stock_units}, fusion={fusion_units}")
+                        f"temporal={self.temporal_units}, indicator={self.indicator_units}, "
+                        f"cross_stock={self.cross_stock_units}, fusion={self.fusion_units}")
     
-    # For unit tests compatibility
-    def build_model(self, input_shape: Tuple[int, ...]):
+    def build_model(self, input_shape: Tuple[int, ...]) -> 'StockMixerModel':
+        """Build the StockMixer model architecture."""
         self.input_shape = input_shape
-        self.model = self._create_model(n_classes=1)
+        
+        # Handle different input shapes
+        if len(input_shape) == 2:
+            # [N, F] - use as is for tabular data
+            self.input_shape = input_shape
+        elif len(input_shape) == 3:
+            # [N, T, F] - flatten to [N, T*F] for tabular processing
+            self.input_shape = (input_shape[0], input_shape[1] * input_shape[2])
+        else:
+            raise ValueError(f"Unsupported input shape: {input_shape}")
+        
+        # Create the model
+        self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
+        self.logger.info(f"StockMixer model built with input shape: {self.input_shape}")
         return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
@@ -70,93 +88,66 @@ class StockMixerModel(BaseModel):
             **kwargs: Additional training parameters
             
         Returns:
-            Dictionary containing training metrics and history
+            Training results dictionary
         """
+        if not self.model:
+            raise ValueError("Model must be built before training. Call build_model() first.")
+        
         # Validate input
         X, y = self._validate_input(X, y)
         
-        if len(X) < 20:
-            raise ValueError("StockMixer requires at least 20 observations")
-        
-        self.logger.info(f"Training StockMixer model with {len(X)} observations")
-        
         try:
-            # Determine task type
-            unique_y = np.unique(y)
-            if len(unique_y) <= 10:  # Classification task
-                self.task = 'classification'
-                n_classes = len(unique_y)
-                self.logger.info(f"Classification task with {n_classes} classes")
-            else:
-                self.task = 'regression'
-                n_classes = 1
-                self.logger.info("Regression task")
+            # Configure TensorFlow memory
+            configure_tensorflow_memory()
             
-            # Flatten potential 3D input to 2D for scaling
-            if isinstance(X, np.ndarray) and X.ndim == 3:
+            # Ensure X has the right shape for StockMixer
+            if X.ndim == 2:
+                # [N, F] - already correct for tabular data
+                X_flat = X
+            elif X.ndim == 3:
+                # [N, T, F] - flatten to [N, T*F] for tabular processing
                 num_samples, time_steps, num_features = X.shape
                 X_flat = X.reshape(num_samples, time_steps * num_features)
             else:
-                X_flat = X
+                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
+            
             # Scale features
             X_scaled = self.scaler.fit_transform(X_flat)
             
-            # Set input shape
-            self.input_shape = (X_scaled.shape[1],)
+            self.logger.info(f"Training StockMixer with {len(X_scaled)} samples, shape: {X_scaled.shape}")
             
-            # Prefer GPU if available
-            try:
-                gpus = tf.config.list_physical_devices('GPU')
-                if gpus:
-                    self.logger.info(f"Using GPU for StockMixer: {[d.name for d in gpus]}")
-                    for gpu in gpus:
-                        tf.config.experimental.set_memory_growth(gpu, True)
-                else:
-                    self.logger.info("No GPU detected; using CPU for StockMixer")
-            except Exception as _e:
-                self.logger.debug(f"GPU config skipped: {_e}")
-
-            # Create model
-            self.model = self._create_model(n_classes)
+            # Get optimal device and train
+            device = get_optimal_device()
+            self.logger.info(f"Using device: {device}")
             
-            # Callbacks
-            callbacks = self._create_callbacks()
+            # Use safe operation with fallback
+            def train_model():
+                return self.model.fit(
+                    X_scaled, y,
+                    batch_size=self.params.get('batch_size', 16),
+                    epochs=self.params.get('epochs', 100),
+                    validation_split=0.2,
+                    callbacks=self._get_callbacks(),
+                    verbose=0
+                )
             
-            # Train model
-            history = self.model.fit(
-                X_scaled, y,
-                epochs=self.epochs,
-                batch_size=self.batch_size,
-                validation_split=self.validation_split,
-                callbacks=callbacks,
-                verbose=0
-            )
+            history = safe_tensorflow_operation(train_model)
             
             self.is_trained = True
             
-            # Calculate training metrics
-            y_pred = self.model.predict(X_scaled, verbose=0)
-            if self.task == 'classification':
-                y_pred = np.argmax(y_pred, axis=1)
-            else:
-                y_pred = y_pred.flatten()
-            
-            metrics = (self._calculate_classification_metrics(y, y_pred) 
-                      if self.task == 'classification' 
-                      else self._calculate_regression_metrics(y, y_pred))
-            
-            self.logger.info(f"StockMixer training completed. Final loss: {history.history['loss'][-1]:.4f}")
+            # Clean up memory
+            cleanup_tensorflow_memory()
             
             return {
-                'metrics': metrics,
                 'history': history.history,
-                'input_shape': self.input_shape,
-                'task': self.task,
-                'pathway_analysis': self._analyze_pathways(X_scaled)
+                'epochs_trained': len(history.history['loss']),
+                'final_loss': history.history['loss'][-1],
+                'final_val_loss': history.history.get('val_loss', [None])[-1]
             }
             
         except Exception as e:
             self.logger.error(f"StockMixer training failed: {e}")
+            cleanup_tensorflow_memory()
             raise
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
@@ -176,21 +167,25 @@ class StockMixerModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
-            # Flatten potential 3D input
-            if isinstance(X, np.ndarray) and X.ndim == 3:
+            # Ensure X has the right shape for StockMixer
+            if X.ndim == 2:
+                # [N, F] - already correct for tabular data
+                X_flat = X
+            elif X.ndim == 3:
+                # [N, T, F] - flatten to [N, T*F] for tabular processing
                 num_samples, time_steps, num_features = X.shape
                 X_flat = X.reshape(num_samples, time_steps * num_features)
             else:
-                X_flat = X
+                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
+            
             # Scale features
             X_scaled = self.scaler.transform(X_flat)
             
             # Make predictions
             y_pred = self.model.predict(X_scaled, verbose=0)
             
-            if self.task == 'classification':
-                y_pred = np.argmax(y_pred, axis=1)
-            else:
+            # Ensure output is 1D
+            if y_pred.ndim > 1:
                 y_pred = y_pred.flatten()
             
             return y_pred
@@ -301,30 +296,40 @@ class StockMixerModel(BaseModel):
         
         return model
     
-    def _create_callbacks(self) -> List:
-        """Create training callbacks."""
+    def _get_callbacks(self):
+        """Get training callbacks."""
         callbacks = []
         
         # Early stopping
-        early_stop = EarlyStopping(
-            monitor='val_loss',
-            patience=self.early_stopping_patience,
-            restore_best_weights=True,
-            mode='min'
-        )
-        callbacks.append(early_stop)
+        if self.params.get('early_stopping_patience', 5) > 0:
+            callbacks.append(tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=self.params.get('early_stopping_patience', 5),
+                restore_best_weights=True
+            ))
         
         # Learning rate reduction
-        reduce_lr = ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=self.reduce_lr_patience,
-            min_lr=0.00001,
-            mode='min'
-        )
-        callbacks.append(reduce_lr)
+        if self.params.get('reduce_lr_patience', 5) > 0:
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=self.params.get('reduce_lr_patience', 5),
+                min_lr=1e-7
+            ))
         
         return callbacks
+
+    def _create_sequences(self, X: np.ndarray, y: np.ndarray, 
+                         sequence_length: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Create sequences for StockMixer training."""
+        sequences = []
+        targets = []
+        
+        for i in range(sequence_length, len(X)):
+            sequences.append(X[i-sequence_length:i])
+            targets.append(y[i])
+        
+        return np.array(sequences), np.array(targets)
     
     def _analyze_pathways(self, X: np.ndarray) -> Dict[str, float]:
         """Analyze the contribution of each pathway."""

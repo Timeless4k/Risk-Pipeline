@@ -16,17 +16,12 @@ A comprehensive machine learning pipeline for risk analysis with **EVERYTHING EN
 
 ```
 Risk-Pipeline/
-├── 🚀 run_pipeline.py              # CENTRAL CONTROL SCRIPT (start here!)
-├── 🤖 risk_pipeline_main.py        # Core pipeline execution script
-├── 🛠️  tools/                      # Utility scripts and tools
-│   ├── pipeline_menu.py            # Interactive configuration menu
-│   └── run_compare.py              # Model comparison utilities
+├── 🚀 run_pipeline.py              # SINGLE COMPREHENSIVE PIPELINE SCRIPT
 ├── 📊 risk_pipeline/               # Core pipeline modules
 │   ├── core/                       # Core pipeline components
 │   ├── models/                     # ML model implementations
 │   ├── visualization/              # Plotting and visualization
 │   └── interpretability/           # SHAP and model interpretation
-├── 📁 configs/                     # Configuration files
 ├── 📁 artifacts/                   # Output results and models
 ├── 📁 tests/                       # Test suite
 └── 📚 docs/                        # Documentation
@@ -46,11 +41,14 @@ python run_pipeline.py
 ```
 **Choose from the comprehensive menu system**
 
-### **Option 3: Quick Run**
+### **Option 3: Direct Script Execution**
 ```bash
-python run_pipeline.py --quick
+# Run main pipeline directly
+python run_pipeline.py --run-all
+
+# Use interactive menu directly
+python run_pipeline.py
 ```
-**Use current defaults without changing settings**
 
 ### **Option 4: Custom Configuration**
 ```bash

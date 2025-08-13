@@ -14,50 +14,63 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.preprocessing import StandardScaler
 
 from .base_model import BaseModel
+from ..utils.tensorflow_utils import (
+    configure_tensorflow_memory, 
+    get_optimal_device, 
+    safe_tensorflow_operation,
+    cleanup_tensorflow_memory
+)
 
 
 class LSTMModel(BaseModel):
     """LSTM model for time series forecasting and classification."""
     
-    def __init__(self, units: List[int] = [50, 30], dropout: float = 0.2, 
-                 sequence_length: int = 15, **kwargs):
+    def __init__(self, task: str = 'regression', **kwargs):
         """
         Initialize LSTM model.
         
         Args:
-            units: List of LSTM units for each layer
-            dropout: Dropout rate
-            sequence_length: Length of input sequences
+            task: 'regression' or 'classification'
             **kwargs: Additional parameters
         """
         super().__init__(name="LSTM", **kwargs)
-        self.units = units
-        self.dropout = dropout
-        self.sequence_length = sequence_length
+        self.task = task
+        self.units = kwargs.get('units', [50, 30])
+        self.dropout = kwargs.get('dropout', 0.2)
+        self.sequence_length = kwargs.get('sequence_length', 15)
         self.scaler = StandardScaler()
         self.input_shape = None
+        self.model = None
         
         # Training parameters
-        self.batch_size = kwargs.get('batch_size', 16)
-        self.epochs = kwargs.get('epochs', 100)
-        self.validation_split = kwargs.get('validation_split', 0.2)
-        self.early_stopping_patience = kwargs.get('early_stopping_patience', 5)
-        self.reduce_lr_patience = kwargs.get('reduce_lr_patience', 5)
+        self.params = {
+            'batch_size': kwargs.get('batch_size', 16),
+            'epochs': kwargs.get('epochs', 100),
+            'validation_split': kwargs.get('validation_split', 0.2),
+            'early_stopping_patience': kwargs.get('early_stopping_patience', 5),
+            'reduce_lr_patience': kwargs.get('reduce_lr_patience', 5),
+            'learning_rate': kwargs.get('learning_rate', 0.001)
+        }
         
-        self.logger.info(f"LSTM model initialized with units={units}, dropout={dropout}")
+        self.logger.info(f"LSTM model initialized with units={self.units}, dropout={self.dropout}")
     
-    # For unit tests compatibility
-    def build_model(self, input_shape: Tuple[int, ...]):
+    def build_model(self, input_shape: Tuple[int, ...]) -> 'LSTMModel':
+        """Build the LSTM model architecture."""
         self.input_shape = input_shape
-        # Build minimal model
-        model = Sequential()
-        model.add(LSTM(self.units[0], return_sequences=len(self.units) > 1, input_shape=input_shape))
-        if len(self.units) > 1:
-            model.add(Dropout(self.dropout))
-            model.add(LSTM(self.units[1]))
-        model.add(Dense(1))
-        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
-        self.model = model
+        
+        # Handle different input shapes
+        if len(input_shape) == 2:
+            # [N, F] - flatten to [N, 1, F]
+            self.input_shape = (1, input_shape[1])
+        elif len(input_shape) == 3:
+            # [N, T, F] - use as is
+            self.input_shape = input_shape
+        else:
+            raise ValueError(f"Unsupported input shape: {input_shape}")
+        
+        # Create the model
+        self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
+        self.logger.info(f"LSTM model built with input shape: {self.input_shape}")
         return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
@@ -71,96 +84,73 @@ class LSTMModel(BaseModel):
             **kwargs: Additional training parameters
             
         Returns:
-            Dictionary containing training metrics and history
+            Training results dictionary
         """
+        if not self.model:
+            raise ValueError("Model must be built before training. Call build_model() first.")
+        
         # Validate input
         X, y = self._validate_input(X, y)
         
-        if len(X) < self.sequence_length + 10:
-            raise ValueError(f"LSTM requires at least {self.sequence_length + 10} observations")
-        
-        self.logger.info(f"Training LSTM model with {len(X)} observations")
-        
         try:
-            # Determine task type
-            unique_y = np.unique(y)
-            if len(unique_y) <= 10:  # Classification task
-                self.task = 'classification'
-                n_classes = len(unique_y)
-                self.logger.info(f"Classification task with {n_classes} classes")
-            else:
-                self.task = 'regression'
-                n_classes = 1
-                self.logger.info("Regression task")
+            # Configure TensorFlow memory
+            configure_tensorflow_memory()
             
-            # Flatten 3D input (samples, time, features) to 2D for scaling
-            if isinstance(X, np.ndarray) and X.ndim == 3:
-                num_samples, time_steps, num_features = X.shape
-                X_flat = X.reshape(num_samples, time_steps * num_features)
+            # Ensure X has the right shape for LSTM
+            if X.ndim == 2:
+                # [N, F] -> [N, 1, F] for single timestep
+                X = X.reshape(X.shape[0], 1, X.shape[1])
+            elif X.ndim == 3:
+                # [N, T, F] - already correct
+                pass
             else:
-                X_flat = X
+                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
+            
             # Scale features
-            X_scaled = self.scaler.fit_transform(X_flat)
+            X_reshaped = X.reshape(-1, X.shape[-1])
+            X_scaled = self.scaler.fit_transform(X_reshaped)
+            X_scaled = X_scaled.reshape(X.shape)
             
-            # Create sequences
-            y_1d = y.flatten() if isinstance(y, np.ndarray) and y.ndim > 1 else y
-            X_seq, y_seq = self._create_sequences(X_scaled, y_1d)
+            # Create sequences if needed
+            if self.sequence_length > 1:
+                X_seq, y_seq = self._create_sequences(X_scaled, y)
+            else:
+                X_seq, y_seq = X_scaled, y
             
-            # Set input shape
-            self.input_shape = (X_seq.shape[1], X_seq.shape[2])
+            self.logger.info(f"Training LSTM with {len(X_seq)} samples, shape: {X_seq.shape}")
             
-            # Prefer GPU if available
-            try:
-                gpus = tf.config.list_physical_devices('GPU')
-                if gpus:
-                    self.logger.info(f"Using GPU for LSTM: {[d.name for d in gpus]}")
-                    for gpu in gpus:
-                        tf.config.experimental.set_memory_growth(gpu, True)
-                else:
-                    self.logger.info("No GPU detected; using CPU for LSTM")
-            except Exception as _e:
-                self.logger.debug(f"GPU config skipped: {_e}")
-
-            # Create model
-            self.model = self._create_model(n_classes)
+            # Get optimal device and train
+            device = get_optimal_device()
+            self.logger.info(f"Using device: {device}")
             
-            # Callbacks
-            callbacks = self._create_callbacks()
+            # Use safe operation with fallback
+            def train_model():
+                return self.model.fit(
+                    X_seq, y_seq,
+                    batch_size=self.params.get('batch_size', 16),
+                    epochs=self.params.get('epochs', 100),
+                    validation_split=0.2,
+                    callbacks=self._get_callbacks(),
+                    verbose=0
+                )
             
-            # Train model
-            history = self.model.fit(
-                X_seq, y_seq,
-                epochs=self.epochs,
-                batch_size=self.batch_size,
-                validation_split=self.validation_split,
-                callbacks=callbacks,
-                verbose=0
-            )
+            history = safe_tensorflow_operation(train_model)
             
             self.is_trained = True
             
-            # Calculate training metrics
-            y_pred = self.model.predict(X_seq, verbose=0)
-            if self.task == 'classification':
-                y_pred = np.argmax(y_pred, axis=1)
-            else:
-                y_pred = y_pred.flatten()
-            
-            metrics = (self._calculate_classification_metrics(y_seq, y_pred) 
-                      if self.task == 'classification' 
-                      else self._calculate_regression_metrics(y_seq, y_pred))
-            
-            self.logger.info(f"LSTM training completed. Final loss: {history.history['loss'][-1]:.4f}")
+            # Clean up memory
+            cleanup_tensorflow_memory()
             
             return {
-                'metrics': metrics,
                 'history': history.history,
-                'input_shape': self.input_shape,
-                'task': self.task
+                'epochs_trained': len(history.history['loss']),
+                'final_loss': history.history['loss'][-1],
+                'final_val_loss': history.history.get('val_loss', [None])[-1]
             }
             
         except Exception as e:
             self.logger.error(f"LSTM training failed: {e}")
+            cleanup_tensorflow_memory()
             raise
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
@@ -180,24 +170,32 @@ class LSTMModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
-            # Flatten if 3D
-            if isinstance(X, np.ndarray) and X.ndim == 3:
-                num_samples, time_steps, num_features = X.shape
-                X_flat = X.reshape(num_samples, time_steps * num_features)
+            # Ensure X has the right shape for LSTM
+            if X.ndim == 2:
+                # [N, F] -> [N, 1, F] for single timestep
+                X = X.reshape(X.shape[0], 1, X.shape[1])
+            elif X.ndim == 3:
+                # [N, T, F] - already correct
+                pass
             else:
-                X_flat = X
-            # Scale features
-            X_scaled = self.scaler.transform(X_flat)
+                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
             
-            # Create sequences
-            X_seq, _ = self._create_sequences(X_scaled, np.zeros(len(X_scaled)))
+            # Scale features
+            X_reshaped = X.reshape(-1, X.shape[-1])
+            X_scaled = self.scaler.transform(X_reshaped)
+            X_scaled = X_scaled.reshape(X.shape)
+            
+            # Create sequences if needed
+            if self.sequence_length > 1:
+                X_seq, _ = self._create_sequences(X_scaled, np.zeros(len(X_scaled)))
+            else:
+                X_seq = X_scaled
             
             # Make predictions
             y_pred = self.model.predict(X_seq, verbose=0)
             
-            if self.task == 'classification':
-                y_pred = np.argmax(y_pred, axis=1)
-            else:
+            # Ensure output is 1D
+            if y_pred.ndim > 1:
                 y_pred = y_pred.flatten()
             
             return y_pred
@@ -288,51 +286,40 @@ class LSTMModel(BaseModel):
         
         return model
     
-    def _create_callbacks(self) -> List:
-        """Create training callbacks."""
+    def _get_callbacks(self):
+        """Get training callbacks."""
         callbacks = []
         
         # Early stopping
-        early_stop = EarlyStopping(
-            monitor='val_loss',
-            patience=self.early_stopping_patience,
-            restore_best_weights=True,
-            mode='min'
-        )
-        callbacks.append(early_stop)
+        if self.params.get('early_stopping_patience', 5) > 0:
+            callbacks.append(tf.keras.callbacks.EarlyStopping(
+                monitor='val_loss',
+                patience=self.params.get('early_stopping_patience', 5),
+                restore_best_weights=True
+            ))
         
         # Learning rate reduction
-        reduce_lr = ReduceLROnPlateau(
-            monitor='val_loss',
-            factor=0.5,
-            patience=self.reduce_lr_patience,
-            min_lr=0.00001,
-            mode='min'
-        )
-        callbacks.append(reduce_lr)
+        if self.params.get('reduce_lr_patience', 5) > 0:
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=self.params.get('reduce_lr_patience', 5),
+                min_lr=1e-7
+            ))
         
         return callbacks
-    
+
     def _create_sequences(self, X: np.ndarray, y: np.ndarray, 
-                         stride: int = 1) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Create sequences for LSTM input.
+                         sequence_length: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Create sequences for LSTM training."""
+        sequences = []
+        targets = []
         
-        Args:
-            X: Input features
-            y: Target values
-            stride: Stride for sequence creation
-            
-        Returns:
-            Tuple of (X_sequences, y_sequences)
-        """
-        X_seq, y_seq = [], []
+        for i in range(sequence_length, len(X)):
+            sequences.append(X[i-sequence_length:i])
+            targets.append(y[i])
         
-        for i in range(0, len(X) - self.sequence_length, stride):
-            X_seq.append(X[i:i + self.sequence_length])
-            y_seq.append(y[i + self.sequence_length - 1])
-        
-        return np.array(X_seq), np.array(y_seq)
+        return np.array(sequences), np.array(targets)
     
     def get_model_summary(self) -> str:
         """Get model summary."""

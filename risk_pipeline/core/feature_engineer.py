@@ -248,18 +248,24 @@ class TimeFeatureModule(BaseFeatureModule):
     
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Create time-based features."""
-        if not data.index.is_all_dates:
-            self.logger.error("Data index must be datetime for time features")
+        try:
+            # Check if index is datetime using pandas version-compatible method
+            if not isinstance(data.index, pd.DatetimeIndex):
+                self.logger.error("Data index must be datetime for time features")
+                return pd.DataFrame()
+            
+            features = pd.DataFrame(index=data.index)
+            
+            features['DayOfWeek'] = data.index.dayofweek
+            features['MonthOfYear'] = data.index.month
+            features['Quarter'] = data.index.quarter
+            features['DayOfYear'] = data.index.dayofyear
+            
+            return features
+            
+        except Exception as e:
+            self.logger.error(f"Time feature creation failed: {e}")
             return pd.DataFrame()
-        
-        features = pd.DataFrame(index=data.index)
-        
-        features['DayOfWeek'] = data.index.dayofweek
-        features['MonthOfYear'] = data.index.month
-        features['Quarter'] = data.index.quarter
-        features['DayOfYear'] = data.index.dayofyear
-        
-        return features
 
 class LagFeatureModule(BaseFeatureModule):
     """Lag feature module."""
@@ -372,7 +378,7 @@ class FeatureEngineer:
     @log_execution_time
     def create_all_features(self, data: Dict[str, pd.DataFrame], 
                           skip_correlations: bool = False) -> Dict[str, pd.DataFrame]:
-        """Create all features for all assets."""
+        
         self.logger.info("Creating features for all assets")
         
         all_features = {}

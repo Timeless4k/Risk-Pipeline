@@ -78,48 +78,30 @@ class WalkForwardValidator:
     
     @log_execution_time
     def split(self, X: pd.DataFrame) -> List[Tuple[pd.Index, pd.Index]]:
-        """
-        Generate train/test indices for walk-forward validation with adaptive sizing.
+        """Generate walk-forward splits with validation."""
+        self.logger.info(f"WalkForward: Total samples={len(X)}, requested_splits={self.config.n_splits}, requested_test_size={self.config.test_size}")
         
-        Args:
-            X: DataFrame with datetime index
-            
-        Returns:
-            List of (train_indices, test_indices) tuples
-        """
-        n_samples = len(X)
-        splits = []
+        # Validate data quality
+        quality_report = self.validate_data_quality(X)
+        if not quality_report['is_valid']:
+            self.logger.warning(f"Data quality issues detected: {quality_report['issues']}")
         
-        self.logger.info(f"WalkForward: Total samples={n_samples}, requested_splits={self.config.n_splits}, requested_test_size={self.config.test_size}")
+        # Calculate adaptive parameters
+        adaptive_test_size = min(self.config.test_size, len(X) // 4)
+        max_splits = min(self.config.n_splits, (len(X) - adaptive_test_size) // adaptive_test_size)
         
-        # Calculate viable parameters
-        max_test_size = min(self.config.test_size, n_samples - self.config.min_train_size)
-        
-        if max_test_size < self.config.min_test_size:
-            self.logger.error(f"Dataset too small: {n_samples} samples insufficient for validation")
-            return []
-        
-        # Use adaptive test size
-        actual_test_size = max(self.config.min_test_size, max_test_size)
-        self.logger.info(f"Adaptive test_size: {actual_test_size} (requested: {self.config.test_size})")
-        
-        # Calculate maximum number of splits possible
-        available_for_training = n_samples - actual_test_size - self.config.gap
-        max_possible_splits = min(self.config.n_splits, max(1, available_for_training // self.config.min_train_size))
-        
-        self.logger.info(f"Maximum possible splits: {max_possible_splits} (requested: {self.config.n_splits})")
-        
-        if max_possible_splits == 0:
-            self.logger.error("Cannot create any valid splits")
-            return []
+        self.logger.info(f"Adaptive test_size: {adaptive_test_size} (requested: {self.config.test_size})")
+        self.logger.info(f"Maximum possible splits: {max_splits} (requested: {self.config.n_splits})")
         
         # Generate splits
-        if self.config.expanding_window:
-            splits = self._generate_expanding_splits(X, max_possible_splits, actual_test_size)
-        else:
-            splits = self._generate_sliding_splits(X, max_possible_splits, actual_test_size)
+        splits = self._generate_expanding_splits(X, max_splits, adaptive_test_size)
+        
+        # Log split summary
+        for i, (train_idx, test_idx) in enumerate(splits, 1):
+            self.logger.info(f"✅ Split {i}: Train={len(train_idx)}, Test={len(test_idx)}")
         
         self.logger.info(f"Generated {len(splits)} valid splits")
+        
         return splits
 
     def evaluate_model(self,

@@ -64,32 +64,54 @@ class ARIMAModel(BaseModel):
         self.logger.info(f"Training ARIMA model with {len(y)} observations")
         
         try:
+            # Extract target variable (returns)
+            if isinstance(X, pd.DataFrame):
+                # Use Adj Close if available, otherwise fall back to Close
+                price_col = 'Adj Close' if 'Adj Close' in X.columns else 'Close'
+                if price_col not in X.columns:
+                    raise ValueError(f"Required price column '{price_col}' not found in data")
+                
+                # Calculate log returns
+                prices = X[price_col].dropna()
+                if len(prices) < 50:
+                    raise ValueError(f"Insufficient data: {len(prices)} observations (minimum: 50)")
+                
+                returns = np.log(prices / prices.shift(1)).dropna()
+                
+            elif isinstance(X, np.ndarray):
+                # Assume X is already returns
+                returns = pd.Series(X.flatten()).dropna()
+            else:
+                raise ValueError(f"Unsupported input type: {type(X)}")
+            
             # Check stationarity
-            self._check_stationarity(y)
+            from statsmodels.tsa.stattools import adfuller
+            adf_result = adfuller(returns)
+            is_stationary = adf_result[1] < 0.05
+            
+            self.logger.info(f"Stationarity test: p-value={adf_result[1]:.4f}, stationary={is_stationary}")
             
             # Fit ARIMA model
-            self.fitted_model = ARIMA(y, order=self.order)
-            fitted_result = self.fitted_model.fit()
+            self.model = ARIMA(returns, order=(1, 1, 1))
+            fitted_model = self.model.fit()
             
-            # Store fitted model
-            self.model = fitted_result
+            # Model diagnostics
+            from statsmodels.stats.diagnostic import acorr_ljungbox
+            lb_result = acorr_ljungbox(fitted_model.resid, lags=10, return_df=True)
+            lb_pvalue = lb_result['lb_pvalue'].iloc[-1]
+            
+            self.logger.info(f"Diagnostics: Ljung-Box p-value={lb_pvalue:.4f}")
+            self.logger.info(f"ARIMA training completed. AIC: {fitted_model.aic:.2f}")
+            
+            self.model = fitted_model
             self.is_trained = True
             
-            # Calculate training metrics
-            y_pred = fitted_result.fittedvalues
-            metrics = self._calculate_regression_metrics(y, y_pred)
-            
-            # Run diagnostics
-            self._run_diagnostics(y, fitted_result)
-            
-            self.logger.info(f"ARIMA training completed. AIC: {fitted_result.aic:.2f}")
-            
             return {
-                'metrics': metrics,
-                'aic': fitted_result.aic,
-                'bic': fitted_result.bic,
-                'diagnostics': self.diagnostics,
-                'is_stationary': self.is_stationary
+                'aic': fitted_model.aic,
+                'bic': fitted_model.bic,
+                'is_stationary': is_stationary,
+                'ljung_box_pvalue': lb_pvalue,
+                'n_observations': len(returns)
             }
             
         except Exception as e:
