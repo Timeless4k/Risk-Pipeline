@@ -59,23 +59,68 @@ class StockMixerModel(BaseModel):
                         f"cross_stock={self.cross_stock_units}, fusion={self.fusion_units}")
     
     def build_model(self, input_shape: Tuple[int, ...]) -> 'StockMixerModel':
-        """Build the StockMixer model architecture."""
+        """Build the StockMixer model architecture with GPU fallback."""
         self.input_shape = input_shape
         
         # Handle different input shapes
         if len(input_shape) == 2:
-            # [N, F] - use as is for tabular data
-            self.input_shape = input_shape
+            # [N, F] - flatten to [N, 1, F]
+            self.input_shape = (1, input_shape[1])
         elif len(input_shape) == 3:
-            # [N, T, F] - flatten to [N, T*F] for tabular processing
-            self.input_shape = (input_shape[0], input_shape[1] * input_shape[2])
+            # [N, T, F] - use as is
+            self.input_shape = input_shape
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        # Create the model
-        self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
-        self.logger.info(f"StockMixer model built with input shape: {self.input_shape}")
-        return self
+        try:
+            # Try to configure TensorFlow with GPU fallback
+            from ..utils.tensorflow_utils import (
+                configure_tensorflow_memory, 
+                get_optimal_device, 
+                safe_tensorflow_operation,
+                cleanup_tensorflow_memory
+            )
+            
+            # Configure TensorFlow with GPU fallback
+            device = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=False)
+            
+            if device == '/CPU:0':
+                self.logger.info("Using CPU for StockMixer model building")
+            else:
+                self.logger.info("Using GPU for StockMixer model building")
+            
+            # Create the model with safe operation
+            def _create_model():
+                return self._create_model(n_classes=1 if self.task == 'regression' else 2)
+            
+            self.model = safe_tensorflow_operation(
+                _create_model,
+                fallback_device='/CPU:0',
+                max_retries=1
+            )
+            
+            self.logger.info(f"StockMixer model built successfully with input shape: {self.input_shape} on {device}")
+            return self
+            
+        except Exception as e:
+            self.logger.error(f"StockMixer model building failed: {e}")
+            
+            # Force CPU mode and retry
+            try:
+                from ..utils.tensorflow_utils import force_cpu_mode
+                force_cpu_mode()
+                
+                # Clean up any GPU memory
+                cleanup_tensorflow_memory()
+                
+                # Retry on CPU
+                self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
+                self.logger.info("StockMixer model built successfully on CPU after GPU failure")
+                return self
+                
+            except Exception as cpu_error:
+                self.logger.error(f"StockMixer model building failed on both GPU and CPU: {cpu_error}")
+                raise RuntimeError(f"Failed to build StockMixer model: {cpu_error}")
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:

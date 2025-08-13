@@ -55,7 +55,7 @@ class LSTMModel(BaseModel):
         self.logger.info(f"LSTM model initialized with units={self.units}, dropout={self.dropout}")
     
     def build_model(self, input_shape: Tuple[int, ...]) -> 'LSTMModel':
-        """Build the LSTM model architecture."""
+        """Build the LSTM model architecture with GPU fallback."""
         self.input_shape = input_shape
         
         # Handle different input shapes
@@ -68,10 +68,55 @@ class LSTMModel(BaseModel):
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        # Create the model
-        self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
-        self.logger.info(f"LSTM model built with input shape: {self.input_shape}")
-        return self
+        try:
+            # Try to configure TensorFlow with GPU fallback
+            from ..utils.tensorflow_utils import (
+                configure_tensorflow_memory, 
+                get_optimal_device, 
+                safe_tensorflow_operation,
+                cleanup_tensorflow_memory
+            )
+            
+            # Configure TensorFlow with GPU fallback
+            device = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=False)
+            
+            if device == '/CPU:0':
+                self.logger.info("Using CPU for LSTM model building")
+            else:
+                self.logger.info("Using GPU for LSTM model building")
+            
+            # Create the model with safe operation
+            def _create_model():
+                return self._create_model(n_classes=1 if self.task == 'regression' else 2)
+            
+            self.model = safe_tensorflow_operation(
+                _create_model,
+                fallback_device='/CPU:0',
+                max_retries=1
+            )
+            
+            self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape} on {device}")
+            return self
+            
+        except Exception as e:
+            self.logger.error(f"LSTM model building failed: {e}")
+            
+            # Force CPU mode and retry
+            try:
+                from ..utils.tensorflow_utils import force_cpu_mode
+                force_cpu_mode()
+                
+                # Clean up any GPU memory
+                cleanup_tensorflow_memory()
+                
+                # Retry on CPU
+                self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
+                self.logger.info("LSTM model built successfully on CPU after GPU failure")
+                return self
+                
+            except Exception as cpu_error:
+                self.logger.error(f"LSTM model building failed on both GPU and CPU: {cpu_error}")
+                raise RuntimeError(f"Failed to build LSTM model: {cpu_error}")
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:

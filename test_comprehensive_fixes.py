@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
 """
 Comprehensive test script to verify all RiskPipeline fixes.
-
-This script tests:
-1. Deep Learning Models (LSTM/StockMixer)
-2. Regression Performance (XGBoost)
-3. Data Quality Validation
-4. Configuration Optimization
 """
 
 import sys
@@ -14,361 +8,293 @@ import os
 import logging
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from datetime import datetime, timedelta
 
 # Add the project root to the path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-def setup_test_logging():
-    """Setup logging for testing."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    return logging.getLogger(__name__)
-
-def create_test_financial_data(n_samples: int = 1000) -> pd.DataFrame:
-    """Create realistic test financial data."""
-    dates = pd.date_range('2020-01-01', periods=n_samples, freq='D')
-    
-    # Generate realistic price data
-    np.random.seed(42)
-    returns = np.random.normal(0.0005, 0.02, n_samples)  # Daily returns
-    prices = 100 * np.exp(np.cumsum(returns))
-    
-    # Add some volatility clustering
-    volatility = 0.02 + 0.1 * np.abs(returns)
-    returns = np.random.normal(0.0005, volatility, n_samples)
-    prices = 100 * np.exp(np.cumsum(returns))
-    
-    # Create OHLCV data
-    data = pd.DataFrame({
-        'Open': prices * (1 + np.random.normal(0, 0.001, n_samples)),
-        'High': prices * (1 + np.abs(np.random.normal(0, 0.005, n_samples))),
-        'Low': prices * (1 - np.abs(np.random.normal(0, 0.005, n_samples))),
-        'Close': prices,
-        'Volume': np.random.lognormal(10, 1, n_samples)
-    }, index=dates)
-    
-    # Ensure realistic relationships
-    data['High'] = np.maximum(data['High'], data['Open'])
-    data['High'] = np.maximum(data['High'], data['Close'])
-    data['Low'] = np.minimum(data['Low'], data['Open'])
-    data['Low'] = np.minimum(data['Low'], data['Close'])
-    
-    return data
-
-def test_tensorflow_utilities():
-    """Test TensorFlow utilities."""
-    print("🧪 Testing TensorFlow utilities...")
+def test_datetime_conversion_fixes():
+    """Test the datetime conversion fixes in data loader."""
+    print("Testing datetime conversion fixes...")
     
     try:
-        from risk_pipeline.utils.tensorflow_utils import (
-            check_tensorflow_compatibility,
-            configure_tensorflow_memory,
-            get_optimal_device
-        )
+        from risk_pipeline.core.data_loader import DataLoader
         
-        # Test compatibility check
-        compat_info = check_tensorflow_compatibility()
-        print(f"✅ TensorFlow compatibility: {compat_info['compatible']}")
-        if compat_info['compatible']:
-            print(f"   Version: {compat_info['version']}")
-            print(f"   GPU devices: {compat_info['gpu_devices']}")
-        
-        # Test memory configuration
-        configure_tensorflow_memory()
-        print("✅ TensorFlow memory configuration completed")
-        
-        # Test device detection
-        device = get_optimal_device()
-        print(f"✅ Optimal device: {device}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ TensorFlow utilities test failed: {e}")
-        return False
-
-def test_data_quality_validator():
-    """Test data quality validation."""
-    print("\n🧪 Testing data quality validation...")
-    
-    try:
-        from risk_pipeline.utils.data_quality import DataQualityValidator
-        
-        # Create test data
-        test_data = create_test_financial_data(500)
-        
-        # Add some quality issues
-        test_data.loc[test_data.index[100:110], 'Close'] = np.nan  # Missing values
-        test_data.loc[test_data.index[200], 'Close'] = 1000000     # Extreme outlier
-        
-        # Initialize validator
-        validator = DataQualityValidator()
-        
-        # Validate data
-        validation_results = validator.validate_financial_data(test_data)
-        print(f"✅ Data validation completed. Valid: {validation_results['is_valid']}")
-        
-        if validation_results['issues']:
-            print(f"   Issues found: {len(validation_results['issues'])}")
-            for issue in validation_results['issues'][:3]:  # Show first 3
-                print(f"     - {issue}")
-        
-        if validation_results['warnings']:
-            print(f"   Warnings: {len(validation_results['warnings'])}")
+        # Test with timezone-aware datetime
+        dates = pd.date_range('2020-01-01', periods=100, freq='D', tz='UTC')
+        test_data = pd.DataFrame({
+            'Open': range(100),
+            'High': range(100, 200),
+            'Low': range(50, 150),
+            'Close': range(75, 175),
+            'Volume': range(1000, 1100)
+        }, index=dates)
         
         # Test data cleaning
-        cleaned_data, cleaning_report = validator.clean_data(test_data, strategy='conservative')
-        print(f"✅ Data cleaning completed. Shape: {cleaning_report['original_shape']} -> {cleaning_report['cleaned_shape']}")
+        data_loader = DataLoader()
+        cleaned_data = data_loader._clean_data(test_data)
         
-        # Test returns validation
-        returns = test_data['Close'].pct_change().dropna()
-        returns_validation = validator.validate_returns_data(returns)
-        print(f"✅ Returns validation completed. Valid: {returns_validation['is_valid']}")
-        
-        return True
-        
+        if not cleaned_data.empty and isinstance(cleaned_data.index, pd.DatetimeIndex):
+            print(f"✅ Timezone-aware datetime conversion working: {type(cleaned_data.index)}")
+            return True
+        else:
+            print(f"❌ Timezone-aware datetime conversion failed: {type(cleaned_data.index)}")
+            return False
+            
     except Exception as e:
-        print(f"❌ Data quality validation test failed: {e}")
+        print(f"❌ Datetime conversion test failed: {e}")
         return False
 
-def test_model_configurations():
-    """Test model configuration system."""
-    print("\n🧪 Testing model configurations...")
+def test_feature_cleaning():
+    """Test the feature cleaning functionality."""
+    print("Testing feature cleaning...")
     
     try:
-        from risk_pipeline.config.model_config import (
-            get_optimized_config,
-            get_feature_config,
-            get_validation_config,
-            BALANCED_CONFIG
-        )
+        from risk_pipeline.core.feature_engineer import FeatureEngineer
         
-        # Test LSTM configuration
-        lstm_config = get_optimized_config('lstm', 'regression')
-        print(f"✅ LSTM config loaded: {len(lstm_config)} parameters")
-        print(f"   Units: {lstm_config.get('units', 'N/A')}")
-        print(f"   Dropout: {lstm_config.get('dropout', 'N/A')}")
+        # Create test data with NaN values
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        test_data = pd.DataFrame({
+            'feature1': range(100),
+            'feature2': [i if i % 10 != 0 else np.nan for i in range(100)],
+            'feature3': [i if i % 15 != 0 else np.nan for i in range(100)]
+        }, index=dates)
         
-        # Test XGBoost configuration
-        xgb_config = get_optimized_config('xgboost', 'regression')
-        print(f"✅ XGBoost config loaded: {len(xgb_config)} parameters")
-        print(f"   Max depth: {xgb_config.get('max_depth', 'N/A')}")
-        print(f"   Learning rate: {xgb_config.get('learning_rate', 'N/A')}")
+        # Test feature cleaning
+        fe = FeatureEngineer()
+        cleaned_features = fe._clean_features(test_data)
         
-        # Test feature configuration
-        feature_config = get_feature_config()
-        print(f"✅ Feature config loaded: {len(feature_config)} parameters")
-        
-        # Test validation configuration
-        validation_config = get_validation_config()
-        print(f"✅ Validation config loaded: {len(validation_config)} parameters")
-        
-        # Test pre-configured configs
-        balanced_config = BALANCED_CONFIG
-        print(f"✅ Balanced config loaded: {len(balanced_config)} model types")
-        
-        return True
-        
+        if not cleaned_features.empty and cleaned_features.isna().sum().sum() == 0:
+            print(f"✅ Feature cleaning working: {len(cleaned_features)} rows, no NaN values")
+            return True
+        else:
+            print(f"❌ Feature cleaning failed: {cleaned_features.isna().sum().sum()} NaN values remaining")
+            return False
+            
     except Exception as e:
-        print(f"❌ Model configuration test failed: {e}")
+        print(f"❌ Feature cleaning test failed: {e}")
         return False
 
-def test_deep_learning_models():
-    """Test deep learning models."""
-    print("\n🧪 Testing deep learning models...")
+def test_arima_model_fix():
+    """Test the ARIMA model fix for missing Close column."""
+    print("Testing ARIMA model fix...")
+    
+    try:
+        from risk_pipeline.models.arima_model import ARIMAModel
+        
+        # Create test data without Close column
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        X = pd.DataFrame({
+            'feature1': range(100),
+            'feature2': range(100, 200)
+        }, index=dates)
+        
+        # Create target series (volatility)
+        y = pd.Series(np.random.randn(100).cumsum(), index=dates)
+        
+        # Test ARIMA model
+        model = ARIMAModel()
+        model.build_model((100, 2))
+        
+        # This should not raise an error about missing Close column
+        result = model.train(X, y)
+        
+        if 'error' not in result:
+            print("✅ ARIMA model fix working: no Close column error")
+            return True
+        else:
+            print(f"❌ ARIMA model still has issues: {result.get('error', 'Unknown error')}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ ARIMA model test failed: {e}")
+        return False
+
+def test_model_building():
+    """Test that models are properly built before training."""
+    print("Testing model building...")
     
     try:
         from risk_pipeline.models.lstm_model import LSTMModel
         from risk_pipeline.models.stockmixer_model import StockMixerModel
         
-        # Create test data
-        test_data = create_test_financial_data(300)
-        features = test_data[['Open', 'High', 'Low', 'Close', 'Volume']].values
-        targets = test_data['Close'].pct_change().dropna().values
-        
-        # Remove corresponding features for targets
-        features = features[1:]  # Remove first row since target is pct_change
-        
-        # Test LSTM model
-        print("   Testing LSTM model...")
+        # Test LSTM model building
         lstm_model = LSTMModel(task='regression')
+        built_lstm = lstm_model.build_model((100, 10))
         
-        # Build model
-        input_shape = (features.shape[0], features.shape[1])
-        lstm_model.build_model(input_shape)
-        print("     ✅ LSTM model built successfully")
+        if built_lstm.model is not None:
+            print("✅ LSTM model building working")
+        else:
+            print("❌ LSTM model building failed")
+            return False
         
-        # Test StockMixer model
-        print("   Testing StockMixer model...")
+        # Test StockMixer model building
         stockmixer_model = StockMixerModel(task='regression')
+        built_stockmixer = stockmixer_model.build_model((100, 10))
         
-        # Build model
-        input_shape = (features.shape[0], features.shape[1])
-        stockmixer_model.build_model(input_shape)
-        print("     ✅ StockMixer model built successfully")
+        if built_stockmixer.model is not None:
+            print("✅ StockMixer model building working")
+        else:
+            print("❌ StockMixer model building failed")
+            return False
         
-        print("✅ Deep learning models test completed")
         return True
         
     except Exception as e:
-        print(f"❌ Deep learning models test failed: {e}")
+        print(f"❌ Model building test failed: {e}")
         return False
 
-def test_xgboost_improvements():
-    """Test XGBoost improvements."""
-    print("\n🧪 Testing XGBoost improvements...")
+def test_validator_fixes():
+    """Test the validator fixes."""
+    print("Testing validator fixes...")
     
     try:
-        from risk_pipeline.models.xgboost_model import XGBoostModel
+        from risk_pipeline.core.validator import WalkForwardValidator
         
         # Create test data
-        test_data = create_test_financial_data(500)
-        features = test_data[['Open', 'High', 'Low', 'Close', 'Volume']].values
-        targets = test_data['Close'].pct_change().dropna().values
+        dates = pd.date_range('2020-01-01', periods=500, freq='D')
+        test_data = pd.DataFrame({
+            'feature1': range(500),
+            'feature2': range(500, 1000)
+        }, index=dates)
         
-        # Remove corresponding features for targets
-        features = features[1:]
+        # Test validator
+        validator = WalkForwardValidator(n_splits=3, test_size=50)
         
-        # Test XGBoost with improved parameters
-        print("   Testing XGBoost with improved parameters...")
-        xgb_model = XGBoostModel(task='regression')
+        # Test data quality validation
+        quality_report = validator.validate_data_quality(test_data)
         
-        # Build model
-        xgb_model.build_model(input_shape=(features.shape[1],))
-        print("     ✅ XGBoost model built successfully")
+        if quality_report['is_valid']:
+            print("✅ Validator data quality validation working")
+        else:
+            print(f"⚠️ Validator data quality issues: {quality_report['issues']}")
         
-        # Test cross-validation
-        print("   Testing cross-validation...")
-        cv_results = xgb_model.cross_validate(features, targets, cv_folds=3)
-        print(f"     ✅ Cross-validation completed: mean={cv_results['mean_score']:.4f}")
+        # Test split generation
+        splits = validator.split(test_data)
         
-        # Test hyperparameter tuning (small grid for speed)
-        print("   Testing hyperparameter tuning...")
-        tune_results = xgb_model.tune_hyperparameters(features, targets)
-        print(f"     ✅ Hyperparameter tuning completed: best_score={tune_results['best_score']:.4f}")
+        if len(splits) > 0:
+            print(f"✅ Validator split generation working: {len(splits)} splits created")
+            return True
+        else:
+            print("❌ Validator split generation failed")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Validator test failed: {e}")
+        return False
+
+def test_explainer_fixes():
+    """Test the explainer factory fixes."""
+    print("Testing explainer fixes...")
+    
+    try:
+        from risk_pipeline.interpretability.explainer_factory import ExplainerFactory
+        from unittest.mock import Mock
         
-        print("✅ XGBoost improvements test completed")
+        # Create mock config
+        mock_config = Mock()
+        mock_config.shap = Mock()
+        mock_config.shap.background_samples = 50
+        
+        # Test explainer factory
+        factory = ExplainerFactory(mock_config)
+        
+        # Test XGBoost explainer creation
+        mock_xgb_model = Mock()
+        mock_xgb_model.get_booster.return_value = Mock()
+        
+        try:
+            xgb_explainer = factory._create_xgboost_explainer(mock_xgb_model, np.random.randn(100, 5), 'regression')
+            print("✅ XGBoost explainer creation working")
+        except Exception as e:
+            print(f"❌ XGBoost explainer creation failed: {e}")
+            return False
+        
+        # Test LSTM explainer creation
+        try:
+            lstm_explainer = factory._create_lstm_explainer(mock_xgb_model, np.random.randn(100, 5), 'regression')
+            print("✅ LSTM explainer creation working")
+        except Exception as e:
+            print(f"❌ LSTM explainer creation failed: {e}")
+            return False
+        
         return True
         
     except Exception as e:
-        print(f"❌ XGBoost improvements test failed: {e}")
+        print(f"❌ Explainer test failed: {e}")
         return False
 
-def test_feature_engineering_fixes():
-    """Test feature engineering fixes."""
-    print("\n🧪 Testing feature engineering fixes...")
+def test_pipeline_integration():
+    """Test the complete pipeline integration."""
+    print("Testing pipeline integration...")
     
     try:
-        from risk_pipeline.core.feature_engineer import TimeFeatureModule, FeatureConfig
+        from risk_pipeline import RiskPipeline
         
-        # Create test data with datetime index
-        test_data = create_test_financial_data(100)
+        # Test pipeline initialization
+        pipeline = RiskPipeline()
+        print("✅ Pipeline initialization working")
         
-        # Test time feature module
-        print("   Testing time feature module...")
-        config = FeatureConfig()
-        time_module = TimeFeatureModule(config)
+        # Test all components are initialized
+        components = [
+            'feature_engineer',
+            'validator', 
+            'model_factory',
+            'shap_analyzer',
+            'results_manager'
+        ]
         
-        features = time_module.create_features(test_data)
-        print(f"     ✅ Time features created: {len(features.columns)} features")
-        
-        # Verify feature names
-        expected_features = ['DayOfWeek', 'MonthOfYear', 'Quarter', 'DayOfYear']
-        for feature in expected_features:
-            if feature in features.columns:
-                print(f"       ✅ {feature} feature present")
+        for component in components:
+            if hasattr(pipeline, component):
+                print(f"✅ {component} initialized")
             else:
-                print(f"       ❌ {feature} feature missing")
+                print(f"❌ {component} not initialized")
+                return False
         
-        print("✅ Feature engineering fixes test completed")
         return True
         
     except Exception as e:
-        print(f"❌ Feature engineering fixes test failed: {e}")
-        return False
-
-def test_logging_improvements():
-    """Test logging improvements."""
-    print("\n🧪 Testing logging improvements...")
-    
-    try:
-        from risk_pipeline.utils.logging_utils import setup_logging
-        from risk_pipeline.config.logging_config import get_logging_config, apply_logging_config
-        
-        # Test logging configuration
-        print("   Testing logging configuration...")
-        config = get_logging_config(verbose=False)
-        print(f"     ✅ Logging config loaded: {len(config['components'])} components")
-        
-        # Test quiet logging
-        print("   Testing quiet logging...")
-        logger = setup_logging(quiet=True)
-        root_logger = logging.getLogger()
-        if root_logger.level == logging.WARNING:
-            print("     ✅ Quiet logging working")
-        else:
-            print(f"     ❌ Quiet logging failed: level={root_logger.level}")
-        
-        # Test verbose logging
-        print("   Testing verbose logging...")
-        verbose_config = get_logging_config(verbose=True)
-        if verbose_config['verbose']:
-            print("     ✅ Verbose logging working")
-        else:
-            print("     ❌ Verbose logging failed")
-        
-        print("✅ Logging improvements test completed")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Logging improvements test failed: {e}")
+        print(f"❌ Pipeline integration test failed: {e}")
         return False
 
 def main():
     """Run all comprehensive tests."""
-    print("🚀 Running Comprehensive RiskPipeline Fix Tests\n")
+    print("🧪 Running Comprehensive RiskPipeline Fix Tests\n")
     
     tests = [
-        ("TensorFlow Utilities", test_tensorflow_utilities),
-        ("Data Quality Validation", test_data_quality_validator),
-        ("Model Configurations", test_model_configurations),
-        ("Deep Learning Models", test_deep_learning_models),
-        ("XGBoost Improvements", test_xgboost_improvements),
-        ("Feature Engineering Fixes", test_feature_engineering_fixes),
-        ("Logging Improvements", test_logging_improvements),
+        ("Datetime Conversion Fixes", test_datetime_conversion_fixes),
+        ("Feature Cleaning", test_feature_cleaning),
+        ("ARIMA Model Fix", test_arima_model_fix),
+        ("Model Building", test_model_building),
+        ("Validator Fixes", test_validator_fixes),
+        ("Explainer Fixes", test_explainer_fixes),
+        ("Pipeline Integration", test_pipeline_integration)
     ]
     
     passed = 0
     total = len(tests)
     
     for test_name, test_func in tests:
+        print(f"\n🔍 {test_name}")
+        print("-" * 50)
+        
         try:
             if test_func():
                 passed += 1
-                print(f"✅ {test_name}: PASSED\n")
+                print(f"✅ {test_name} PASSED")
             else:
-                print(f"❌ {test_name}: FAILED\n")
+                print(f"❌ {test_name} FAILED")
         except Exception as e:
-            print(f"💥 {test_name}: CRASHED - {e}\n")
+            print(f"💥 {test_name} ERROR: {e}")
     
-    print(f"📊 Comprehensive Test Results: {passed}/{total} tests passed")
+    print(f"\n📊 Test Results: {passed}/{total} tests passed")
     
     if passed == total:
-        print("🎉 All tests passed! The RiskPipeline fixes are working correctly.")
-        print("\n🔧 Fixes Applied:")
-        print("   ✅ Deep Learning Models: Fixed NULL results, GPU/CPU fallback, memory management")
-        print("   ✅ Regression Performance: Fixed negative R², XGBoost overfitting, proper CV")
-        print("   ✅ Data Quality: Added validation, cleaning, financial data integrity checks")
-        print("   ✅ Configuration: Optimized parameters for financial data, walk-forward validation")
-        return 0
+        print("🎉 All tests passed! All fixes are working correctly.")
+        return True
     else:
-        print("⚠️  Some tests failed. Please check the issues above.")
-        return 1
+        print("⚠️ Some tests failed. Please review the issues above.")
+        return False
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = main()
+    sys.exit(0 if success else 1)

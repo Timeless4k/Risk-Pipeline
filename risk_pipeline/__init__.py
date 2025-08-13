@@ -544,16 +544,32 @@ class RiskPipeline:
         else:
             y = features['regime_target']
         
-        # Get train/test splits
-        splits = self.validator.split(X)
-        
-        results = {}
-        
         # Ensure X is a DataFrame for splitting/indexing
         X_df = pd.DataFrame(X) if isinstance(X, np.ndarray) else X
-
+        
+        # Ensure y is a Series with proper index
+        if isinstance(y, np.ndarray):
+            y = pd.Series(y, index=X_df.index[:len(y)])
+        elif isinstance(y, pd.Series):
+            # Align y with X_df index
+            y = y.reindex(X_df.index, method='ffill')
+        
+        # Validate that we have valid data
+        if X_df.empty or y.empty:
+            logger.warning(f"Empty data for {asset} {task}, skipping")
+            return {'error': 'Empty data'}
+        
         # Get train/test splits
-        splits = self.validator.split(X_df)
+        try:
+            splits = self.validator.split(X_df)
+            if not splits:
+                logger.warning(f"No valid splits generated for {asset} {task}")
+                return {'error': 'No valid splits generated'}
+        except Exception as e:
+            logger.error(f"Failed to generate splits for {asset} {task}: {e}")
+            return {'error': f'Split generation failed: {e}'}
+
+        results = {}
 
         # Run each model type
         for model_type in models:
@@ -566,6 +582,44 @@ class RiskPipeline:
                     input_shape=X_df.shape,
                     n_classes=(len(pd.Series(y).unique()) if task == 'classification' else None)
                 )
+                
+                # Ensure model is built before training (for neural network models)
+                if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):
+                    try:
+                        logger.info(f"Building {model_type} model for {asset} {task}")
+                        model.build_model(X_df.shape)
+                        logger.info(f"✅ {model_type} model built successfully")
+                    except Exception as build_error:
+                        logger.error(f"Model build failed for {model_type}: {build_error}")
+                        
+                        # Try to force CPU mode and retry for neural network models
+                        if model_type in ['lstm', 'stockmixer']:
+                            try:
+                                logger.info(f"Attempting CPU fallback for {model_type}")
+                                from risk_pipeline.utils.tensorflow_utils import force_cpu_mode, cleanup_tensorflow_memory
+                                
+                                # Force CPU mode and clean up GPU memory
+                                force_cpu_mode()
+                                cleanup_tensorflow_memory()
+                                
+                                # Retry building on CPU
+                                model.build_model(X_df.shape)
+                                logger.info(f"✅ {model_type} model built successfully on CPU")
+                                
+                            except Exception as cpu_error:
+                                logger.error(f"CPU fallback also failed for {model_type}: {cpu_error}")
+                                # Continue with the pipeline but mark this model as failed
+                                results[model_type] = {'error': f'Model building failed: {cpu_error}'}
+                                continue
+                        else:
+                            # For non-neural network models, continue anyway
+                            logger.warning(f"Continuing with {model_type} despite build failure")
+                
+                # Verify model is ready for training
+                if hasattr(model, 'model') and model.model is None:
+                    logger.error(f"Model {model_type} is not properly built, skipping training")
+                    results[model_type] = {'error': 'Model not built properly'}
+                    continue
                 
                 model_results = self.validator.evaluate_model(
                     model=model,

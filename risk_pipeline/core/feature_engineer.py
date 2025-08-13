@@ -251,8 +251,15 @@ class TimeFeatureModule(BaseFeatureModule):
         try:
             # Check if index is datetime using pandas version-compatible method
             if not isinstance(data.index, pd.DatetimeIndex):
-                self.logger.error("Data index must be datetime for time features")
-                return pd.DataFrame()
+                self.logger.error(f"Data index must be datetime for time features. Got: {type(data.index)}")
+                self.logger.debug(f"Index sample: {data.index[:5] if len(data.index) > 0 else 'Empty index'}")
+                # Try to convert index to datetime
+                try:
+                    data.index = pd.to_datetime(data.index)
+                    self.logger.info("Successfully converted index to datetime")
+                except Exception as conv_e:
+                    self.logger.error(f"Failed to convert index to datetime: {conv_e}")
+                    return pd.DataFrame()
             
             features = pd.DataFrame(index=data.index)
             
@@ -428,34 +435,82 @@ class FeatureEngineer:
         for asset, feat_df in all_feature_frames.items():
             if feat_df.empty:
                 continue
+            
+            # Clean features: handle NaN values
+            feat_df_clean = self._clean_features(feat_df)
+            if feat_df_clean.empty:
+                self.logger.warning(f"Skipping {asset}: all features are NaN after cleaning")
+                continue
+            
             # Choose a volatility target proxy
             target_series = None
             for candidate in [
                 'Volatility20D', 'Volatility10D', 'Volatility5D',
                 'RollingStd5'
             ]:
-                if candidate in feat_df.columns:
-                    target_series = feat_df[candidate]
+                if candidate in feat_df_clean.columns:
+                    target_series = feat_df_clean[candidate]
                     break
             if target_series is None:
                 # Fallback: rolling std of first numeric column
-                numeric_cols = feat_df.select_dtypes(include=[np.number]).columns
+                numeric_cols = feat_df_clean.select_dtypes(include=[np.number]).columns
                 if len(numeric_cols) > 0:
-                    target_series = feat_df[numeric_cols[0]].rolling(window=5, min_periods=1).std().fillna(0)
+                    target_series = feat_df_clean[numeric_cols[0]].rolling(window=5, min_periods=1).std().fillna(0)
                 else:
                     continue
+            
+            # Ensure target has no NaN values
+            target_series = target_series.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            
             # Binary regime by median split
             median_val = float(np.median(target_series.values)) if len(target_series) else 0.0
             regime = (target_series > median_val).astype(int)
 
             structured[asset] = {
-                'features': feat_df.copy(),
+                'features': feat_df_clean.copy(),
                 'volatility_target': target_series.copy(),
                 'regime_target': regime,
-                'feature_names': feat_df.columns.tolist(),
+                'feature_names': feat_df_clean.columns.tolist(),
                 'scaler': None,
             }
         return structured
+    
+    def _clean_features(self, features_df: pd.DataFrame) -> pd.DataFrame:
+        """Clean features by handling NaN values and ensuring data quality."""
+        if features_df.empty:
+            return features_df
+        
+        # Count NaN values before cleaning
+        nan_count_before = features_df.isna().sum().sum()
+        if nan_count_before > 0:
+            self.logger.info(f"Found {nan_count_before} NaN values in features, cleaning...")
+        
+        # Strategy 1: Forward fill then backward fill for time series
+        features_clean = features_df.fillna(method='ffill').fillna(method='bfill')
+        
+        # Strategy 2: For remaining NaN values, use column median
+        for col in features_clean.columns:
+            if features_clean[col].isna().any():
+                median_val = features_clean[col].median()
+                if pd.isna(median_val):
+                    median_val = 0.0
+                features_clean[col] = features_clean[col].fillna(median_val)
+        
+        # Strategy 3: Remove rows that still have NaN values (should be very few)
+        features_clean = features_clean.dropna()
+        
+        # Count NaN values after cleaning
+        nan_count_after = features_clean.isna().sum().sum()
+        if nan_count_after > 0:
+            self.logger.warning(f"Still have {nan_count_after} NaN values after cleaning")
+        else:
+            self.logger.info(f"Successfully cleaned all NaN values")
+        
+        # Ensure we have enough data after cleaning
+        if len(features_clean) < 100:
+            self.logger.warning(f"Very few samples after cleaning: {len(features_clean)}")
+        
+        return features_clean
 
     # New canonical path for fairness framework
     def create_canonical_views(

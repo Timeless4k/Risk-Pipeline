@@ -137,8 +137,29 @@ class WalkForwardValidator:
                 all_predictions.extend(list(np.asarray(y_pred).ravel()))
                 all_actuals.extend(list(np.asarray(y_test).ravel()))
 
-            # Evaluate overall
-            metrics = model.evaluate(np.array(all_predictions), np.array(all_actuals))
+            # Evaluate overall using the last trained model on a subset of data
+            # Use the last test set for final evaluation
+            if splits:
+                last_train_idx, last_test_idx = splits[-1]
+                X_final_test = X_df.loc[last_test_idx]
+                y_final_test = y_ser.loc[last_test_idx]
+                
+                try:
+                    metrics = model.evaluate(X_final_test, y_final_test)
+                except Exception as eval_error:
+                    logger.warning(f"Model evaluation failed, using fallback metrics: {eval_error}")
+                    # Fallback: calculate basic metrics manually
+                    if len(all_predictions) > 0 and len(all_actuals) > 0:
+                        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+                        metrics = {
+                            'MSE': mean_squared_error(all_actuals, all_predictions),
+                            'MAE': mean_absolute_error(all_actuals, all_predictions),
+                            'R2': r2_score(all_actuals, all_predictions)
+                        }
+                    else:
+                        metrics = {'error': 'No valid predictions for evaluation'}
+            else:
+                metrics = {'error': 'No valid splits for evaluation'}
 
             return {
                 'metrics': metrics,
@@ -313,8 +334,8 @@ class WalkForwardValidator:
             'index_type': str(type(X.index)),
             'is_sorted': X.index.is_monotonic_increasing,
             'date_range': {
-                'start': X.index.min() if X.index.is_all_dates else None,
-                'end': X.index.max() if X.index.is_all_dates else None
+                'start': X.index.min() if isinstance(X.index, pd.DatetimeIndex) else None,
+                'end': X.index.max() if isinstance(X.index, pd.DatetimeIndex) else None
             }
         }
         
@@ -336,7 +357,7 @@ class WalkForwardValidator:
         if not quality_report['is_sorted']:
             issues.append("Data index is not sorted")
         
-        if not X.index.is_all_dates:
+        if not isinstance(X.index, pd.DatetimeIndex):
             issues.append("Data index is not datetime")
         
         quality_report['issues'] = issues

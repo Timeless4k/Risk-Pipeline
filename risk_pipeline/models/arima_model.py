@@ -35,9 +35,10 @@ class ARIMAModel(BaseModel):
         
         self.logger.info(f"ARIMA model initialized with order {order}")
     
-    # For unit tests compatibility
-    def build_model(self, input_shape: Tuple[int, ...]):
-        """No-op builder for ARIMA to satisfy tests."""
+    def build_model(self, input_shape: Tuple[int, ...]) -> 'ARIMAModel':
+        """Build the ARIMA model architecture (ARIMA models don't need building)."""
+        self.input_shape = input_shape
+        self.logger.info(f"ARIMA model ready with input shape: {input_shape}")
         return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
@@ -64,35 +65,38 @@ class ARIMAModel(BaseModel):
         self.logger.info(f"Training ARIMA model with {len(y)} observations")
         
         try:
-            # Extract target variable (returns)
-            if isinstance(X, pd.DataFrame):
-                # Use Adj Close if available, otherwise fall back to Close
-                price_col = 'Adj Close' if 'Adj Close' in X.columns else 'Close'
-                if price_col not in X.columns:
-                    raise ValueError(f"Required price column '{price_col}' not found in data")
-                
-                # Calculate log returns
-                prices = X[price_col].dropna()
-                if len(prices) < 50:
-                    raise ValueError(f"Insufficient data: {len(prices)} observations (minimum: 50)")
-                
-                returns = np.log(prices / prices.shift(1)).dropna()
-                
-            elif isinstance(X, np.ndarray):
-                # Assume X is already returns
-                returns = pd.Series(X.flatten()).dropna()
+            # For ARIMA, we use the target variable directly as it should be the time series
+            # If y is volatility, we can use it directly; if it's returns, we can use it directly
+            if isinstance(y, pd.Series):
+                target_series = y.dropna()
             else:
-                raise ValueError(f"Unsupported input type: {type(X)}")
+                target_series = pd.Series(y).dropna()
+            
+            if len(target_series) < 50:
+                raise ValueError(f"Insufficient target data: {len(target_series)} observations (minimum: 50)")
+            
+            # Check if we need to make the series stationary
+            # For volatility targets, they might already be stationary
+            # For price/return targets, we might need differencing
             
             # Check stationarity
             from statsmodels.tsa.stattools import adfuller
-            adf_result = adfuller(returns)
+            adf_result = adfuller(target_series)
             is_stationary = adf_result[1] < 0.05
             
             self.logger.info(f"Stationarity test: p-value={adf_result[1]:.4f}, stationary={is_stationary}")
             
+            # If not stationary, try differencing
+            if not is_stationary:
+                self.logger.info("Series not stationary, applying differencing")
+                # Use order (1,1,1) for non-stationary data
+                order = (1, 1, 1)
+            else:
+                # Use order (1,0,1) for stationary data
+                order = (1, 0, 1)
+            
             # Fit ARIMA model
-            self.model = ARIMA(returns, order=(1, 1, 1))
+            self.model = ARIMA(target_series, order=order)
             fitted_model = self.model.fit()
             
             # Model diagnostics
@@ -111,7 +115,7 @@ class ARIMAModel(BaseModel):
                 'bic': fitted_model.bic,
                 'is_stationary': is_stationary,
                 'ljung_box_pvalue': lb_pvalue,
-                'n_observations': len(returns)
+                'n_observations': len(target_series)
             }
             
         except Exception as e:

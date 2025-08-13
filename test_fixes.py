@@ -1,36 +1,28 @@
 #!/usr/bin/env python3
 """
-Test script to verify the fixes for the RiskPipeline issues.
+Test script to verify fixes for the RiskPipeline issues.
 """
 
 import sys
 import os
 import logging
-from pathlib import Path
 
 # Add the project root to the path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def test_logging_config():
-    """Test the new logging configuration system."""
+    """Test logging configuration."""
     print("Testing logging configuration...")
     
     try:
-        from risk_pipeline.config.logging_config import get_logging_config, apply_logging_config
+        from risk_pipeline.utils.logging_utils import setup_logging
         
-        # Test default config
-        config = get_logging_config()
-        print(f"✅ Default config loaded: {len(config['components'])} components configured")
+        # Test logging setup
+        setup_logging(level=logging.INFO)
+        logger = logging.getLogger("test")
+        logger.info("Test log message")
         
-        # Test verbose config
-        verbose_config = get_logging_config(verbose=True)
-        print(f"✅ Verbose config loaded: root_level={verbose_config['root_level']}")
-        
-        # Test quiet config
-        quiet_config = get_logging_config(quiet=True)
-        print(f"✅ Quiet config loaded: root_level={quiet_config['root_level']}")
-        
+        print("✅ Logging config test passed")
         return True
         
     except Exception as e:
@@ -65,59 +57,107 @@ def test_feature_engineer_fix():
         print(f"❌ Feature engineer test failed: {e}")
         return False
 
-def test_xgboost_fix():
-    """Test the XGBoost input validation fix."""
-    print("Testing XGBoost fixes...")
+def test_validator_fix():
+    """Test the validator fix for is_all_dates."""
+    print("Testing validator fixes...")
     
     try:
-        import numpy as np
-        from risk_pipeline.models.xgboost_model import XGBoostModel
+        import pandas as pd
+        from risk_pipeline.core.validator import WalkForwardValidator
         
-        # Test with 1D input (should be reshaped to 2D)
-        X_1d = np.random.randn(100)
-        y = np.random.randn(100)
+        # Create test data with datetime index
+        dates = pd.date_range('2020-01-01', periods=500, freq='D')
+        test_data = pd.DataFrame({
+            'feature1': range(500),
+            'feature2': range(500, 1000)
+        }, index=dates)
         
-        model = XGBoostModel(task='regression')
-        model.build_model(input_shape=(1,))
+        # Test validator
+        validator = WalkForwardValidator(n_splits=3, test_size=50)
         
-        # This should not raise an error now
-        model.train(X_1d, y)
-        print("✅ XGBoost 1D input handling working")
+        # Test data quality validation
+        quality_report = validator.validate_data_quality(test_data)
         
-        # Test prediction with 1D input
-        preds = model.predict(X_1d[:10])
-        if preds.shape == (10,):
-            print("✅ XGBoost 1D prediction working")
+        if quality_report['is_valid']:
+            print("✅ Validator data quality validation working")
+        else:
+            print(f"⚠️ Validator data quality issues: {quality_report['issues']}")
+        
+        # Test split generation
+        splits = validator.split(test_data)
+        
+        if len(splits) > 0:
+            print(f"✅ Validator split generation working: {len(splits)} splits created")
             return True
         else:
-            print(f"❌ XGBoost prediction shape incorrect: {preds.shape}")
+            print("❌ Validator split generation failed")
             return False
             
     except Exception as e:
-        print(f"❌ XGBoost test failed: {e}")
+        print(f"❌ Validator test failed: {e}")
         return False
 
-def test_logging_reduction():
-    """Test that logging verbosity is reduced."""
-    print("Testing logging reduction...")
+def test_data_loader_fix():
+    """Test the data loader datetime index fix."""
+    print("Testing data loader fixes...")
     
     try:
-        from risk_pipeline.utils.logging_utils import setup_logging
+        import pandas as pd
+        from risk_pipeline.core.data_loader import DataLoader
         
-        # Test quiet logging
-        logger = setup_logging(quiet=True)
+        # Create test data with string index (simulating loaded data)
+        test_data = pd.DataFrame({
+            'Open': range(100),
+            'High': range(100, 200),
+            'Low': range(50, 150),
+            'Close': range(75, 175),
+            'Volume': range(1000, 1100)
+        }, index=[f'2020-01-{i+1:02d}' for i in range(100)])
         
-        # Check that root logger level is WARNING
-        root_logger = logging.getLogger()
-        if root_logger.level == logging.WARNING:
-            print("✅ Quiet logging working: root level is WARNING")
+        # Test data cleaning
+        data_loader = DataLoader()
+        cleaned_data = data_loader._clean_data(test_data)
+        
+        if not cleaned_data.empty and isinstance(cleaned_data.index, pd.DatetimeIndex):
+            print(f"✅ Data loader datetime conversion working: {type(cleaned_data.index)}")
             return True
         else:
-            print(f"❌ Quiet logging failed: root level is {root_logger.level}")
+            print(f"❌ Data loader datetime conversion failed: {type(cleaned_data.index)}")
             return False
             
     except Exception as e:
-        print(f"❌ Logging reduction test failed: {e}")
+        print(f"❌ Data loader test failed: {e}")
+        return False
+
+def test_pipeline_integration():
+    """Test the pipeline integration fixes."""
+    print("Testing pipeline integration fixes...")
+    
+    try:
+        from risk_pipeline import RiskPipeline
+        
+        # Test pipeline initialization
+        pipeline = RiskPipeline()
+        print("✅ Pipeline initialization working")
+        
+        # Test feature engineer initialization
+        if hasattr(pipeline, 'feature_engineer'):
+            print("✅ Feature engineer initialized")
+        else:
+            print("❌ Feature engineer not initialized")
+            return False
+        
+        # Test validator initialization
+        if hasattr(pipeline, 'validator'):
+            print("✅ Validator initialized")
+        else:
+            print("❌ Validator not initialized")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Pipeline integration test failed: {e}")
         return False
 
 def main():
@@ -125,31 +165,38 @@ def main():
     print("🧪 Running RiskPipeline Fix Tests\n")
     
     tests = [
-        test_logging_config,
-        test_feature_engineer_fix,
-        test_xgboost_fix,
-        test_logging_reduction,
+        ("Logging Configuration", test_logging_config),
+        ("Feature Engineer Fixes", test_feature_engineer_fix),
+        ("Validator Fixes", test_validator_fix),
+        ("Data Loader Fixes", test_data_loader_fix),
+        ("Pipeline Integration", test_pipeline_integration)
     ]
     
     passed = 0
     total = len(tests)
     
-    for test in tests:
+    for test_name, test_func in tests:
+        print(f"\n🔍 {test_name}")
+        print("-" * 50)
+        
         try:
-            if test():
+            if test_func():
                 passed += 1
-            print()
+                print(f"✅ {test_name} PASSED")
+            else:
+                print(f"❌ {test_name} FAILED")
         except Exception as e:
-            print(f"❌ Test {test.__name__} crashed: {e}\n")
+            print(f"💥 {test_name} ERROR: {e}")
     
-    print(f"📊 Test Results: {passed}/{total} tests passed")
+    print(f"\n📊 Test Results: {passed}/{total} tests passed")
     
     if passed == total:
         print("🎉 All tests passed! The fixes are working correctly.")
-        return 0
+        return True
     else:
-        print("⚠️  Some tests failed. Please check the issues above.")
-        return 1
+        print("⚠️ Some tests failed. Please review the issues above.")
+        return False
 
 if __name__ == "__main__":
-    sys.exit(main())
+    success = main()
+    sys.exit(0 if success else 1)

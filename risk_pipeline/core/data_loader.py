@@ -103,6 +103,28 @@ class DataLoader:
         if not force_download and cache_file.exists():
             try:
                 data = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+                # Ensure index is datetime after loading from cache
+                if not isinstance(data.index, pd.DatetimeIndex):
+                    data.index = pd.to_datetime(data.index)
+                
+                # Handle timezone-aware datetime conversion
+                if hasattr(data.index, 'tz') and data.index.tz is not None:
+                    try:
+                        # Convert to UTC first, then remove timezone info
+                        data.index = data.index.tz_convert('UTC').tz_localize(None)
+                        logger.debug(f"Converted timezone-aware index to UTC for {symbol}")
+                    except Exception as tz_error:
+                        logger.warning(f"Timezone conversion failed for {symbol}: {tz_error}")
+                        # Fallback: force UTC conversion
+                        try:
+                            data.index = pd.to_datetime(data.index, utc=True).tz_localize(None)
+                            logger.debug(f"Applied UTC fallback for {symbol}")
+                        except Exception as fallback_error:
+                            logger.error(f"UTC fallback also failed for {symbol}: {fallback_error}")
+                            # Last resort: convert to naive datetime
+                            data.index = pd.to_datetime(data.index).tz_localize(None)
+                            logger.debug(f"Applied naive datetime fallback for {symbol}")
+                
                 logger.debug(f"Loaded {symbol} data from cache: {len(data)} rows")
                 return data
             except Exception as e:
@@ -140,6 +162,39 @@ class DataLoader:
         Returns:
             Cleaned DataFrame
         """
+        # Ensure index is datetime
+        if not isinstance(data.index, pd.DatetimeIndex):
+            try:
+                data.index = pd.to_datetime(data.index, format='mixed', errors='coerce')
+                logger.debug(f"Converted index to datetime for {symbol}")
+            except Exception as e:
+                logger.warning(f"Failed to convert index to datetime for {symbol}: {e}")
+                # Fallback: try with utc=True
+                try:
+                    data.index = pd.to_datetime(data.index, utc=True, errors='coerce')
+                    logger.debug(f"Applied UTC fallback for {symbol}")
+                except Exception as fallback_error:
+                    logger.error(f"UTC fallback also failed for {symbol}: {fallback_error}")
+                    raise ValueError(f"Cannot convert index to datetime for {symbol}")
+        
+        # Handle timezone-aware datetimes
+        if hasattr(data.index, 'tz') and data.index.tz is not None:
+            try:
+                # Convert to UTC first, then remove timezone info
+                data.index = data.index.tz_convert('UTC').tz_localize(None)
+                logger.debug(f"Converted timezone-aware index to UTC for {symbol}")
+            except Exception as tz_error:
+                logger.warning(f"Timezone conversion failed for {symbol}: {tz_error}")
+                # Fallback: force UTC conversion
+                try:
+                    data.index = pd.to_datetime(data.index, utc=True).tz_localize(None)
+                    logger.debug(f"Applied UTC fallback for {symbol}")
+                except Exception as fallback_error:
+                    logger.error(f"UTC fallback also failed for {symbol}: {fallback_error}")
+                    # Last resort: convert to naive datetime
+                    data.index = pd.to_datetime(data.index).tz_localize(None)
+                    logger.debug(f"Applied naive datetime fallback for {symbol}")
+        
         # Remove rows with missing values
         data = data.dropna()
         
