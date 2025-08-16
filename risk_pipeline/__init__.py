@@ -554,14 +554,22 @@ class RiskPipeline:
             # Align y with X_df index
             y = y.reindex(X_df.index, method='ffill')
         
-        # Validate that we have valid data
-        if X_df.empty or y.empty:
-            logger.warning(f"Empty data for {asset} {task}, skipping")
-            return {'error': 'Empty data'}
+        # FIXED: Clean data before model training to handle infinite values
+        logger.info(f"Cleaning data for {asset} {task}")
+        X_clean, y_clean = self.validator.clean_data_for_training(X_df, y)
+        
+        # Validate that we have valid data after cleaning
+        if X_clean.empty or y_clean.empty:
+            logger.warning(f"Empty data for {asset} {task} after cleaning, skipping")
+            return {'error': 'Empty data after cleaning'}
+        
+        # Log cleaning results
+        if len(X_clean) < len(X_df):
+            logger.info(f"Data cleaned: {len(X_df)} -> {len(X_clean)} samples for {asset} {task}")
         
         # Get train/test splits
         try:
-            splits = self.validator.split(X_df)
+            splits = self.validator.split(X_clean)
             if not splits:
                 logger.warning(f"No valid splits generated for {asset} {task}")
                 return {'error': 'No valid splits generated'}
@@ -579,15 +587,15 @@ class RiskPipeline:
                 model = self.model_factory.create_model(
                     model_type=model_type,
                     task=task,
-                    input_shape=X_df.shape,
-                    n_classes=(len(pd.Series(y).unique()) if task == 'classification' else None)
+                    input_shape=X_clean.shape,
+                    n_classes=(len(pd.Series(y_clean).unique()) if task == 'classification' else None)
                 )
                 
                 # Ensure model is built before training (for neural network models)
                 if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):
                     try:
                         logger.info(f"Building {model_type} model for {asset} {task}")
-                        model.build_model(X_df.shape)
+                        model.build_model(X_clean.shape)
                         logger.info(f"✅ {model_type} model built successfully")
                     except Exception as build_error:
                         logger.error(f"Model build failed for {model_type}: {build_error}")
@@ -603,7 +611,7 @@ class RiskPipeline:
                                 cleanup_tensorflow_memory()
                                 
                                 # Retry building on CPU
-                                model.build_model(X_df.shape)
+                                model.build_model(X_clean.shape)
                                 logger.info(f"✅ {model_type} model built successfully on CPU")
                                 
                             except Exception as cpu_error:
@@ -623,8 +631,8 @@ class RiskPipeline:
                 
                 model_results = self.validator.evaluate_model(
                     model=model,
-                    X=X_df,
-                    y=y,
+                    X=X_clean,
+                    y=y_clean,
                     splits=splits,
                     asset=asset,
                     model_type=model_type

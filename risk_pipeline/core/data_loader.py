@@ -166,34 +166,34 @@ class DataLoader:
         if not isinstance(data.index, pd.DatetimeIndex):
             try:
                 data.index = pd.to_datetime(data.index, format='mixed', errors='coerce')
-                logger.debug(f"Converted index to datetime for {symbol}")
+                logger.debug("Converted index to datetime")
             except Exception as e:
-                logger.warning(f"Failed to convert index to datetime for {symbol}: {e}")
+                logger.warning(f"Failed to convert index to datetime: {e}")
                 # Fallback: try with utc=True
                 try:
                     data.index = pd.to_datetime(data.index, utc=True, errors='coerce')
-                    logger.debug(f"Applied UTC fallback for {symbol}")
+                    logger.debug("Applied UTC fallback")
                 except Exception as fallback_error:
-                    logger.error(f"UTC fallback also failed for {symbol}: {fallback_error}")
-                    raise ValueError(f"Cannot convert index to datetime for {symbol}")
+                    logger.error(f"UTC fallback also failed: {fallback_error}")
+                    raise ValueError("Cannot convert index to datetime")
         
         # Handle timezone-aware datetimes
         if hasattr(data.index, 'tz') and data.index.tz is not None:
             try:
                 # Convert to UTC first, then remove timezone info
                 data.index = data.index.tz_convert('UTC').tz_localize(None)
-                logger.debug(f"Converted timezone-aware index to UTC for {symbol}")
+                logger.debug("Converted timezone-aware index to UTC")
             except Exception as tz_error:
-                logger.warning(f"Timezone conversion failed for {symbol}: {tz_error}")
+                logger.warning(f"Timezone conversion failed: {tz_error}")
                 # Fallback: force UTC conversion
                 try:
                     data.index = pd.to_datetime(data.index, utc=True).tz_localize(None)
-                    logger.debug(f"Applied UTC fallback for {symbol}")
+                    logger.debug("Applied UTC fallback")
                 except Exception as fallback_error:
-                    logger.error(f"UTC fallback also failed for {symbol}: {fallback_error}")
+                    logger.error(f"UTC fallback also failed: {fallback_error}")
                     # Last resort: convert to naive datetime
-                    data.index = pd.to_datetime(data.index).tz_localize(None)
-                    logger.debug(f"Applied naive datetime fallback for {symbol}")
+                    data.index = pd.to_datetime(data.index, utc=True).tz_localize(None)
+                    logger.debug("Applied naive datetime fallback")
         
         # Remove rows with missing values
         data = data.dropna()

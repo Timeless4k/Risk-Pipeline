@@ -324,46 +324,145 @@ class WalkForwardValidator:
             }
         }
     
-    def validate_data_quality(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> Dict[str, Any]:
-        """Validate data quality for walk-forward validation."""
+    def validate_data_quality(self, X: pd.DataFrame) -> Dict[str, Any]:
+        """Validate and clean data quality issues."""
         quality_report = {
-            'n_samples': len(X),
-            'n_features': len(X.columns),
-            'missing_values': X.isna().sum().sum(),
-            'duplicate_indices': X.index.duplicated().sum(),
-            'index_type': str(type(X.index)),
-            'is_sorted': X.index.is_monotonic_increasing,
-            'date_range': {
-                'start': X.index.min() if isinstance(X.index, pd.DatetimeIndex) else None,
-                'end': X.index.max() if isinstance(X.index, pd.DatetimeIndex) else None
-            }
+            'is_valid': True,
+            'issues': [],
+            'cleaned_shape': X.shape,
+            'infinite_values_removed': 0,
+            'nan_values_removed': 0,
+            'outliers_removed': 0,
+            'cleaned_data': None
         }
         
-        if y is not None:
-            quality_report.update({
-                'target_missing': y.isna().sum(),
-                'target_unique': y.nunique(),
-                'target_distribution': y.value_counts().to_dict() if y.dtype == 'object' else None
-            })
+        # Check for infinite values
+        if np.isinf(X.select_dtypes(include=[np.number])).any().any():
+            infinite_count = np.isinf(X.select_dtypes(include=[np.number])).sum().sum()
+            quality_report['issues'].append(f"Found {infinite_count} infinite values")
+            quality_report['is_valid'] = False
+            
+            # Clean infinite values
+            X_clean = X.copy()
+            numeric_cols = X_clean.select_dtypes(include=[np.number]).columns
+            
+            for col in numeric_cols:
+                # Replace infinite values with NaN first
+                X_clean[col] = X_clean[col].replace([np.inf, -np.inf], np.nan)
+                # Then fill NaN with median
+                median_val = X_clean[col].median()
+                X_clean[col] = X_clean[col].fillna(median_val)
+            
+            quality_report['infinite_values_removed'] = infinite_count
+            quality_report['cleaned_data'] = X_clean
+            quality_report['cleaned_shape'] = X_clean.shape
+            self.logger.warning(f"Cleaned {infinite_count} infinite values from data")
         
-        # Check for potential issues
-        issues = []
-        if quality_report['missing_values'] > 0:
-            issues.append(f"Found {quality_report['missing_values']} missing values")
+        # Check for NaN values
+        if X.isnull().any().any():
+            nan_count = X.isnull().sum().sum()
+            quality_report['issues'].append(f"Found {nan_count} NaN values")
+            quality_report['is_valid'] = False
+            
+            if quality_report['cleaned_data'] is None:
+                X_clean = X.copy()
+            else:
+                X_clean = quality_report['cleaned_data']
+            
+            # Fill NaN values with appropriate methods
+            for col in X_clean.columns:
+                if X_clean[col].dtype in ['float64', 'int64']:
+                    # Numeric columns: fill with median
+                    median_val = X_clean[col].median()
+                    X_clean[col] = X_clean[col].fillna(median_val)
+                else:
+                    # Categorical columns: fill with mode
+                    mode_val = X_clean[col].mode().iloc[0] if not X_clean[col].mode().empty else 'Unknown'
+                    X_clean[col] = X_clean[col].fillna(mode_val)
+            
+            quality_report['nan_values_removed'] = nan_count
+            quality_report['cleaned_data'] = X_clean
+            quality_report['cleaned_shape'] = X_clean.shape
+            self.logger.warning(f"Cleaned {nan_count} NaN values from data")
         
-        if quality_report['duplicate_indices'] > 0:
-            issues.append(f"Found {quality_report['duplicate_indices']} duplicate indices")
+        # Check for extreme outliers (beyond 3 standard deviations)
+        if quality_report['cleaned_data'] is None:
+            X_clean = X.copy()
+        else:
+            X_clean = quality_report['cleaned_data']
         
-        if not quality_report['is_sorted']:
-            issues.append("Data index is not sorted")
+        numeric_cols = X_clean.select_dtypes(include=[np.number]).columns
+        outlier_count = 0
         
-        if not isinstance(X.index, pd.DatetimeIndex):
-            issues.append("Data index is not datetime")
+        for col in numeric_cols:
+            Q1 = X_clean[col].quantile(0.25)
+            Q3 = X_clean[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            outliers = ((X_clean[col] < lower_bound) | (X_clean[col] > upper_bound)).sum()
+            if outliers > 0:
+                # Cap outliers instead of removing them
+                X_clean[col] = X_clean[col].clip(lower=lower_bound, upper=upper_bound)
+                outlier_count += outliers
         
-        quality_report['issues'] = issues
-        quality_report['is_valid'] = len(issues) == 0
+        if outlier_count > 0:
+            quality_report['issues'].append(f"Found and capped {outlier_count} outliers")
+            quality_report['outliers_removed'] = outlier_count
+            quality_report['cleaned_data'] = X_clean
+            quality_report['cleaned_shape'] = X_clean.shape
+            self.logger.warning(f"Capped {outlier_count} outliers in data")
+        
+        # Final validation
+        if quality_report['cleaned_data'] is not None:
+            # Check if cleaning was successful
+            final_inf_check = np.isinf(quality_report['cleaned_data'].select_dtypes(include=[np.number])).any().any()
+            final_nan_check = quality_report['cleaned_data'].isnull().any().any()
+            
+            if not final_inf_check and not final_nan_check:
+                quality_report['is_valid'] = True
+                self.logger.info("Data quality validation completed successfully")
+            else:
+                quality_report['is_valid'] = False
+                quality_report['issues'].append("Data cleaning incomplete")
         
         return quality_report
+    
+    def clean_data_for_training(self, X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+        """Clean data for model training by removing infinite values and handling NaNs."""
+        X_clean = X.copy()
+        y_clean = y.copy()
+        
+        # Clean infinite values in features
+        numeric_cols = X_clean.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            col_data = X_clean[col]
+            if np.isinf(col_data).any():
+                median_val = col_data[~np.isinf(col_data)].median()
+                if pd.isna(median_val):
+                    median_val = 0.0
+                X_clean[col] = col_data.replace([np.inf, -np.inf], median_val)
+                self.logger.info(f"Cleaned infinite values in column {col}")
+        
+        # Clean infinite values in targets
+        if np.isinf(y_clean).any():
+            median_val = y_clean[~np.isinf(y_clean)].median()
+            if pd.isna(median_val):
+                median_val = 0.0
+            y_clean = y_clean.replace([np.inf, -np.inf], median_val)
+            self.logger.info("Cleaned infinite values in targets")
+        
+        # Remove rows with NaN values
+        valid_mask = ~(X_clean.isna().any(axis=1) | y_clean.isna())
+        X_clean = X_clean[valid_mask]
+        y_clean = y_clean[valid_mask]
+        
+        if len(X_clean) < len(X) * 0.8:
+            self.logger.warning(f"Removed too many samples: {len(X)} -> {len(X_clean)}")
+        
+        self.logger.info(f"Data cleaned: {len(X)} -> {len(X_clean)} samples")
+        return X_clean, y_clean
     
     def create_time_series_split(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         """
@@ -400,7 +499,7 @@ class WalkForwardValidator:
         split_info = self.get_split_info(splits)
         
         # Get data quality report
-        quality_report = self.validate_data_quality(X, y)
+        quality_report = self.validate_data_quality(X)
         
         # Combine into summary
         summary = {

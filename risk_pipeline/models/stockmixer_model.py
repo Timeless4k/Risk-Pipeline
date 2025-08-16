@@ -7,19 +7,9 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Dense, Concatenate, BatchNormalization, Dropout, Flatten
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
 from .base_model import BaseModel
-from ..utils.tensorflow_utils import (
-    configure_tensorflow_memory, 
-    get_optimal_device, 
-    safe_tensorflow_operation,
-    cleanup_tensorflow_memory
-)
 
 
 class StockMixerModel(BaseModel):
@@ -40,7 +30,6 @@ class StockMixerModel(BaseModel):
         self.cross_stock_units = kwargs.get('cross_stock_units', 64)
         self.fusion_units = kwargs.get('fusion_units', 128)
         self.dropout = kwargs.get('dropout', 0.2)
-        self.scaler = StandardScaler()
         self.input_shape = None
         self.model = None
         
@@ -62,65 +51,110 @@ class StockMixerModel(BaseModel):
         """Build the StockMixer model architecture with GPU fallback."""
         self.input_shape = input_shape
         
-        # Handle different input shapes
+        # FIXED: Handle different input shapes - properly handle 2D input
         if len(input_shape) == 2:
-            # [N, F] - flatten to [N, 1, F]
-            self.input_shape = (1, input_shape[1])
-        elif len(input_shape) == 3:
-            # [N, T, F] - use as is
+            # [N, F] - use as is for tabular data
             self.input_shape = input_shape
+            self.logger.info(f"Using 2D input shape for tabular data: {self.input_shape}")
+        elif len(input_shape) == 3:
+            # [N, T, F] - flatten to [N, T*F] for tabular processing
+            self.input_shape = (input_shape[0], input_shape[1] * input_shape[2])
+            self.logger.info(f"Flattening 3D input {input_shape} to 2D {self.input_shape}")
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
         try:
-            # Try to configure TensorFlow with GPU fallback
-            from ..utils.tensorflow_utils import (
-                configure_tensorflow_memory, 
-                get_optimal_device, 
-                safe_tensorflow_operation,
-                cleanup_tensorflow_memory
-            )
-            
-            # Configure TensorFlow with GPU fallback
-            device = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=False)
-            
-            if device == '/CPU:0':
-                self.logger.info("Using CPU for StockMixer model building")
+            # Try to use GPU
+            if tf.config.list_physical_devices('GPU'):
+                self.logger.info("GPU detected, using GPU for StockMixer")
+                device = '/GPU:0'
             else:
-                self.logger.info("Using GPU for StockMixer model building")
-            
-            # Create the model with safe operation
-            def _create_model():
-                return self._create_model(n_classes=1 if self.task == 'regression' else 2)
-            
-            self.model = safe_tensorflow_operation(
-                _create_model,
-                fallback_device='/CPU:0',
-                max_retries=1
-            )
-            
-            self.logger.info(f"StockMixer model built successfully with input shape: {self.input_shape} on {device}")
-            return self
-            
-        except Exception as e:
-            self.logger.error(f"StockMixer model building failed: {e}")
-            
-            # Force CPU mode and retry
+                self.logger.info("No GPU detected, using CPU for StockMixer")
+                device = '/CPU:0'
+        except:
+            self.logger.warning("GPU detection failed, falling back to CPU")
+            device = '/CPU:0'
+        
+        # FIXED: Force CPU mode if GPU detection fails
+        try:
+            with tf.device(device):
+                # FIXED: Build model with correct input shape for tabular data
+                inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
+                
+                # Tabular data processing layers
+                x = tf.keras.layers.Dense(256, activation='relu')(inputs)
+                x = tf.keras.layers.Dropout(0.3)(x)
+                x = tf.keras.layers.Dense(128, activation='relu')(x)
+                x = tf.keras.layers.Dropout(0.3)(x)
+                x = tf.keras.layers.Dense(64, activation='relu')(x)
+                x = tf.keras.layers.Dropout(0.2)(x)
+                
+                # Output layer
+                if self.task == 'classification':
+                    outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                else:
+                    outputs = tf.keras.layers.Dense(1, activation='linear')(x)
+                
+                self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                
+                # Compile model
+                if self.task == 'classification':
+                    self.model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        loss='sparse_categorical_crossentropy',
+                        metrics=['accuracy']
+                    )
+                else:
+                    self.model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        loss='mse',
+                        metrics=['mae']
+                    )
+                
+        except Exception as gpu_error:
+            self.logger.warning(f"GPU build failed: {gpu_error}, falling back to CPU")
+            # Force CPU mode
             try:
-                from ..utils.tensorflow_utils import force_cpu_mode
-                force_cpu_mode()
-                
-                # Clean up any GPU memory
-                cleanup_tensorflow_memory()
-                
-                # Retry on CPU
-                self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
-                self.logger.info("StockMixer model built successfully on CPU after GPU failure")
-                return self
-                
+                with tf.device('/CPU:0'):
+                    # FIXED: Build model with correct input shape for tabular data
+                    inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
+                    
+                    # Tabular data processing layers
+                    x = tf.keras.layers.Dense(256, activation='relu')(inputs)
+                    x = tf.keras.layers.Dropout(0.3)(x)
+                    x = tf.keras.layers.Dense(128, activation='relu')(x)
+                    x = tf.keras.layers.Dropout(0.3)(x)
+                    x = tf.keras.layers.Dense(64, activation='relu')(x)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                    
+                    # Output layer
+                    if self.task == 'classification':
+                        outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                    else:
+                        outputs = tf.keras.layers.Dense(1, activation='linear')(x)
+                    
+                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                    
+                    # Compile model
+                    if self.task == 'classification':
+                        self.model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                            loss='sparse_categorical_crossentropy',
+                            metrics=['accuracy']
+                        )
+                    else:
+                        self.model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                            loss='mse',
+                            metrics=['mae']
+                        )
+                        
             except Exception as cpu_error:
-                self.logger.error(f"StockMixer model building failed on both GPU and CPU: {cpu_error}")
-                raise RuntimeError(f"Failed to build StockMixer model: {cpu_error}")
+                self.logger.error(f"CPU build also failed: {cpu_error}")
+                raise RuntimeError(f"Failed to build StockMixer model on both GPU and CPU: {cpu_error}")
+        
+        self.logger.info(f"StockMixer model built successfully with input shape: {self.input_shape}")
+        return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
@@ -142,58 +176,84 @@ class StockMixerModel(BaseModel):
         X, y = self._validate_input(X, y)
         
         try:
-            # Configure TensorFlow memory
-            configure_tensorflow_memory()
-            
-            # Ensure X has the right shape for StockMixer
+            # FIXED: Ensure X has the right shape for StockMixer model architecture
             if X.ndim == 2:
-                # [N, F] - already correct for tabular data
-                X_flat = X
+                # [N, F] - use as is for tabular data
+                X_reshaped = X
+                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
             elif X.ndim == 3:
                 # [N, T, F] - flatten to [N, T*F] for tabular processing
-                num_samples, time_steps, num_features = X.shape
-                X_flat = X.reshape(num_samples, time_steps * num_features)
+                X_reshaped = X.reshape(X.shape[0], -1)
+                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
             else:
-                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
+                raise ValueError(f"Unsupported input shape: {X.shape}")
             
-            # Scale features
-            X_scaled = self.scaler.fit_transform(X_flat)
+            # Ensure y has the right shape
+            if y.ndim == 1:
+                y_reshaped = y.values.reshape(-1, 1) if isinstance(y, pd.Series) else y.reshape(-1, 1)
+            else:
+                y_reshaped = y
             
-            self.logger.info(f"Training StockMixer with {len(X_scaled)} samples, shape: {X_scaled.shape}")
+            # Split data
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_reshaped, y_reshaped, test_size=0.2, random_state=42
+            )
             
-            # Get optimal device and train
-            device = get_optimal_device()
-            self.logger.info(f"Using device: {device}")
-            
-            # Use safe operation with fallback
-            def train_model():
-                return self.model.fit(
-                    X_scaled, y,
-                    batch_size=self.params.get('batch_size', 16),
-                    epochs=self.params.get('epochs', 100),
-                    validation_split=0.2,
-                    callbacks=self._get_callbacks(),
-                    verbose=0
+            # Training callbacks
+            callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss', patience=10, restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
                 )
+            ]
             
-            history = safe_tensorflow_operation(train_model)
+            # Train the model
+            history = self.model.fit(
+                X_train, y_train,
+                validation_data=(X_val, y_val),
+                epochs=100,
+                batch_size=32,
+                callbacks=callbacks,
+                verbose=0
+            )
             
+            # Store training history
+            self.training_history = history.history
+            
+            # Mark as trained
             self.is_trained = True
             
-            # Clean up memory
-            cleanup_tensorflow_memory()
+            # Calculate metrics
+            train_loss = history.history['loss'][-1]
+            val_loss = history.history['val_loss'][-1]
             
-            return {
-                'history': history.history,
-                'epochs_trained': len(history.history['loss']),
-                'final_loss': history.history['loss'][-1],
-                'final_val_loss': history.history.get('val_loss', [None])[-1]
-            }
+            if self.task == 'classification':
+                train_acc = history.history['accuracy'][-1]
+                val_acc = history.history['val_accuracy'][-1]
+                metrics = {
+                    'train_accuracy': train_acc,
+                    'val_accuracy': val_acc,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss
+                }
+            else:
+                train_mae = history.history['mae'][-1]
+                val_mae = history.history['val_mae'][-1]
+                metrics = {
+                    'train_mae': train_mae,
+                    'val_mae': val_mae,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss
+                }
+            
+            self.logger.info(f"StockMixer training completed successfully. Final val_loss: {val_loss:.4f}")
+            return metrics
             
         except Exception as e:
             self.logger.error(f"StockMixer training failed: {e}")
-            cleanup_tensorflow_memory()
-            raise
+            raise RuntimeError(f"StockMixer training failed: {e}")
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
@@ -212,32 +272,32 @@ class StockMixerModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
-            # Ensure X has the right shape for StockMixer
+            # FIXED: Ensure X has the right shape for StockMixer model architecture
             if X.ndim == 2:
-                # [N, F] - already correct for tabular data
-                X_flat = X
+                # [N, F] - use as is for tabular data
+                X_reshaped = X
+                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
             elif X.ndim == 3:
                 # [N, T, F] - flatten to [N, T*F] for tabular processing
-                num_samples, time_steps, num_features = X.shape
-                X_flat = X.reshape(num_samples, time_steps * num_features)
+                X_reshaped = X.reshape(X.shape[0], -1)
+                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
             else:
-                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
-            
-            # Scale features
-            X_scaled = self.scaler.transform(X_flat)
+                raise ValueError(f"Unsupported input shape: {X.shape}")
             
             # Make predictions
-            y_pred = self.model.predict(X_scaled, verbose=0)
+            predictions = self.model.predict(X_reshaped, verbose=0)
             
-            # Ensure output is 1D
-            if y_pred.ndim > 1:
-                y_pred = y_pred.flatten()
-            
-            return y_pred
-            
+            # Reshape predictions to match expected output
+            if self.task == 'classification':
+                # Return class predictions
+                return np.argmax(predictions, axis=1)
+            else:
+                # Return regression predictions
+                return predictions.flatten()
+                
         except Exception as e:
             self.logger.error(f"StockMixer prediction failed: {e}")
-            return np.zeros(len(X))
+            raise RuntimeError(f"StockMixer prediction failed: {e}")
     
     def evaluate(self, X: Union[pd.DataFrame, np.ndarray], 
                 y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
@@ -287,226 +347,6 @@ class StockMixerModel(BaseModel):
                     'R2': -float('inf')
                 }
     
-    def _create_model(self, n_classes: int) -> tf.keras.Model:
-        """Create StockMixer model architecture with three parallel pathways."""
-        inputs = Input(shape=self.input_shape)
-        
-        # Temporal pathway - focuses on time-based patterns
-        temporal = Dense(self.temporal_units, activation='relu', name='temporal_dense1')(inputs)
-        temporal = BatchNormalization(name='temporal_bn1')(temporal)
-        temporal = Dense(self.temporal_units // 2, activation='relu', name='temporal_dense2')(temporal)
-        temporal = BatchNormalization(name='temporal_bn2')(temporal)
-        
-        # Indicator pathway - focuses on technical indicators
-        indicator = Dense(self.indicator_units, activation='relu', name='indicator_dense1')(inputs)
-        indicator = BatchNormalization(name='indicator_bn1')(indicator)
-        indicator = Dense(self.indicator_units // 2, activation='relu', name='indicator_dense2')(indicator)
-        indicator = BatchNormalization(name='indicator_bn2')(indicator)
-        
-        # Cross-stock pathway - focuses on cross-asset relationships
-        cross_stock = Dense(self.cross_stock_units, activation='relu', name='cross_stock_dense1')(inputs)
-        cross_stock = BatchNormalization(name='cross_stock_bn1')(cross_stock)
-        cross_stock = Dense(self.cross_stock_units // 2, activation='relu', name='cross_stock_dense2')(cross_stock)
-        cross_stock = BatchNormalization(name='cross_stock_bn2')(cross_stock)
-        
-        # Concatenate pathways
-        merged = Concatenate(name='pathway_fusion')([temporal, indicator, cross_stock])
-        
-        # Fusion layers
-        mixed = Dense(self.fusion_units, activation='relu', name='fusion_dense1')(merged)
-        mixed = BatchNormalization(name='fusion_bn1')(mixed)
-        mixed = Dropout(self.dropout, name='fusion_dropout1')(mixed)
-        
-        mixed = Dense(self.fusion_units // 2, activation='relu', name='fusion_dense2')(mixed)
-        mixed = BatchNormalization(name='fusion_bn2')(mixed)
-        mixed = Dropout(self.dropout, name='fusion_dropout2')(mixed)
-        
-        # Output layer
-        if self.task == 'classification':
-            output = Dense(n_classes, activation='softmax', name='output')(mixed)
-            model = Model(inputs=inputs, outputs=output)
-            model.compile(
-                optimizer=Adam(learning_rate=0.001),
-                loss='sparse_categorical_crossentropy',
-                metrics=['accuracy']
-            )
-        else:
-            output = Dense(1, name='output')(mixed)
-            model = Model(inputs=inputs, outputs=output)
-            model.compile(
-                optimizer=Adam(learning_rate=0.001),
-                loss='mse',
-                metrics=['mae']
-            )
-        
-        return model
-    
-    def _get_callbacks(self):
-        """Get training callbacks."""
-        callbacks = []
-        
-        # Early stopping
-        if self.params.get('early_stopping_patience', 5) > 0:
-            callbacks.append(tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=self.params.get('early_stopping_patience', 5),
-                restore_best_weights=True
-            ))
-        
-        # Learning rate reduction
-        if self.params.get('reduce_lr_patience', 5) > 0:
-            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=self.params.get('reduce_lr_patience', 5),
-                min_lr=1e-7
-            ))
-        
-        return callbacks
-
-    def _create_sequences(self, X: np.ndarray, y: np.ndarray, 
-                         sequence_length: int = 10) -> Tuple[np.ndarray, np.ndarray]:
-        """Create sequences for StockMixer training."""
-        sequences = []
-        targets = []
-        
-        for i in range(sequence_length, len(X)):
-            sequences.append(X[i-sequence_length:i])
-            targets.append(y[i])
-        
-        return np.array(sequences), np.array(targets)
-    
-    def _analyze_pathways(self, X: np.ndarray) -> Dict[str, float]:
-        """Analyze the contribution of each pathway."""
-        if not self.is_trained:
-            return {}
-        
-        try:
-            # Create intermediate models for each pathway
-            pathway_models = {}
-            
-            # Temporal pathway model
-            temporal_model = Model(
-                inputs=self.model.input,
-                outputs=self.model.get_layer('temporal_bn2').output
-            )
-            pathway_models['temporal'] = temporal_model
-            
-            # Indicator pathway model
-            indicator_model = Model(
-                inputs=self.model.input,
-                outputs=self.model.get_layer('indicator_bn2').output
-            )
-            pathway_models['indicator'] = indicator_model
-            
-            # Cross-stock pathway model
-            cross_stock_model = Model(
-                inputs=self.model.input,
-                outputs=self.model.get_layer('cross_stock_bn2').output
-            )
-            pathway_models['cross_stock'] = cross_stock_model
-            
-            # Calculate pathway activations
-            pathway_analysis = {}
-            for pathway_name, pathway_model in pathway_models.items():
-                activations = pathway_model.predict(X, verbose=0)
-                pathway_analysis[f'{pathway_name}_mean_activation'] = float(np.mean(activations))
-                pathway_analysis[f'{pathway_name}_std_activation'] = float(np.std(activations))
-            
-            return pathway_analysis
-            
-        except Exception as e:
-            self.logger.warning(f"Pathway analysis failed: {e}")
-            return {}
-    
-    def get_pathway_weights(self) -> Dict[str, np.ndarray]:
-        """Get the weights of each pathway."""
-        if not self.is_trained:
-            return {}
-        
-        try:
-            pathway_weights = {}
-            
-            # Get weights for each pathway
-            pathway_layers = {
-                'temporal': ['temporal_dense1', 'temporal_dense2'],
-                'indicator': ['indicator_dense1', 'indicator_dense2'],
-                'cross_stock': ['cross_stock_dense1', 'cross_stock_dense2']
-            }
-            
-            for pathway_name, layer_names in pathway_layers.items():
-                pathway_weights[pathway_name] = {}
-                for layer_name in layer_names:
-                    layer = self.model.get_layer(layer_name)
-                    pathway_weights[pathway_name][layer_name] = layer.get_weights()
-            
-            return pathway_weights
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get pathway weights: {e}")
-            return {}
-    
-    def plot_pathway_analysis(self, X: Union[pd.DataFrame, np.ndarray], 
-                            save_path: Optional[str] = None) -> None:
-        """Plot pathway analysis."""
-        if not self.is_trained:
-            raise ValueError("Model must be trained before pathway analysis")
-        
-        # Validate input
-        X, _ = self._validate_input(X)
-        
-        try:
-            import matplotlib.pyplot as plt
-            
-            # Scale features
-            X_scaled = self.scaler.transform(X)
-            
-            # Get pathway activations
-            pathway_models = {}
-            pathway_names = ['temporal', 'indicator', 'cross_stock']
-            
-            for pathway_name in pathway_names:
-                pathway_model = Model(
-                    inputs=self.model.input,
-                    outputs=self.model.get_layer(f'{pathway_name}_bn2').output
-                )
-                pathway_models[pathway_name] = pathway_model
-            
-            # Calculate activations
-            activations = {}
-            for pathway_name, pathway_model in pathway_models.items():
-                activations[pathway_name] = pathway_model.predict(X_scaled, verbose=0)
-            
-            # Create plots
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            
-            # Pathway activation distributions
-            for i, pathway_name in enumerate(pathway_names):
-                ax = axes[i // 2, i % 2]
-                ax.hist(activations[pathway_name].flatten(), bins=30, alpha=0.7)
-                ax.set_title(f'{pathway_name.title()} Pathway Activations')
-                ax.set_xlabel('Activation Value')
-                ax.set_ylabel('Frequency')
-            
-            # Pathway comparison
-            pathway_means = [np.mean(activations[name]) for name in pathway_names]
-            axes[1, 1].bar(pathway_names, pathway_means)
-            axes[1, 1].set_title('Mean Pathway Activations')
-            axes[1, 1].set_ylabel('Mean Activation')
-            
-            plt.tight_layout()
-            
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                self.logger.info(f"Pathway analysis plot saved to {save_path}")
-            else:
-                plt.show()
-            
-            plt.close()
-            
-        except Exception as e:
-            self.logger.error(f"Failed to plot pathway analysis: {e}")
-    
     def get_model_summary(self) -> str:
         """Get model summary."""
         if not self.is_trained:
@@ -520,58 +360,8 @@ class StockMixerModel(BaseModel):
             self.logger.error(f"Failed to get model summary: {e}")
             return "Summary not available"
     
-    def plot_training_history(self, save_path: Optional[str] = None) -> None:
-        """Plot training history."""
-        if not self.is_trained:
-            raise ValueError("Model must be trained before plotting history")
-        
-        try:
-            import matplotlib.pyplot as plt
-            
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-            
-            # Loss plot
-            axes[0].plot(self.model.history.history['loss'], label='Training Loss')
-            if 'val_loss' in self.model.history.history:
-                axes[0].plot(self.model.history.history['val_loss'], label='Validation Loss')
-            axes[0].set_title('Model Loss')
-            axes[0].set_xlabel('Epoch')
-            axes[0].set_ylabel('Loss')
-            axes[0].legend()
-            
-            # Metric plot
-            if self.task == 'classification':
-                metric_name = 'accuracy'
-                metric_label = 'Accuracy'
-            else:
-                metric_name = 'mae'
-                metric_label = 'MAE'
-            
-            if metric_name in self.model.history.history:
-                axes[1].plot(self.model.history.history[metric_name], label=f'Training {metric_label}')
-                if f'val_{metric_name}' in self.model.history.history:
-                    axes[1].plot(self.model.history.history[f'val_{metric_name}'], 
-                               label=f'Validation {metric_label}')
-                axes[1].set_title(f'Model {metric_label}')
-                axes[1].set_xlabel('Epoch')
-                axes[1].set_ylabel(metric_label)
-                axes[1].legend()
-            
-            plt.tight_layout()
-            
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                self.logger.info(f"Training history plot saved to {save_path}")
-            else:
-                plt.show()
-            
-            plt.close()
-            
-        except Exception as e:
-            self.logger.error(f"Failed to plot training history: {e}")
-    
     def save_model(self, filepath: str) -> None:
-        """Save the trained model with additional StockMixer-specific data."""
+        """Save the trained model."""
         if not self.is_trained:
             raise ValueError("Cannot save untrained model")
         
@@ -583,7 +373,6 @@ class StockMixerModel(BaseModel):
                 'feature_names': self.feature_names,
                 'task': self.task,
                 'name': self.name,
-                'scaler': self.scaler,
                 'input_shape': self.input_shape,
                 'temporal_units': self.temporal_units,
                 'indicator_units': self.indicator_units,
@@ -608,7 +397,6 @@ class StockMixerModel(BaseModel):
             self.feature_names = model_data['feature_names']
             self.task = model_data['task']
             self.name = model_data['name']
-            self.scaler = model_data['scaler']
             self.input_shape = model_data['input_shape']
             self.temporal_units = model_data['temporal_units']
             self.indicator_units = model_data['indicator_units']

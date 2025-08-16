@@ -155,11 +155,11 @@ class FeatureConfig(FinancialModelConfig):
 class ValidationConfig(FinancialModelConfig):
     """Walk-forward validation configuration."""
     
-    # Split configuration
-    n_splits: int = 10
-    min_train_size: int = 252  # 1 year
-    test_size: int = 63        # 3 months
-    gap: int = 5               # 5-day gap
+    # Split configuration - Increased for better statistical significance
+    n_splits: int = 8          # Reduced from 10 to ensure larger test sets
+    min_train_size: int = 504  # 2 years (increased from 1 year)
+    test_size: int = 126       # 6 months (increased from 3 months)
+    gap: int = 10              # 10-day gap (increased to prevent overlap)
     
     # Validation strategy
     expanding_window: bool = True

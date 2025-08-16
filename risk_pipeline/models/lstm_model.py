@@ -7,19 +7,9 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 
 from .base_model import BaseModel
-from ..utils.tensorflow_utils import (
-    configure_tensorflow_memory, 
-    get_optimal_device, 
-    safe_tensorflow_operation,
-    cleanup_tensorflow_memory
-)
 
 
 class LSTMModel(BaseModel):
@@ -38,7 +28,6 @@ class LSTMModel(BaseModel):
         self.units = kwargs.get('units', [50, 30])
         self.dropout = kwargs.get('dropout', 0.2)
         self.sequence_length = kwargs.get('sequence_length', 15)
-        self.scaler = StandardScaler()
         self.input_shape = None
         self.model = None
         
@@ -58,65 +47,122 @@ class LSTMModel(BaseModel):
         """Build the LSTM model architecture with GPU fallback."""
         self.input_shape = input_shape
         
-        # Handle different input shapes
+        # Handle different input shapes - FIXED: Properly handle 2D input
         if len(input_shape) == 2:
-            # [N, F] - flatten to [N, 1, F]
+            # [N, F] - reshape to [N, 1, F] for single timestep LSTM
             self.input_shape = (1, input_shape[1])
+            self.logger.info(f"Reshaping 2D input {input_shape} to 3D {self.input_shape}")
         elif len(input_shape) == 3:
             # [N, T, F] - use as is
             self.input_shape = input_shape
+            self.logger.info(f"Using 3D input shape: {self.input_shape}")
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
         try:
-            # Try to configure TensorFlow with GPU fallback
-            from ..utils.tensorflow_utils import (
-                configure_tensorflow_memory, 
-                get_optimal_device, 
-                safe_tensorflow_operation,
-                cleanup_tensorflow_memory
-            )
-            
-            # Configure TensorFlow with GPU fallback
-            device = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=False)
-            
-            if device == '/CPU:0':
-                self.logger.info("Using CPU for LSTM model building")
+            # Try to use GPU
+            if tf.config.list_physical_devices('GPU'):
+                self.logger.info("GPU detected, using GPU for LSTM")
+                device = '/GPU:0'
             else:
-                self.logger.info("Using GPU for LSTM model building")
-            
-            # Create the model with safe operation
-            def _create_model():
-                return self._create_model(n_classes=1 if self.task == 'regression' else 2)
-            
-            self.model = safe_tensorflow_operation(
-                _create_model,
-                fallback_device='/CPU:0',
-                max_retries=1
-            )
-            
-            self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape} on {device}")
-            return self
-            
-        except Exception as e:
-            self.logger.error(f"LSTM model building failed: {e}")
-            
-            # Force CPU mode and retry
+                self.logger.info("No GPU detected, using CPU for LSTM")
+                device = '/CPU:0'
+        except:
+            self.logger.warning("GPU detection failed, falling back to CPU")
+            device = '/CPU:0'
+        
+        # FIXED: Force CPU mode if GPU detection fails
+        try:
+            with tf.device(device):
+                # FIXED: Build model with correct input shape
+                inputs = tf.keras.Input(shape=self.input_shape[1:])  # Remove batch dimension
+                
+                # LSTM layers
+                if len(self.input_shape) == 3 and self.input_shape[1] > 1:
+                    # Multiple timesteps
+                    x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.LSTM(64)(x)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                else:
+                    # Single timestep - use Dense layers instead
+                    x = tf.keras.layers.Dense(128, activation='relu')(inputs)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.Dense(64, activation='relu')(x)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                
+                # Output layer
+                if self.task == 'classification':
+                    outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                else:
+                    outputs = tf.keras.layers.Dense(1, activation='linear')(x)
+                
+                self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                
+                # Compile model
+                if self.task == 'classification':
+                    self.model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        loss='sparse_categorical_crossentropy',
+                        metrics=['accuracy']
+                    )
+                else:
+                    self.model.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        loss='mse',
+                        metrics=['mae']
+                    )
+                    
+        except Exception as gpu_error:
+            self.logger.warning(f"GPU build failed: {gpu_error}, falling back to CPU")
+            # Force CPU mode
             try:
-                from ..utils.tensorflow_utils import force_cpu_mode
-                force_cpu_mode()
-                
-                # Clean up any GPU memory
-                cleanup_tensorflow_memory()
-                
-                # Retry on CPU
-                self.model = self._create_model(n_classes=1 if self.task == 'regression' else 2)
-                self.logger.info("LSTM model built successfully on CPU after GPU failure")
-                return self
-                
+                with tf.device('/CPU:0'):
+                    # FIXED: Build model with correct input shape
+                    inputs = tf.keras.Input(shape=self.input_shape[1:])  # Remove batch dimension
+                    
+                    # LSTM layers
+                    if len(self.input_shape) == 3 and self.input_shape[1] > 1:
+                        # Multiple timesteps
+                        x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
+                        x = tf.keras.layers.Dropout(0.2)(x)
+                        x = tf.keras.layers.LSTM(64)(x)
+                        x = tf.keras.layers.Dropout(0.2)(x)
+                    else:
+                        # Single timestep - use Dense layers instead
+                        x = tf.keras.layers.Dense(128, activation='relu')(inputs)
+                        x = tf.keras.layers.Dropout(0.2)(x)
+                        x = tf.keras.layers.Dense(64, activation='relu')(x)
+                        x = tf.keras.layers.Dropout(0.2)(x)
+                    
+                    # Output layer
+                    if self.task == 'classification':
+                        outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                    else:
+                        outputs = tf.keras.layers.Dense(1, activation='linear')(x)
+                    
+                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+                    
+                    # Compile model
+                    if self.task == 'classification':
+                        self.model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                            loss='sparse_categorical_crossentropy',
+                            metrics=['accuracy']
+                        )
+                    else:
+                        self.model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                            loss='mse',
+                            metrics=['mae']
+                        )
+                        
             except Exception as cpu_error:
-                self.logger.error(f"LSTM model building failed on both GPU and CPU: {cpu_error}")
-                raise RuntimeError(f"Failed to build LSTM model: {cpu_error}")
+                self.logger.error(f"CPU build also failed: {cpu_error}")
+                raise RuntimeError(f"Failed to build LSTM model on both GPU and CPU: {cpu_error}")
+        
+        self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape}")
+        return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
@@ -138,65 +184,84 @@ class LSTMModel(BaseModel):
         X, y = self._validate_input(X, y)
         
         try:
-            # Configure TensorFlow memory
-            configure_tensorflow_memory()
-            
-            # Ensure X has the right shape for LSTM
+            # FIXED: Ensure X has the right shape for the model
             if X.ndim == 2:
-                # [N, F] -> [N, 1, F] for single timestep
-                X = X.reshape(X.shape[0], 1, X.shape[1])
+                # [N, F] - reshape to [N, 1, F] for single timestep
+                X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
+                self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
             elif X.ndim == 3:
-                # [N, T, F] - already correct
-                pass
+                # [N, T, F] - use as is
+                X_reshaped = X
+                self.logger.info(f"Using 3D input shape: {X_reshaped.shape}")
             else:
-                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
+                raise ValueError(f"Unsupported input shape: {X.shape}")
             
-            # Scale features
-            X_reshaped = X.reshape(-1, X.shape[-1])
-            X_scaled = self.scaler.fit_transform(X_reshaped)
-            X_scaled = X_scaled.reshape(X.shape)
-            
-            # Create sequences if needed
-            if self.sequence_length > 1:
-                X_seq, y_seq = self._create_sequences(X_scaled, y)
+            # Ensure y has the right shape
+            if y.ndim == 1:
+                y_reshaped = y.values.reshape(-1, 1) if isinstance(y, pd.Series) else y.reshape(-1, 1)
             else:
-                X_seq, y_seq = X_scaled, y
+                y_reshaped = y
             
-            self.logger.info(f"Training LSTM with {len(X_seq)} samples, shape: {X_seq.shape}")
+            # Split data
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_reshaped, y_reshaped, test_size=0.2, random_state=42
+            )
             
-            # Get optimal device and train
-            device = get_optimal_device()
-            self.logger.info(f"Using device: {device}")
-            
-            # Use safe operation with fallback
-            def train_model():
-                return self.model.fit(
-                    X_seq, y_seq,
-                    batch_size=self.params.get('batch_size', 16),
-                    epochs=self.params.get('epochs', 100),
-                    validation_split=0.2,
-                    callbacks=self._get_callbacks(),
-                    verbose=0
+            # Training callbacks
+            callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss', patience=10, restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
                 )
+            ]
             
-            history = safe_tensorflow_operation(train_model)
+            # Train the model
+            history = self.model.fit(
+                X_train, y_train,
+                validation_data=(X_val, y_val),
+                epochs=100,
+                batch_size=32,
+                callbacks=callbacks,
+                verbose=0
+            )
             
+            # Store training history
+            self.training_history = history.history
+            
+            # Mark as trained
             self.is_trained = True
             
-            # Clean up memory
-            cleanup_tensorflow_memory()
+            # Calculate metrics
+            train_loss = history.history['loss'][-1]
+            val_loss = history.history['val_loss'][-1]
             
-            return {
-                'history': history.history,
-                'epochs_trained': len(history.history['loss']),
-                'final_loss': history.history['loss'][-1],
-                'final_val_loss': history.history.get('val_loss', [None])[-1]
-            }
+            if self.task == 'classification':
+                train_acc = history.history['accuracy'][-1]
+                val_acc = history.history['val_accuracy'][-1]
+                metrics = {
+                    'train_accuracy': train_acc,
+                    'val_accuracy': val_acc,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss
+                }
+            else:
+                train_mae = history.history['mae'][-1]
+                val_mae = history.history['val_mae'][-1]
+                metrics = {
+                    'train_mae': train_mae,
+                    'val_mae': val_mae,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss
+                }
+            
+            self.logger.info(f"LSTM training completed successfully. Final val_loss: {val_loss:.4f}")
+            return metrics
             
         except Exception as e:
             self.logger.error(f"LSTM training failed: {e}")
-            cleanup_tensorflow_memory()
-            raise
+            raise RuntimeError(f"LSTM training failed: {e}")
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """
@@ -215,39 +280,32 @@ class LSTMModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
-            # Ensure X has the right shape for LSTM
+            # FIXED: Ensure X has the right shape for the model
             if X.ndim == 2:
-                # [N, F] -> [N, 1, F] for single timestep
-                X = X.reshape(X.shape[0], 1, X.shape[1])
+                # [N, F] - reshape to [N, 1, F] for single timestep
+                X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
+                self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
             elif X.ndim == 3:
-                # [N, T, F] - already correct
-                pass
+                # [N, T, F] - use as is
+                X_reshaped = X
+                self.logger.info(f"Using 3D input shape: {X_reshaped.shape}")
             else:
-                raise ValueError(f"Expected 2D or 3D input, got {X.ndim}D")
-            
-            # Scale features
-            X_reshaped = X.reshape(-1, X.shape[-1])
-            X_scaled = self.scaler.transform(X_reshaped)
-            X_scaled = X_scaled.reshape(X.shape)
-            
-            # Create sequences if needed
-            if self.sequence_length > 1:
-                X_seq, _ = self._create_sequences(X_scaled, np.zeros(len(X_scaled)))
-            else:
-                X_seq = X_scaled
+                raise ValueError(f"Unsupported input shape: {X.shape}")
             
             # Make predictions
-            y_pred = self.model.predict(X_seq, verbose=0)
+            predictions = self.model.predict(X_reshaped, verbose=0)
             
-            # Ensure output is 1D
-            if y_pred.ndim > 1:
-                y_pred = y_pred.flatten()
-            
-            return y_pred
-            
+            # Reshape predictions to match expected output
+            if self.task == 'classification':
+                # Return class predictions
+                return np.argmax(predictions, axis=1)
+            else:
+                # Return regression predictions
+                return predictions.flatten()
+                
         except Exception as e:
             self.logger.error(f"LSTM prediction failed: {e}")
-            return np.zeros(len(X))
+            raise RuntimeError(f"LSTM prediction failed: {e}")
     
     def evaluate(self, X: Union[pd.DataFrame, np.ndarray], 
                 y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
@@ -297,75 +355,6 @@ class LSTMModel(BaseModel):
                     'R2': -float('inf')
                 }
     
-    def _create_model(self, n_classes: int) -> tf.keras.Model:
-        """Create LSTM model architecture."""
-        model = Sequential()
-        
-        # First LSTM layer
-        model.add(LSTM(self.units[0], return_sequences=True, input_shape=self.input_shape))
-        model.add(Dropout(self.dropout))
-        
-        # Second LSTM layer (if specified)
-        if len(self.units) > 1:
-            model.add(LSTM(self.units[1], return_sequences=False))
-            model.add(Dropout(self.dropout))
-        
-        # Dense layers
-        model.add(Dense(25, activation='relu'))
-        
-        # Output layer
-        if self.task == 'classification':
-            model.add(Dense(n_classes, activation='softmax'))
-            model.compile(
-                optimizer=Adam(learning_rate=0.001),
-                loss='sparse_categorical_crossentropy',
-                metrics=['accuracy']
-            )
-        else:
-            model.add(Dense(1))
-            model.compile(
-                optimizer=Adam(learning_rate=0.001),
-                loss='mse',
-                metrics=['mae']
-            )
-        
-        return model
-    
-    def _get_callbacks(self):
-        """Get training callbacks."""
-        callbacks = []
-        
-        # Early stopping
-        if self.params.get('early_stopping_patience', 5) > 0:
-            callbacks.append(tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=self.params.get('early_stopping_patience', 5),
-                restore_best_weights=True
-            ))
-        
-        # Learning rate reduction
-        if self.params.get('reduce_lr_patience', 5) > 0:
-            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=self.params.get('reduce_lr_patience', 5),
-                min_lr=1e-7
-            ))
-        
-        return callbacks
-
-    def _create_sequences(self, X: np.ndarray, y: np.ndarray, 
-                         sequence_length: int = 10) -> Tuple[np.ndarray, np.ndarray]:
-        """Create sequences for LSTM training."""
-        sequences = []
-        targets = []
-        
-        for i in range(sequence_length, len(X)):
-            sequences.append(X[i-sequence_length:i])
-            targets.append(y[i])
-        
-        return np.array(sequences), np.array(targets)
-    
     def get_model_summary(self) -> str:
         """Get model summary."""
         if not self.is_trained:
@@ -379,58 +368,8 @@ class LSTMModel(BaseModel):
             self.logger.error(f"Failed to get model summary: {e}")
             return "Summary not available"
     
-    def plot_training_history(self, save_path: Optional[str] = None) -> None:
-        """Plot training history."""
-        if not self.is_trained:
-            raise ValueError("Model must be trained before plotting history")
-        
-        try:
-            import matplotlib.pyplot as plt
-            
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-            
-            # Loss plot
-            axes[0].plot(self.model.history.history['loss'], label='Training Loss')
-            if 'val_loss' in self.model.history.history:
-                axes[0].plot(self.model.history.history['val_loss'], label='Validation Loss')
-            axes[0].set_title('Model Loss')
-            axes[0].set_xlabel('Epoch')
-            axes[0].set_ylabel('Loss')
-            axes[0].legend()
-            
-            # Metric plot
-            if self.task == 'classification':
-                metric_name = 'accuracy'
-                metric_label = 'Accuracy'
-            else:
-                metric_name = 'mae'
-                metric_label = 'MAE'
-            
-            if metric_name in self.model.history.history:
-                axes[1].plot(self.model.history.history[metric_name], label=f'Training {metric_label}')
-                if f'val_{metric_name}' in self.model.history.history:
-                    axes[1].plot(self.model.history.history[f'val_{metric_name}'], 
-                               label=f'Validation {metric_label}')
-                axes[1].set_title(f'Model {metric_label}')
-                axes[1].set_xlabel('Epoch')
-                axes[1].set_ylabel(metric_label)
-                axes[1].legend()
-            
-            plt.tight_layout()
-            
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                self.logger.info(f"Training history plot saved to {save_path}")
-            else:
-                plt.show()
-            
-            plt.close()
-            
-        except Exception as e:
-            self.logger.error(f"Failed to plot training history: {e}")
-    
     def save_model(self, filepath: str) -> None:
-        """Save the trained model with additional LSTM-specific data."""
+        """Save the trained model."""
         if not self.is_trained:
             raise ValueError("Cannot save untrained model")
         
@@ -442,7 +381,6 @@ class LSTMModel(BaseModel):
                 'feature_names': self.feature_names,
                 'task': self.task,
                 'name': self.name,
-                'scaler': self.scaler,
                 'input_shape': self.input_shape,
                 'units': self.units,
                 'dropout': self.dropout,
@@ -465,7 +403,6 @@ class LSTMModel(BaseModel):
             self.feature_names = model_data['feature_names']
             self.task = model_data['task']
             self.name = model_data['name']
-            self.scaler = model_data['scaler']
             self.input_shape = model_data['input_shape']
             self.units = model_data['units']
             self.dropout = model_data['dropout']

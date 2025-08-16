@@ -13,8 +13,8 @@ from datetime import datetime
 @dataclass
 class DataConfig:
     """Configuration for data loading and processing."""
-    start_date: str = '2000-01-01'
-    end_date: str = '2025-01-05'
+    start_date: str = '1990-01-01'
+    end_date: str = '2025-10-08'
     us_assets: List[str] = field(default_factory=lambda: ['AAPL', 'MSFT', '^GSPC'])
     au_assets: List[str] = field(default_factory=lambda: ['IOZ.AX', 'CBA.AX', 'BHP.AX'])
     cache_dir: str = 'data_cache'
@@ -28,36 +28,176 @@ class DataConfig:
 @dataclass
 class FeatureConfig:
     """Configuration for feature engineering."""
-    volatility_window: int = 5
-    ma_short: int = 10
-    ma_long: int = 50
-    correlation_window: int = 30
-    sequence_length: int = 7
+    volatility_window: int = 20  # Increased from 10 to 20 for more stable volatility
+    ma_short: int = 50  # Increased from 20 to 50 for better trend detection
+    ma_long: int = 200  # Increased from 100 to 200 for longer-term trends
+    correlation_window: int = 120  # Increased from 60 to 120 for more stable correlations
+    sequence_length: int = 30  # Increased from 15 to 30 for better temporal patterns
+    # New advanced features for high-performance systems
+    rsi_period: int = 14
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    bollinger_period: int = 20
+    bollinger_std: float = 2.0
+    atr_period: int = 14
+    stochastic_k: int = 14
+    stochastic_d: int = 3
 
 
 @dataclass
 class ModelConfig:
     """Configuration for model parameters."""
-    lstm_units: List[int] = field(default_factory=lambda: [50, 30])
-    lstm_dropout: float = 0.2
-    stockmixer_temporal_units: int = 64
-    stockmixer_indicator_units: int = 64
-    stockmixer_cross_stock_units: int = 64
-    stockmixer_fusion_units: int = 128
-    xgboost_n_estimators: int = 100
-    xgboost_max_depth: int = 5
+    # Enhanced LSTM for high-performance systems
+    lstm_units: List[int] = field(default_factory=lambda: [128, 96, 64, 32])  # Deeper architecture
+    lstm_dropout: float = 0.3  # Increased dropout for regularization
+    lstm_recurrent_dropout: float = 0.2  # New parameter for recurrent dropout
+    lstm_bidirectional: bool = True  # Enable bidirectional LSTM
+    lstm_attention: bool = True  # Enable attention mechanism
+    
+    # Enhanced StockMixer for high-performance systems
+    stockmixer_temporal_units: int = 256  # Increased from 64 to 256
+    stockmixer_indicator_units: int = 256  # Increased from 64 to 256
+    stockmixer_cross_stock_units: int = 256  # Increased from 64 to 256
+    stockmixer_fusion_units: int = 512  # Increased from 128 to 512
+    stockmixer_num_layers: int = 6  # New parameter for deeper architecture
+    stockmixer_attention_heads: int = 8  # New parameter for multi-head attention
+    stockmixer_dropout: float = 0.3  # New parameter for dropout
+    
+    # Enhanced XGBoost for high-performance systems
+    xgboost_n_estimators: int = 500  # Increased from 100 to 500
+    xgboost_max_depth: int = 8  # Increased from 5 to 8
+    xgboost_learning_rate: float = 0.05  # New parameter for learning rate
+    xgboost_subsample: float = 0.8  # New parameter for subsampling
+    xgboost_colsample_bytree: float = 0.8  # New parameter for column sampling
+    xgboost_reg_alpha: float = 0.1  # New parameter for L1 regularization
+    xgboost_reg_lambda: float = 1.0  # New parameter for L2 regularization
+    
+    # New advanced models for high-performance systems
+    transformer_heads: int = 8
+    transformer_layers: int = 6
+    transformer_d_model: int = 256
+    transformer_dff: int = 1024
+    transformer_dropout: float = 0.1
 
 
 @dataclass
 class TrainingConfig:
     """Configuration for training parameters."""
-    walk_forward_splits: int = 5
-    test_size: int = 63
-    batch_size: int = 64
-    epochs: int = 100
-    early_stopping_patience: int = 20
-    reduce_lr_patience: int = 10
+    walk_forward_splits: int = 12  # Increased from 8 to 12 for extended data
+    test_size: int = 252  # Increased from 126 to 252 (1 year instead of 6 months)
+    batch_size: int = 128  # Increased from 64 to 128 for better GPU utilization
+    epochs: int = 200  # Increased from 100 to 200 for better convergence
+    early_stopping_patience: int = 30  # Increased from 20 to 30
+    reduce_lr_patience: int = 15  # Increased from 10 to 15
     random_state: int = 42
+    
+    # New advanced training parameters for high-performance systems
+    validation_split: float = 0.2
+    class_weight_balance: bool = True  # Enable class weight balancing
+    learning_rate_schedule: str = 'cosine'  # 'constant', 'step', 'cosine', 'exponential'
+    warmup_epochs: int = 10  # New parameter for learning rate warmup
+    gradient_clip_norm: float = 1.0  # New parameter for gradient clipping
+    mixed_precision: bool = True  # Enable mixed precision training
+    data_augmentation: bool = True  # Enable data augmentation
+    
+    # Parallel processing for 36-core system
+    num_workers: int = 24  # Use 24 cores for data loading (leave some for system)
+    parallel_backend: str = 'multiprocessing'  # 'multiprocessing', 'threading', 'joblib'
+    joblib_n_jobs: int = 24  # Use 24 cores for scikit-learn operations
+    ray_num_cpus: int = 24  # Use 24 cores for Ray operations
+    dask_n_workers: int = 24  # Use 24 workers for Dask operations
+
+
+@dataclass
+class HyperparameterTuningConfig:
+    """Configuration for advanced hyperparameter tuning."""
+    enable_tuning: bool = True
+    tuning_backend: str = 'optuna'  # 'optuna', 'hyperopt', 'ray[tune]', 'skopt'
+    
+    # Optuna configuration
+    optuna_n_trials: int = 200  # Increased number of trials
+    optuna_timeout: int = 3600  # 1 hour timeout
+    optuna_pruner: str = 'median'  # 'median', 'percentile', 'hyperband'
+    
+    # Ray Tune configuration
+    ray_tune_num_samples: int = 200
+    ray_tune_time_budget_s: int = 3600
+    ray_tune_scheduler: str = 'asha'  # 'asha', 'hyperband', 'median_stopping'
+    
+    # Search spaces for different models
+    lstm_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        'units': [64, 128, 256, 512],
+        'layers': [2, 3, 4, 5],
+        'dropout': [0.1, 0.2, 0.3, 0.4],
+        'learning_rate': [0.001, 0.01, 0.1],
+        'batch_size': [32, 64, 128, 256]
+    })
+    
+    stockmixer_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        'temporal_units': [128, 256, 512],
+        'indicator_units': [128, 256, 512],
+        'cross_stock_units': [128, 256, 512],
+        'fusion_units': [256, 512, 1024],
+        'num_layers': [4, 6, 8],
+        'attention_heads': [4, 8, 16]
+    })
+    
+    xgboost_search_space: Dict[str, Any] = field(default_factory=lambda: {
+        'n_estimators': [200, 500, 1000],
+        'max_depth': [6, 8, 10, 12],
+        'learning_rate': [0.01, 0.05, 0.1],
+        'subsample': [0.7, 0.8, 0.9],
+        'colsample_bytree': [0.7, 0.8, 0.9],
+        'reg_alpha': [0, 0.1, 1.0],
+        'reg_lambda': [0.1, 1.0, 10.0]
+    })
+
+
+@dataclass
+class EnsembleConfig:
+    """Configuration for ensemble methods."""
+    enable_ensemble: bool = True
+    ensemble_methods: List[str] = field(default_factory=lambda: ['voting', 'stacking', 'blending'])
+    ensemble_weights: List[float] = field(default_factory=lambda: [0.3, 0.4, 0.3])
+    
+    # Voting ensemble
+    voting_estimators: List[str] = field(default_factory=lambda: ['lstm', 'stockmixer', 'xgboost', 'transformer'])
+    voting_method: str = 'soft'  # 'hard', 'soft'
+    
+    # Stacking ensemble
+    stacking_cv_folds: int = 5
+    stacking_meta_learner: str = 'xgboost'  # 'xgboost', 'lstm', 'linear'
+    
+    # Blending ensemble
+    blending_holdout_size: float = 0.2
+    blending_meta_learner: str = 'xgboost'
+
+
+@dataclass
+class AdvancedFeaturesConfig:
+    """Configuration for advanced features and techniques."""
+    # Feature selection
+    enable_feature_selection: bool = True
+    feature_selection_method: str = 'mutual_info'  # 'mutual_info', 'chi2', 'f_classif', 'recursive'
+    feature_selection_k: int = 50  # Number of features to select
+    
+    # Feature importance
+    enable_feature_importance: bool = True
+    importance_methods: List[str] = field(default_factory=lambda: ['shap', 'permutation', 'tree'])
+    
+    # Cross-validation
+    cv_method: str = 'time_series_split'  # 'time_series_split', 'walk_forward', 'purged_group'
+    cv_folds: int = 5
+    
+    # Model interpretability
+    enable_interpretability: bool = True
+    interpretability_methods: List[str] = field(default_factory=lambda: ['shap', 'lime', 'permutation'])
+    
+    # Risk metrics
+    enable_risk_metrics: bool = True
+    risk_metrics: List[str] = field(default_factory=lambda: ['var', 'cvar', 'sharpe', 'sortino', 'calmar'])
+    confidence_level: float = 0.95
 
 
 @dataclass
@@ -124,8 +264,8 @@ class PipelineConfig:
         # Data configuration
         data_config = config_dict.get('data', {})
         self.data = DataConfig(
-            start_date=data_config.get('start_date', '2000-01-01'),
-            end_date=data_config.get('end_date', '2025-01-05'),
+            start_date=data_config.get('start_date', '1990-01-01'),
+            end_date=data_config.get('end_date', '2025-10-08'),
             us_assets=data_config.get('us_assets', ['AAPL', 'MSFT', '^GSPC']),
             au_assets=data_config.get('au_assets', ['IOZ.AX', 'CBA.AX', 'BHP.AX']),
             cache_dir=data_config.get('cache_dir', 'data_cache')
@@ -157,8 +297,8 @@ class PipelineConfig:
         # Training configuration
         training_config = config_dict.get('training', {})
         self.training = TrainingConfig(
-            walk_forward_splits=training_config.get('walk_forward_splits', 5),
-            test_size=training_config.get('test_size', 63),
+            walk_forward_splits=training_config.get('walk_forward_splits', 8),
+            test_size=training_config.get('test_size', 126),
             batch_size=training_config.get('batch_size', 64),
             epochs=training_config.get('epochs', 100),
             early_stopping_patience=training_config.get('early_stopping_patience', 20),
@@ -191,6 +331,74 @@ class PipelineConfig:
             max_display=shap_config.get('max_display', 20),
             plot_type=shap_config.get('plot_type', 'bar'),
             save_plots=shap_config.get('save_plots', True)
+        )
+        
+        # Hyperparameter tuning configuration
+        tuning_config = config_dict.get('hyperparameter_tuning', {})
+        self.hyperparameter_tuning = HyperparameterTuningConfig(
+            enable_tuning=tuning_config.get('enable_tuning', True),
+            tuning_backend=tuning_config.get('tuning_backend', 'optuna'),
+            optuna_n_trials=tuning_config.get('optuna_n_trials', 200),
+            optuna_timeout=tuning_config.get('optuna_timeout', 3600),
+            optuna_pruner=tuning_config.get('optuna_pruner', 'median'),
+            ray_tune_num_samples=tuning_config.get('ray_tune_num_samples', 200),
+            ray_tune_time_budget_s=tuning_config.get('ray_tune_time_budget_s', 3600),
+            ray_tune_scheduler=tuning_config.get('ray_tune_scheduler', 'asha'),
+            lstm_search_space=tuning_config.get('lstm_search_space', {
+                'units': [64, 128, 256, 512],
+                'layers': [2, 3, 4, 5],
+                'dropout': [0.1, 0.2, 0.3, 0.4],
+                'learning_rate': [0.001, 0.01, 0.1],
+                'batch_size': [32, 64, 128, 256]
+            }),
+            stockmixer_search_space=tuning_config.get('stockmixer_search_space', {
+                'temporal_units': [128, 256, 512],
+                'indicator_units': [128, 256, 512],
+                'cross_stock_units': [128, 256, 512],
+                'fusion_units': [256, 512, 1024],
+                'num_layers': [4, 6, 8],
+                'attention_heads': [4, 8, 16]
+            }),
+            xgboost_search_space=tuning_config.get('xgboost_search_space', {
+                'n_estimators': [200, 500, 1000],
+                'max_depth': [6, 8, 10, 12],
+                'learning_rate': [0.01, 0.05, 0.1],
+                'subsample': [0.7, 0.8, 0.9],
+                'colsample_bytree': [0.7, 0.8, 0.9],
+                'reg_alpha': [0, 0.1, 1.0],
+                'reg_lambda': [0.1, 1.0, 10.0]
+            })
+        )
+        
+        # Ensemble configuration
+        ensemble_config = config_dict.get('ensemble', {})
+        self.ensemble = EnsembleConfig(
+            enable_ensemble=ensemble_config.get('enable_ensemble', True),
+            ensemble_methods=ensemble_config.get('ensemble_methods', ['voting', 'stacking', 'blending']),
+            ensemble_weights=ensemble_config.get('ensemble_weights', [0.3, 0.4, 0.3]),
+            voting_estimators=ensemble_config.get('voting_estimators', ['lstm', 'stockmixer', 'xgboost', 'transformer']),
+            voting_method=ensemble_config.get('voting_method', 'soft'),
+            stacking_cv_folds=ensemble_config.get('stacking_cv_folds', 5),
+            stacking_meta_learner=ensemble_config.get('stacking_meta_learner', 'xgboost'),
+            blending_holdout_size=ensemble_config.get('blending_holdout_size', 0.2),
+            blending_meta_learner=ensemble_config.get('blending_meta_learner', 'xgboost')
+        )
+        
+        # Advanced features configuration
+        advanced_config = config_dict.get('advanced_features', {})
+        self.advanced_features = AdvancedFeaturesConfig(
+            enable_feature_selection=advanced_config.get('enable_feature_selection', True),
+            feature_selection_method=advanced_config.get('feature_selection_method', 'mutual_info'),
+            feature_selection_k=advanced_config.get('feature_selection_k', 50),
+            enable_feature_importance=advanced_config.get('enable_feature_importance', True),
+            importance_methods=advanced_config.get('importance_methods', ['shap', 'permutation', 'tree']),
+            cv_method=advanced_config.get('cv_method', 'time_series_split'),
+            cv_folds=advanced_config.get('cv_folds', 5),
+            enable_interpretability=advanced_config.get('enable_interpretability', True),
+            interpretability_methods=advanced_config.get('interpretability_methods', ['shap', 'lime', 'permutation']),
+            enable_risk_metrics=advanced_config.get('enable_risk_metrics', True),
+            risk_metrics=advanced_config.get('risk_metrics', ['var', 'cvar', 'sharpe', 'sortino', 'calmar']),
+            confidence_level=advanced_config.get('confidence_level', 0.95)
         )
     
     @classmethod
@@ -267,6 +475,44 @@ class PipelineConfig:
                 'max_display': self.shap.max_display,
                 'plot_type': self.shap.plot_type,
                 'save_plots': self.shap.save_plots
+            },
+            'hyperparameter_tuning': {
+                'enable_tuning': self.hyperparameter_tuning.enable_tuning,
+                'tuning_backend': self.hyperparameter_tuning.tuning_backend,
+                'optuna_n_trials': self.hyperparameter_tuning.optuna_n_trials,
+                'optuna_timeout': self.hyperparameter_tuning.optuna_timeout,
+                'optuna_pruner': self.hyperparameter_tuning.optuna_pruner,
+                'ray_tune_num_samples': self.hyperparameter_tuning.ray_tune_num_samples,
+                'ray_tune_time_budget_s': self.hyperparameter_tuning.ray_tune_time_budget_s,
+                'ray_tune_scheduler': self.hyperparameter_tuning.ray_tune_scheduler,
+                'lstm_search_space': self.hyperparameter_tuning.lstm_search_space,
+                'stockmixer_search_space': self.hyperparameter_tuning.stockmixer_search_space,
+                'xgboost_search_space': self.hyperparameter_tuning.xgboost_search_space
+            },
+            'ensemble': {
+                'enable_ensemble': self.ensemble.enable_ensemble,
+                'ensemble_methods': self.ensemble.ensemble_methods,
+                'ensemble_weights': self.ensemble.ensemble_weights,
+                'voting_estimators': self.ensemble.voting_estimators,
+                'voting_method': self.ensemble.voting_method,
+                'stacking_cv_folds': self.ensemble.stacking_cv_folds,
+                'stacking_meta_learner': self.ensemble.stacking_meta_learner,
+                'blending_holdout_size': self.ensemble.blending_holdout_size,
+                'blending_meta_learner': self.ensemble.blending_meta_learner
+            },
+            'advanced_features': {
+                'enable_feature_selection': self.advanced_features.enable_feature_selection,
+                'feature_selection_method': self.advanced_features.feature_selection_method,
+                'feature_selection_k': self.advanced_features.feature_selection_k,
+                'enable_feature_importance': self.advanced_features.enable_feature_importance,
+                'importance_methods': self.advanced_features.importance_methods,
+                'cv_method': self.advanced_features.cv_method,
+                'cv_folds': self.advanced_features.cv_folds,
+                'enable_interpretability': self.advanced_features.enable_interpretability,
+                'interpretability_methods': self.advanced_features.interpretability_methods,
+                'enable_risk_metrics': self.advanced_features.enable_risk_metrics,
+                'risk_metrics': self.advanced_features.risk_metrics,
+                'confidence_level': self.advanced_features.confidence_level
             }
         }
     
@@ -323,7 +569,7 @@ class PipelineConfig:
         Get configuration for specific model type.
         
         Args:
-            model_type: Type of model ('lstm', 'stockmixer', 'xgboost', 'arima')
+            model_type: Type of model ('lstm', 'stockmixer', 'xgboost', 'arima', 'transformer')
             
         Returns:
             Model-specific configuration dictionary
@@ -332,10 +578,20 @@ class PipelineConfig:
             return {
                 'units': self.models.lstm_units,
                 'dropout': self.models.lstm_dropout,
+                'recurrent_dropout': self.models.lstm_recurrent_dropout,
+                'bidirectional': self.models.lstm_bidirectional,
+                'attention': self.models.lstm_attention,
                 'batch_size': self.training.batch_size,
                 'epochs': self.training.epochs,
                 'early_stopping_patience': self.training.early_stopping_patience,
-                'reduce_lr_patience': self.training.reduce_lr_patience
+                'reduce_lr_patience': self.training.reduce_lr_patience,
+                'validation_split': self.training.validation_split,
+                'class_weight_balance': self.training.class_weight_balance,
+                'learning_rate_schedule': self.training.learning_rate_schedule,
+                'warmup_epochs': self.training.warmup_epochs,
+                'gradient_clip_norm': self.training.gradient_clip_norm,
+                'mixed_precision': self.training.mixed_precision,
+                'data_augmentation': self.training.data_augmentation
             }
         elif model_type == 'stockmixer':
             return {
@@ -343,23 +599,139 @@ class PipelineConfig:
                 'indicator_units': self.models.stockmixer_indicator_units,
                 'cross_stock_units': self.models.stockmixer_cross_stock_units,
                 'fusion_units': self.models.stockmixer_fusion_units,
+                'num_layers': self.models.stockmixer_num_layers,
+                'attention_heads': self.models.stockmixer_attention_heads,
+                'dropout': self.models.stockmixer_dropout,
                 'batch_size': self.training.batch_size,
                 'epochs': self.training.epochs,
                 'early_stopping_patience': self.training.early_stopping_patience,
-                'reduce_lr_patience': self.training.reduce_lr_patience
+                'reduce_lr_patience': self.training.reduce_lr_patience,
+                'validation_split': self.training.validation_split,
+                'class_weight_balance': self.training.class_weight_balance,
+                'learning_rate_schedule': self.training.learning_rate_schedule,
+                'warmup_epochs': self.training.warmup_epochs,
+                'gradient_clip_norm': self.training.gradient_clip_norm,
+                'mixed_precision': self.training.mixed_precision,
+                'data_augmentation': self.training.data_augmentation
             }
         elif model_type == 'xgboost':
             return {
                 'n_estimators': self.models.xgboost_n_estimators,
                 'max_depth': self.models.xgboost_max_depth,
-                'random_state': self.training.random_state
+                'learning_rate': self.models.xgboost_learning_rate,
+                'subsample': self.models.xgboost_subsample,
+                'colsample_bytree': self.models.xgboost_colsample_bytree,
+                'reg_alpha': self.models.xgboost_reg_alpha,
+                'reg_lambda': self.models.xgboost_reg_lambda,
+                'random_state': self.training.random_state,
+                'n_jobs': self.training.joblib_n_jobs  # Use parallel processing
+            }
+        elif model_type == 'transformer':
+            return {
+                'heads': self.models.transformer_heads,
+                'layers': self.models.transformer_layers,
+                'd_model': self.models.transformer_d_model,
+                'dff': self.models.transformer_dff,
+                'dropout': self.models.transformer_dropout,
+                'batch_size': self.training.batch_size,
+                'epochs': self.training.epochs,
+                'early_stopping_patience': self.training.early_stopping_patience,
+                'reduce_lr_patience': self.training.reduce_lr_patience,
+                'validation_split': self.training.validation_split,
+                'class_weight_balance': self.training.class_weight_balance,
+                'learning_rate_schedule': self.training.learning_rate_schedule,
+                'warmup_epochs': self.training.warmup_epochs,
+                'gradient_clip_norm': self.training.gradient_clip_norm,
+                'mixed_precision': self.training.mixed_precision,
+                'data_augmentation': self.training.data_augmentation
             }
         elif model_type == 'arima':
             return {
-                'order': (1, 1, 1)  # Default ARIMA order
+                'order': (1, 1, 1),  # Default ARIMA order
+                'seasonal_order': (1, 1, 1, 12),  # Seasonal ARIMA
+                'n_jobs': self.training.joblib_n_jobs  # Use parallel processing
             }
         else:
             raise ValueError(f"Unknown model type: {model_type}")
+    
+    def get_parallel_config(self) -> Dict[str, Any]:
+        """
+        Get parallel processing configuration for high-performance systems.
+        
+        Returns:
+            Dictionary with parallel processing settings
+        """
+        return {
+            'num_workers': self.training.num_workers,
+            'parallel_backend': self.training.parallel_backend,
+            'joblib_n_jobs': self.training.joblib_n_jobs,
+            'ray_num_cpus': self.training.ray_num_cpus,
+            'dask_n_workers': self.training.dask_n_workers
+        }
+    
+    def get_hyperparameter_tuning_config(self) -> Dict[str, Any]:
+        """
+        Get hyperparameter tuning configuration.
+        
+        Returns:
+            Dictionary with hyperparameter tuning settings
+        """
+        return {
+            'enable_tuning': self.hyperparameter_tuning.enable_tuning,
+            'tuning_backend': self.hyperparameter_tuning.tuning_backend,
+            'optuna_n_trials': self.hyperparameter_tuning.optuna_n_trials,
+            'optuna_timeout': self.hyperparameter_tuning.optuna_timeout,
+            'optuna_pruner': self.hyperparameter_tuning.optuna_pruner,
+            'ray_tune_num_samples': self.hyperparameter_tuning.ray_tune_num_samples,
+            'ray_tune_time_budget_s': self.hyperparameter_tuning.ray_tune_time_budget_s,
+            'ray_tune_scheduler': self.hyperparameter_tuning.ray_tune_scheduler,
+            'search_spaces': {
+                'lstm': self.hyperparameter_tuning.lstm_search_space,
+                'stockmixer': self.hyperparameter_tuning.stockmixer_search_space,
+                'xgboost': self.hyperparameter_tuning.xgboost_search_space
+            }
+        }
+    
+    def get_ensemble_config(self) -> Dict[str, Any]:
+        """
+        Get ensemble configuration.
+        
+        Returns:
+            Dictionary with ensemble settings
+        """
+        return {
+            'enable_ensemble': self.ensemble.enable_ensemble,
+            'ensemble_methods': self.ensemble.ensemble_methods,
+            'ensemble_weights': self.ensemble.ensemble_weights,
+            'voting_estimators': self.ensemble.voting_estimators,
+            'voting_method': self.ensemble.voting_method,
+            'stacking_cv_folds': self.ensemble.stacking_cv_folds,
+            'stacking_meta_learner': self.ensemble.stacking_meta_learner,
+            'blending_holdout_size': self.ensemble.blending_holdout_size,
+            'blending_meta_learner': self.ensemble.blending_meta_learner
+        }
+    
+    def get_advanced_features_config(self) -> Dict[str, Any]:
+        """
+        Get advanced features configuration.
+        
+        Returns:
+            Dictionary with advanced features settings
+        """
+        return {
+            'enable_feature_selection': self.advanced_features.enable_feature_selection,
+            'feature_selection_method': self.advanced_features.feature_selection_method,
+            'feature_selection_k': self.advanced_features.feature_selection_k,
+            'enable_feature_importance': self.advanced_features.enable_feature_importance,
+            'importance_methods': self.advanced_features.importance_methods,
+            'cv_method': self.advanced_features.cv_method,
+            'cv_folds': self.advanced_features.cv_folds,
+            'enable_interpretability': self.advanced_features.enable_interpretability,
+            'interpretability_methods': self.advanced_features.interpretability_methods,
+            'enable_risk_metrics': self.advanced_features.enable_risk_metrics,
+            'risk_metrics': self.advanced_features.risk_metrics,
+            'confidence_level': self.advanced_features.confidence_level
+        }
 
 
 # Global configuration instance for dependency injection

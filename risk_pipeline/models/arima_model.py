@@ -11,6 +11,7 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 from .base_model import BaseModel
 
@@ -38,6 +39,9 @@ class ARIMAModel(BaseModel):
     def build_model(self, input_shape: Tuple[int, ...]) -> 'ARIMAModel':
         """Build the ARIMA model architecture (ARIMA models don't need building)."""
         self.input_shape = input_shape
+        # FIXED: Set a placeholder model attribute to indicate the model is "built"
+        # ARIMA models don't need actual building, but we need to set this for compatibility
+        self.model = "ARIMA_READY"  # Placeholder to indicate readiness
         self.logger.info(f"ARIMA model ready with input shape: {input_shape}")
         return self
     
@@ -65,62 +69,44 @@ class ARIMAModel(BaseModel):
         self.logger.info(f"Training ARIMA model with {len(y)} observations")
         
         try:
-            # For ARIMA, we use the target variable directly as it should be the time series
-            # If y is volatility, we can use it directly; if it's returns, we can use it directly
-            if isinstance(y, pd.Series):
-                target_series = y.dropna()
-            else:
-                target_series = pd.Series(y).dropna()
-            
-            if len(target_series) < 50:
-                raise ValueError(f"Insufficient target data: {len(target_series)} observations (minimum: 50)")
-            
-            # Check if we need to make the series stationary
-            # For volatility targets, they might already be stationary
-            # For price/return targets, we might need differencing
-            
-            # Check stationarity
-            from statsmodels.tsa.stattools import adfuller
-            adf_result = adfuller(target_series)
-            is_stationary = adf_result[1] < 0.05
-            
-            self.logger.info(f"Stationarity test: p-value={adf_result[1]:.4f}, stationary={is_stationary}")
-            
-            # If not stationary, try differencing
-            if not is_stationary:
-                self.logger.info("Series not stationary, applying differencing")
-                # Use order (1,1,1) for non-stationary data
-                order = (1, 1, 1)
-            else:
-                # Use order (1,0,1) for stationary data
-                order = (1, 0, 1)
-            
-            # Fit ARIMA model
-            self.model = ARIMA(target_series, order=order)
+            # FIXED: Fit ARIMA model and store it properly
+            self.model = ARIMA(y, order=self.order)
             fitted_model = self.model.fit()
             
-            # Model diagnostics
-            from statsmodels.stats.diagnostic import acorr_ljungbox
-            lb_result = acorr_ljungbox(fitted_model.resid, lags=10, return_df=True)
-            lb_pvalue = lb_result['lb_pvalue'].iloc[-1]
-            
-            self.logger.info(f"Diagnostics: Ljung-Box p-value={lb_pvalue:.4f}")
-            self.logger.info(f"ARIMA training completed. AIC: {fitted_model.aic:.2f}")
-            
+            # Store the fitted model
             self.model = fitted_model
+            
+            # Mark as trained
             self.is_trained = True
             
-            return {
-                'aic': fitted_model.aic,
-                'bic': fitted_model.bic,
-                'is_stationary': is_stationary,
-                'ljung_box_pvalue': lb_pvalue,
-                'n_observations': len(target_series)
+            # Calculate training metrics
+            aic = fitted_model.aic
+            bic = fitted_model.bic
+            hqic = fitted_model.hqic
+            
+            # Calculate in-sample predictions
+            y_pred = fitted_model.predict(start=0, end=len(y)-1)
+            mse = np.mean((y - y_pred) ** 2)
+            mae = np.mean(np.abs(y - y_pred))
+            
+            metrics = {
+                'aic': aic,
+                'bic': bic,
+                'hqic': hqic,
+                'mse': mse,
+                'mae': mae,
+                'observations': len(y)
             }
+            
+            self.logger.info(f"ARIMA training completed successfully. AIC: {aic:.2f}, MSE: {mse:.4f}")
+            return metrics
             
         except Exception as e:
             self.logger.error(f"ARIMA training failed: {e}")
-            raise
+            # FIXED: Reset model state on failure
+            self.model = None
+            self.is_trained = False
+            raise RuntimeError(f"ARIMA training failed: {e}")
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], 
                 steps: Optional[int] = None) -> np.ndarray:
@@ -136,6 +122,10 @@ class ARIMAModel(BaseModel):
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
+        
+        # FIXED: Check if model is actually a fitted ARIMA model
+        if not hasattr(self.model, 'forecast'):
+            raise ValueError("ARIMA model not properly fitted")
         
         if steps is None:
             steps = len(X) if hasattr(X, '__len__') else 1

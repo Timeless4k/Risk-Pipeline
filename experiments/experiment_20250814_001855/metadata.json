@@ -1,0 +1,13 @@
+{
+  "name": "pipeline_run_20250814_001855",
+  "description": "Complete pipeline run",
+  "created_at": "2025-08-14T00:18:55.618918",
+  "assets_processed": 1,
+  "models_run": [
+    "xgboost"
+  ],
+  "shap_analysis": true,
+  "models_saved": true,
+  "execution_time_minutes": 0.26034404039382936,
+  "peak_memory_mb": 271.36328125
+}
