@@ -201,8 +201,11 @@ class ExplainerFactory:
                 try:
                     # Prepare background data
                     background_data = self._prepare_deep_background_data(X, model_type='lstm')
-                    # Create DeepExplainer
-                    explainer = shap.DeepExplainer(tf_model, background_data)
+                    # FIXED: Force CPU device context for DeepExplainer to match model device
+                    import tensorflow as tf
+                    with tf.device('/CPU:0'):
+                        # Create DeepExplainer
+                        explainer = shap.DeepExplainer(tf_model, background_data)
                 except Exception as e:
                     logger.warning(f"Failed to create DeepExplainer for LSTM: {e}")
                     # Fallback: create a mock explainer
@@ -369,12 +372,13 @@ class ExplainerFactory:
                 # Handle other types by converting to numpy
                 X = np.asarray(X)
             
-            # Ensure X is 2D
+            # FIXED: Handle different input shapes properly
             if X.ndim == 1:
                 X = X.reshape(-1, 1)
             elif X.ndim > 2:
-                # Flatten to 2D
-                X = X.reshape(X.shape[0], -1)
+                # For deep learning models, preserve the original shape
+                # Don't flatten - let the model handle the shape
+                pass
             
             # For deep learning models, use a subset for background
             n_samples = min(
@@ -389,21 +393,19 @@ class ExplainerFactory:
             else:
                 background_data = X.copy()
             
-            # Ensure proper shape for LSTM/StockMixer
-            if model_type in ['lstm', 'stockmixer'] and len(background_data.shape) == 2:
-                # Add time dimension if needed
-                background_data = background_data.reshape(
-                    background_data.shape[0], 1, background_data.shape[1]
-                )
-            
+            # FIXED: Don't force reshape - use original shape for SHAP
+            # The model will handle the input shape conversion
             logger.debug(f"Prepared background data: shape={background_data.shape}, type={model_type}")
             return background_data
             
         except Exception as e:
             logger.error(f"Background data preparation failed: {e}")
-            # Return safe fallback
-            fallback_shape = (100, 1, 33) if model_type in ['lstm', 'stockmixer'] else (100, 33)
-            return np.zeros(fallback_shape)
+            # Return safe fallback with original shape
+            if model_type in ['lstm', 'stockmixer']:
+                # Return 2D fallback for tabular data
+                return np.zeros((100, 33))
+            else:
+                return np.zeros((100, 33))
     
     def get_explainer(self, model_type: str, task: str) -> Optional[Any]:
         """
@@ -727,7 +729,10 @@ class StockMixerExplainer:
                     return np.zeros_like(flat)
             self.deep_explainer = _DeepShim()
         else:
-            self.deep_explainer = shap.DeepExplainer(model, background_data)
+            # FIXED: Force CPU device context for DeepExplainer to match model device
+            import tensorflow as tf
+            with tf.device('/CPU:0'):
+                self.deep_explainer = shap.DeepExplainer(model, background_data)
         
         logger.info("StockMixerExplainer initialized")
     

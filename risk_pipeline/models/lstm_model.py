@@ -9,6 +9,13 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
+# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+tf.config.set_soft_device_placement(False)
+tf.config.set_logical_device_configuration(
+    tf.config.list_physical_devices('CPU')[0],
+    [tf.config.LogicalDeviceConfiguration()]
+)
+
 from .base_model import BaseModel
 
 
@@ -47,48 +54,44 @@ class LSTMModel(BaseModel):
         """Build the LSTM model architecture with GPU fallback."""
         self.input_shape = input_shape
         
-        # Handle different input shapes - FIXED: Properly handle 2D input
+        # FIXED: Properly handle 2D input for tabular data
         if len(input_shape) == 2:
-            # [N, F] - reshape to [N, 1, F] for single timestep LSTM
-            self.input_shape = (1, input_shape[1])
-            self.logger.info(f"Reshaping 2D input {input_shape} to 3D {self.input_shape}")
-        elif len(input_shape) == 3:
-            # [N, T, F] - use as is
+            # [N, F] - use as is for tabular data (no time dimension)
             self.input_shape = input_shape
-            self.logger.info(f"Using 3D input shape: {self.input_shape}")
+            self.logger.info(f"Using 2D input shape for tabular data: {self.input_shape}")
+        elif len(input_shape) == 3:
+            # [N, T, F] - use as is for sequence data
+            self.input_shape = input_shape
+            self.logger.info(f"Using 3D input shape for sequence data: {self.input_shape}")
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        try:
-            # Try to use GPU
-            if tf.config.list_physical_devices('GPU'):
-                self.logger.info("GPU detected, using GPU for LSTM")
-                device = '/GPU:0'
-            else:
-                self.logger.info("No GPU detected, using CPU for LSTM")
-                device = '/CPU:0'
-        except:
-            self.logger.warning("GPU detection failed, falling back to CPU")
-            device = '/CPU:0'
+        # FIXED: Force CPU mode to avoid device conflicts
+        device = '/CPU:0'
+        self.logger.info(f"Using {device} for LSTM to avoid device conflicts")
         
-        # FIXED: Force CPU mode if GPU detection fails
         try:
             with tf.device(device):
                 # FIXED: Build model with correct input shape
-                inputs = tf.keras.Input(shape=self.input_shape[1:])  # Remove batch dimension
-                
-                # LSTM layers
-                if len(self.input_shape) == 3 and self.input_shape[1] > 1:
-                    # Multiple timesteps
-                    x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                    x = tf.keras.layers.LSTM(64)(x)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                else:
-                    # Single timestep - use Dense layers instead
+                if len(self.input_shape) == 2:
+                    # Tabular data - use Dense layers
+                    inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
+                    
+                    # Dense layers for tabular data
                     x = tf.keras.layers.Dense(128, activation='relu')(inputs)
                     x = tf.keras.layers.Dropout(0.2)(x)
                     x = tf.keras.layers.Dense(64, activation='relu')(x)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.Dense(32, activation='relu')(x)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                else:
+                    # Sequence data - use LSTM layers
+                    inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))  # Remove batch dimension
+                    
+                    # LSTM layers for sequence data
+                    x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
+                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.LSTM(64)(x)
                     x = tf.keras.layers.Dropout(0.2)(x)
                 
                 # Output layer
@@ -113,53 +116,9 @@ class LSTMModel(BaseModel):
                         metrics=['mae']
                     )
                     
-        except Exception as gpu_error:
-            self.logger.warning(f"GPU build failed: {gpu_error}, falling back to CPU")
-            # Force CPU mode
-            try:
-                with tf.device('/CPU:0'):
-                    # FIXED: Build model with correct input shape
-                    inputs = tf.keras.Input(shape=self.input_shape[1:])  # Remove batch dimension
-                    
-                    # LSTM layers
-                    if len(self.input_shape) == 3 and self.input_shape[1] > 1:
-                        # Multiple timesteps
-                        x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
-                        x = tf.keras.layers.Dropout(0.2)(x)
-                        x = tf.keras.layers.LSTM(64)(x)
-                        x = tf.keras.layers.Dropout(0.2)(x)
-                    else:
-                        # Single timestep - use Dense layers instead
-                        x = tf.keras.layers.Dense(128, activation='relu')(inputs)
-                        x = tf.keras.layers.Dropout(0.2)(x)
-                        x = tf.keras.layers.Dense(64, activation='relu')(x)
-                        x = tf.keras.layers.Dropout(0.2)(x)
-                    
-                    # Output layer
-                    if self.task == 'classification':
-                        outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
-                    else:
-                        outputs = tf.keras.layers.Dense(1, activation='linear')(x)
-                    
-                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
-                    
-                    # Compile model
-                    if self.task == 'classification':
-                        self.model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                            loss='sparse_categorical_crossentropy',
-                            metrics=['accuracy']
-                        )
-                    else:
-                        self.model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                            loss='mse',
-                            metrics=['mae']
-                        )
-                        
-            except Exception as cpu_error:
-                self.logger.error(f"CPU build also failed: {cpu_error}")
-                raise RuntimeError(f"Failed to build LSTM model on both GPU and CPU: {cpu_error}")
+        except Exception as build_error:
+            self.logger.error(f"LSTM build failed: {build_error}")
+            raise RuntimeError(f"Failed to build LSTM model: {build_error}")
         
         self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape}")
         return self
@@ -185,16 +144,24 @@ class LSTMModel(BaseModel):
         
         try:
             # FIXED: Ensure X has the right shape for the model
-            if X.ndim == 2:
-                # [N, F] - reshape to [N, 1, F] for single timestep
+            if X.ndim == 2 and len(self.input_shape) == 2:
+                # [N, F] - use as is for tabular data
+                X_reshaped = X
+                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
+            elif X.ndim == 3 and len(self.input_shape) == 3:
+                # [N, T, F] - use as is for sequence data
+                X_reshaped = X
+                self.logger.info(f"Using 3D input shape for sequence data: {X_reshaped.shape}")
+            elif X.ndim == 2 and len(self.input_shape) == 3:
+                # [N, F] but model expects [N, T, F] - reshape to single timestep
                 X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
                 self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
-            elif X.ndim == 3:
-                # [N, T, F] - use as is
-                X_reshaped = X
-                self.logger.info(f"Using 3D input shape: {X_reshaped.shape}")
+            elif X.ndim == 3 and len(self.input_shape) == 2:
+                # [N, T, F] but model expects [N, F] - flatten to tabular
+                X_reshaped = X.reshape(X.shape[0], -1)
+                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
             else:
-                raise ValueError(f"Unsupported input shape: {X.shape}")
+                raise ValueError(f"Input shape {X.shape} incompatible with model input shape {self.input_shape}")
             
             # Ensure y has the right shape
             if y.ndim == 1:
@@ -207,25 +174,27 @@ class LSTMModel(BaseModel):
                 X_reshaped, y_reshaped, test_size=0.2, random_state=42
             )
             
-            # Training callbacks
-            callbacks = [
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss', patience=10, restore_best_weights=True
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
+            # FIXED: Train on CPU to match model device
+            with tf.device('/CPU:0'):
+                # Training callbacks
+                callbacks = [
+                    tf.keras.callbacks.EarlyStopping(
+                        monitor='val_loss', patience=10, restore_best_weights=True
+                    ),
+                    tf.keras.callbacks.ReduceLROnPlateau(
+                        monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
+                    )
+                ]
+                
+                # Train the model
+                history = self.model.fit(
+                    X_train, y_train,
+                    validation_data=(X_val, y_val),
+                    epochs=100,
+                    batch_size=32,
+                    callbacks=callbacks,
+                    verbose=0
                 )
-            ]
-            
-            # Train the model
-            history = self.model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=100,
-                batch_size=32,
-                callbacks=callbacks,
-                verbose=0
-            )
             
             # Store training history
             self.training_history = history.history
@@ -281,19 +250,29 @@ class LSTMModel(BaseModel):
         
         try:
             # FIXED: Ensure X has the right shape for the model
-            if X.ndim == 2:
-                # [N, F] - reshape to [N, 1, F] for single timestep
+            if X.ndim == 2 and len(self.input_shape) == 2:
+                # [N, F] - use as is for tabular data
+                X_reshaped = X
+                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
+            elif X.ndim == 3 and len(self.input_shape) == 3:
+                # [N, T, F] - use as is for sequence data
+                X_reshaped = X
+                self.logger.info(f"Using 3D input shape for sequence data: {X_reshaped.shape}")
+            elif X.ndim == 2 and len(self.input_shape) == 3:
+                # [N, F] but model expects [N, T, F] - reshape to single timestep
                 X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
                 self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
-            elif X.ndim == 3:
-                # [N, T, F] - use as is
-                X_reshaped = X
-                self.logger.info(f"Using 3D input shape: {X_reshaped.shape}")
+            elif X.ndim == 3 and len(self.input_shape) == 2:
+                # [N, T, F] but model expects [N, F] - flatten to tabular
+                X_reshaped = X.reshape(X.shape[0], -1)
+                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
             else:
-                raise ValueError(f"Unsupported input shape: {X.shape}")
+                raise ValueError(f"Input shape {X.shape} incompatible with model input shape {self.input_shape}")
             
-            # Make predictions
-            predictions = self.model.predict(X_reshaped, verbose=0)
+            # FIXED: Force CPU device context during prediction to match training
+            with tf.device('/CPU:0'):
+                # Make predictions
+                predictions = self.model.predict(X_reshaped, verbose=0)
             
             # Reshape predictions to match expected output
             if self.task == 'classification':

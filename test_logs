@@ -1,0 +1,14 @@
+2025-08-16 23:45:41 - RiskPipeline - INFO - Logging initialized - File: test_logs, Level: INFO
+2025-08-16 23:45:41 - risk_pipeline.core.results_manager - INFO - ResultsManager initialized
+2025-08-16 23:45:41 - risk_pipeline.core.data_loader - INFO - DataLoader initialized with cache directory: data_cache
+2025-08-16 23:45:41 - risk_pipeline.core.feature_engineer - INFO - FeatureEngineer initialized with modular architecture
+2025-08-16 23:45:41 - risk_pipeline.core.validator - INFO - WalkForwardValidator initialized: 2 splits, test_size=50
+2025-08-16 23:45:41 - risk_pipeline.models.ModelFactory - INFO - ModelFactory initialized
+2025-08-16 23:45:41 - risk_pipeline.models.ModelFactory - INFO - Available models: ['arima', 'xgboost']
+2025-08-16 23:45:41 - risk_pipeline.interpretability.explainer_factory - INFO - ExplainerFactory initialized
+2025-08-16 23:45:41 - risk_pipeline.interpretability.interpretation_utils - INFO - InterpretationUtils initialized
+2025-08-16 23:45:41 - risk_pipeline.interpretability.shap_analyzer - INFO - SHAPAnalyzer initialized
+2025-08-16 23:45:41 - risk_pipeline.interpretability.explainer_factory - INFO - ExplainerFactory initialized
+2025-08-16 23:45:41 - risk_pipeline.visualization.VolatilityVisualizer - INFO - VolatilityVisualizer initialized with output_dir: visualizations
+2025-08-16 23:45:41 - risk_pipeline.visualization.shap_visualizer - INFO - SHAPVisualizer initialized
+2025-08-16 23:45:41 - risk_pipeline - INFO - RiskPipeline initialized successfully with experiment: pipeline_run_20250816_234541

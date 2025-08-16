@@ -14,6 +14,9 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
+# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+# (Will be configured after logger setup)
+
 # Import core components
 from .core.config import PipelineConfig
 from .core.data_loader import DataLoader
@@ -55,6 +58,18 @@ from .visualization.volatility_visualizer import VolatilityVisualizer
 from .visualization.shap_visualizer import SHAPVisualizer
 
 logger = logging.getLogger(__name__)
+
+# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+try:
+    import tensorflow as tf
+    tf.config.set_soft_device_placement(False)
+    tf.config.set_logical_device_configuration(
+        tf.config.list_physical_devices('CPU')[0],
+        [tf.config.LogicalDeviceConfiguration()]
+    )
+    logger.info("TensorFlow device configuration: Forced CPU usage for deep learning models")
+except ImportError:
+    pass
 
 
 class RiskPipeline:

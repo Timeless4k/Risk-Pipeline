@@ -13,6 +13,17 @@ from datetime import datetime
 import shap
 import warnings
 
+# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+try:
+    import tensorflow as tf
+    tf.config.set_soft_device_placement(False)
+    tf.config.set_logical_device_configuration(
+        tf.config.list_physical_devices('CPU')[0],
+        [tf.config.LogicalDeviceConfiguration()]
+    )
+except ImportError:
+    pass
+
 # Suppress SHAP warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='shap')
 

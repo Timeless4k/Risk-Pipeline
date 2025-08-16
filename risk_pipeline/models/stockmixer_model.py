@@ -9,6 +9,13 @@ import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
+# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+tf.config.set_soft_device_placement(False)
+tf.config.set_logical_device_configuration(
+    tf.config.list_physical_devices('CPU')[0],
+    [tf.config.LogicalDeviceConfiguration()]
+)
+
 from .base_model import BaseModel
 
 
@@ -63,19 +70,10 @@ class StockMixerModel(BaseModel):
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        try:
-            # Try to use GPU
-            if tf.config.list_physical_devices('GPU'):
-                self.logger.info("GPU detected, using GPU for StockMixer")
-                device = '/GPU:0'
-            else:
-                self.logger.info("No GPU detected, using CPU for StockMixer")
-                device = '/CPU:0'
-        except:
-            self.logger.warning("GPU detection failed, falling back to CPU")
-            device = '/CPU:0'
+        # FIXED: Force CPU mode to avoid device conflicts
+        device = '/CPU:0'
+        self.logger.info(f"Using {device} for StockMixer to avoid device conflicts")
         
-        # FIXED: Force CPU mode if GPU detection fails
         try:
             with tf.device(device):
                 # FIXED: Build model with correct input shape for tabular data
@@ -111,47 +109,9 @@ class StockMixerModel(BaseModel):
                         metrics=['mae']
                     )
                 
-        except Exception as gpu_error:
-            self.logger.warning(f"GPU build failed: {gpu_error}, falling back to CPU")
-            # Force CPU mode
-            try:
-                with tf.device('/CPU:0'):
-                    # FIXED: Build model with correct input shape for tabular data
-                    inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
-                    
-                    # Tabular data processing layers
-                    x = tf.keras.layers.Dense(256, activation='relu')(inputs)
-                    x = tf.keras.layers.Dropout(0.3)(x)
-                    x = tf.keras.layers.Dense(128, activation='relu')(x)
-                    x = tf.keras.layers.Dropout(0.3)(x)
-                    x = tf.keras.layers.Dense(64, activation='relu')(x)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                    
-                    # Output layer
-                    if self.task == 'classification':
-                        outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
-                    else:
-                        outputs = tf.keras.layers.Dense(1, activation='linear')(x)
-                    
-                    self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
-                    
-                    # Compile model
-                    if self.task == 'classification':
-                        self.model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                            loss='sparse_categorical_crossentropy',
-                            metrics=['accuracy']
-                        )
-                    else:
-                        self.model.compile(
-                            optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                            loss='mse',
-                            metrics=['mae']
-                        )
-                        
-            except Exception as cpu_error:
-                self.logger.error(f"CPU build also failed: {cpu_error}")
-                raise RuntimeError(f"Failed to build StockMixer model on both GPU and CPU: {cpu_error}")
+        except Exception as build_error:
+            self.logger.error(f"StockMixer build failed: {build_error}")
+            raise RuntimeError(f"Failed to build StockMixer model: {build_error}")
         
         self.logger.info(f"StockMixer model built successfully with input shape: {self.input_shape}")
         return self
@@ -199,25 +159,27 @@ class StockMixerModel(BaseModel):
                 X_reshaped, y_reshaped, test_size=0.2, random_state=42
             )
             
-            # Training callbacks
-            callbacks = [
-                tf.keras.callbacks.EarlyStopping(
-                    monitor='val_loss', patience=10, restore_best_weights=True
-                ),
-                tf.keras.callbacks.ReduceLROnPlateau(
-                    monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
+            # FIXED: Train on CPU to match model device
+            with tf.device('/CPU:0'):
+                # Training callbacks
+                callbacks = [
+                    tf.keras.callbacks.EarlyStopping(
+                        monitor='val_loss', patience=10, restore_best_weights=True
+                    ),
+                    tf.keras.callbacks.ReduceLROnPlateau(
+                        monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
+                    )
+                ]
+                
+                # Train the model
+                history = self.model.fit(
+                    X_train, y_train,
+                    validation_data=(X_val, y_val),
+                    epochs=100,
+                    batch_size=32,
+                    callbacks=callbacks,
+                    verbose=0
                 )
-            ]
-            
-            # Train the model
-            history = self.model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=100,
-                batch_size=32,
-                callbacks=callbacks,
-                verbose=0
-            )
             
             # Store training history
             self.training_history = history.history
@@ -284,8 +246,10 @@ class StockMixerModel(BaseModel):
             else:
                 raise ValueError(f"Unsupported input shape: {X.shape}")
             
-            # Make predictions
-            predictions = self.model.predict(X_reshaped, verbose=0)
+            # FIXED: Force CPU device context during prediction to match training
+            with tf.device('/CPU:0'):
+                # Make predictions
+                predictions = self.model.predict(X_reshaped, verbose=0)
             
             # Reshape predictions to match expected output
             if self.task == 'classification':
