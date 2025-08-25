@@ -87,7 +87,7 @@ class TrainingConfig:
     walk_forward_splits: int = 12  # Increased from 8 to 12 for extended data
     test_size: int = 252  # Increased from 126 to 252 (1 year instead of 6 months)
     batch_size: int = 128  # Increased from 64 to 128 for better GPU utilization
-    epochs: int = 200  # Increased from 100 to 200 for better convergence
+    epochs: int = 200  # Increased from 100 to 200 as requested
     early_stopping_patience: int = 30  # Increased from 20 to 30
     reduce_lr_patience: int = 15  # Increased from 10 to 15
     random_state: int = 42

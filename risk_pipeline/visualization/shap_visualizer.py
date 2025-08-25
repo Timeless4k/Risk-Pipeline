@@ -76,6 +76,19 @@ class SHAPVisualizer:
         logger.info(f"Creating comprehensive plots for {asset}_{model_type}_{task}")
         
         plots = {}
+        # Guard: if shap_values or X are None/empty, skip plotting gracefully
+        if shap_values is None or X is None:
+            logger.error("SHAP plots skipped: shap_values or X is None")
+            return {'error': 'shap_values_or_X_missing'}
+        try:
+            if isinstance(X, pd.DataFrame) and X.empty:
+                logger.error("SHAP plots skipped: X DataFrame is empty")
+                return {'error': 'X_empty'}
+            if hasattr(shap_values, 'size') and getattr(shap_values, 'size', 0) == 0:
+                logger.error("SHAP plots skipped: shap_values empty")
+                return {'error': 'shap_values_empty'}
+        except Exception:
+            pass
         
         try:
             # Create output directory

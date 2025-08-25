@@ -11,10 +11,22 @@ from sklearn.model_selection import train_test_split
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
 tf.config.set_soft_device_placement(False)
-tf.config.set_logical_device_configuration(
-    tf.config.list_physical_devices('CPU')[0],
-    [tf.config.LogicalDeviceConfiguration()]
-)
+try:
+    # Hide all GPUs from TensorFlow to avoid stray GPU ops during inference
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        tf.config.set_visible_devices([], 'GPU')
+except Exception:
+    pass
+try:
+    cpus = tf.config.list_physical_devices('CPU')
+    if cpus:
+        tf.config.set_logical_device_configuration(
+            cpus[0],
+            [tf.config.LogicalDeviceConfiguration()]
+        )
+except Exception:
+    pass
 
 from .base_model import BaseModel
 
@@ -98,15 +110,21 @@ class StockMixerModel(BaseModel):
                 # Compile model
                 if self.task == 'classification':
                     self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        optimizer=tf.keras.optimizers.Adam(
+                            learning_rate=0.001,
+                            clipnorm=1.0  # Use only clipnorm to avoid Keras constraint error
+                        ),
                         loss='sparse_categorical_crossentropy',
                         metrics=['accuracy']
                     )
                 else:
                     self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-                        loss='mse',
-                        metrics=['mae']
+                        optimizer=tf.keras.optimizers.Adam(
+                            learning_rate=0.001,
+                            clipnorm=1.0  # Use only clipnorm to avoid Keras constraint error
+                        ),
+                        loss='huber',  # Use Huber loss for robustness
+                        metrics=['mae', 'mse']
                     )
                 
         except Exception as build_error:
@@ -134,6 +152,34 @@ class StockMixerModel(BaseModel):
         
         # Validate input
         X, y = self._validate_input(X, y)
+        
+        # ROLLBACK: Relaxed input normalization to prevent over-aggressive filtering
+        try:
+            # Check for extreme values in features - RELAXED from 100 to 1000
+            X_abs = np.abs(X)
+            if np.any(X_abs > 1000):  # ROLLBACK: Increased from 100 to 1000
+                self.logger.warning(f"Large feature values detected: max={np.max(X_abs):.2f}, min={np.min(X_abs):.2f}")
+                # Clip extreme values to prevent training instability - RELAXED clipping
+                X = np.clip(X, -1000, 1000)  # ROLLBACK: Increased from [-100, 100] to [-1000, 1000]
+                self.logger.info("Clipped extreme feature values to [-1000, 1000]")
+            
+            # Check for NaN or infinite values
+            if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+                self.logger.error("NaN or infinite values detected in features")
+                raise ValueError("Features contain NaN or infinite values")
+            
+            # Check target values
+            if np.any(np.isnan(y)) or np.any(np.isinf(y)):
+                self.logger.error("NaN or infinite values detected in targets")
+                raise ValueError("Targets contain NaN or infinite values")
+            
+            # Log input statistics for debugging
+            self.logger.info(f"Input X stats: shape={X.shape}, mean={np.mean(X):.4f}, std={np.std(X):.4f}")
+            self.logger.info(f"Target y stats: shape={y.shape}, mean={np.mean(y):.4f}, std={np.std(y):.4f}")
+            
+        except Exception as validation_error:
+            self.logger.error(f"Input validation failed: {validation_error}")
+            raise RuntimeError(f"Input validation failed: {validation_error}")
         
         try:
             # FIXED: Ensure X has the right shape for StockMixer model architecture

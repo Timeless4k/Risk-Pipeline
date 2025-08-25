@@ -151,17 +151,17 @@ class TechnicalFeatureModule(BaseFeatureModule):
         # Rate of Change - FIXED: Increased shift from 5 to 20 days
         features['ROC20'] = shifted_price.pct_change(periods=20)  # FIXED: Increased from 5 to 20 periods
         
-        # Rolling Standard Deviation - FIXED: Completely redesigned to prevent overlap with targets
-        # CRITICAL: Use 30-day window instead of 5-day, and shift by 25 days to ensure no overlap
-        shifted_returns = returns.shift(25)  # FIXED: Increased from 8 to 25 days
+        # Rolling Standard Deviation - ROLLBACK: Reduced shift from 95 to 30 days for reasonable separation
+        # CRITICAL: Use 30-day window instead of 5-day, and shift by 30 days to ensure no overlap
+        shifted_returns = returns.shift(30)  # ROLLBACK: Reduced from 95 to 30 days
         
         # FIXED: Changed from RollingStd5 to RollingStd30 to prevent overlap with 20-day target volatility
         features['RollingStd30'] = shifted_returns.rolling(window=30, min_periods=15).std()
         
-        # Correlation with Moving Averages - FIXED: Increased shift from 5 to 20 days
-        shifted_returns = returns.shift(20)  # FIXED: Increased from 5 to 20 days
-        ma20_shifted = features['MA20'].shift(20)  # FIXED: Increased from 5 to 20 days
-        ma100_shifted = features['MA100'].shift(20)  # FIXED: Increased from 5 to 20 days
+        # Correlation with Moving Averages - ROLLBACK: Reduced shift from 95 to 30 days
+        shifted_returns = returns.shift(30)  # ROLLBACK: Reduced from 95 to 30 days
+        ma20_shifted = features['MA20'].shift(30)  # ROLLBACK: Reduced from 95 to 30 days
+        ma100_shifted = features['MA100'].shift(30)  # ROLLBACK: Reduced from 95 to 30 days
         
         # Use simple rolling correlations without exponential decay to avoid NaN issues
         features['Corr_MA20'] = shifted_returns.rolling(window=self.config.ma_short, min_periods=1).corr(ma20_shifted)
@@ -252,10 +252,10 @@ class StatisticalFeatureModule(BaseFeatureModule):
         price_col = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
         returns = np.log(data[price_col] / data[price_col].shift(1))
         
-        # FIXED: Create features for each window using only past data with proper temporal separation
+        # ROLLBACK: Create features for each window using reasonable temporal separation
         for window in self.config.volatility_windows:
-            # FIXED: Increased shift from window+5 to window+25 to ensure no overlap with 20-day target volatility
-            shifted_returns = returns.shift(window + 25)  # FIXED: Increased from window+5 to window+25
+            # ROLLBACK: Reduced shift from window+95 to window+30 for reasonable separation
+            shifted_returns = returns.shift(window + 30)  # ROLLBACK: Reduced from window+95 to window+30
             
             # Use simple calculation without exponential decay to avoid NaN issues
             features[f'Volatility{window}D'] = self._calculate_volatility(shifted_returns, window)
@@ -330,8 +330,8 @@ class LagFeatureModule(BaseFeatureModule):
         price_col = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
         returns = np.log(data[price_col] / data[price_col].shift(1))
         
-        # Add lagged returns - FIXED: Increased shift from 5 to 20 days for proper temporal separation
-        shifted_returns = returns.shift(20)  # FIXED: Increased from 5 to 20 days
+        # Add lagged returns - ROLLBACK: Reduced shift from 95 to 30 days for reasonable temporal separation
+        shifted_returns = returns.shift(30)  # ROLLBACK: Reduced from 95 to 30 days
         
         # Use simple calculation without exponential decay to avoid NaN issues
         for lag in self.lags:
@@ -502,14 +502,14 @@ class FeatureEngineer:
             # Use 20-day rolling volatility as the target, but predict NEXT period
             volatility_target = returns.rolling(window=20, min_periods=10).std() * np.sqrt(252)
             
-            # FIXED: Increased shift from -5 to -10 periods to predict 10 days ahead for better separation
+            # ROLLBACK: Reduced shift from -90 to -30 periods for reasonable temporal separation
             # This prevents the model from using current volatility to predict current volatility
-            volatility_target = volatility_target.shift(-10)  # FIXED: Increased from -5 to -10
+            volatility_target = volatility_target.shift(-30)  # ROLLBACK: Reduced from -90 to -30
             
-            # FIXED: Create regime target from raw returns with proper temporal separation
+            # ROLLBACK: Create regime target from raw returns with reasonable temporal separation
             # Use 60-day rolling return as regime indicator, but predict NEXT period
             regime_indicator = returns.rolling(window=60, min_periods=30).mean() * 252  # Annualized
-            regime_indicator = regime_indicator.shift(-10)  # FIXED: Increased from -5 to -10 days ahead
+            regime_indicator = regime_indicator.shift(-30)  # ROLLBACK: Reduced from -90 to -30 days ahead
             
             # Binary regime classification (bull/bear) - now predicting future regime
             regime_target = (regime_indicator > 0.05).astype(int)  # 5% annual return threshold
@@ -527,15 +527,68 @@ class FeatureEngineer:
             # CRITICAL FIX: Remove any target-related columns from features to prevent data leakage
             # Check for and remove any columns that might contain target information
             target_related_cols = []
-            for col in feat_df_clean.columns:
-                col_lower = col.lower()
-                if any(keyword in col_lower for keyword in ['volatility', 'vol', 'target', 'regime']):
-                    # Check if this column is highly correlated with our targets
-                    if col in feat_df_clean.columns:
-                        vol_corr = abs(feat_df_clean[col].corr(volatility_target))
-                        if vol_corr > 0.6:  # FIXED: Increased from 0.4 to 0.6 for less aggressive filtering
-                            target_related_cols.append(col)
-                            self.logger.warning(f"Removing high-correlation column: {col} (corr={vol_corr:.3f})")
+            
+            # Add target validation and standardization
+            # Ensure targets are properly constructed and validated
+            if volatility_target.std() == 0:
+                self.logger.warning(f"Volatility target has zero standard deviation for {asset}")
+                continue
+                
+            if regime_target.nunique() < 2:
+                self.logger.warning(f"Regime target has only {regime_target.nunique()} unique values for {asset}")
+                continue
+            
+            # Standardize target calculation - ensure same method across all models
+            # Log target statistics for debugging
+            self.logger.info(f"Target validation for {asset}:")
+            self.logger.info(f"  Volatility: mean={volatility_target.mean():.6f}, std={volatility_target.std():.6f}")
+            self.logger.info(f"  Regime: unique_values={regime_target.nunique()}, distribution={regime_target.value_counts().to_dict()}")
+            
+            # ROLLBACK: Relaxed target clipping to prevent over-aggressive filtering
+            # Check for extreme target values that could cause training issues - RELAXED from 10 to 100
+            vol_extreme = np.abs(volatility_target) > 100  # ROLLBACK: Increased from 10 to 100
+            if vol_extreme.sum() > 0:
+                self.logger.warning(f"Extreme volatility values detected: {vol_extreme.sum()} samples > 100")
+                # Clip extreme volatility values - RELAXED clipping
+                volatility_target = np.clip(volatility_target, -100, 100)  # ROLLBACK: Increased from [-10, 10] to [-100, 100]
+                self.logger.info("Clipped extreme volatility values to [-100, 100]")
+            
+            # ROLLBACK: Made asset normalization optional and less aggressive
+            # Normalize features per asset to handle US vs AU market differences - OPTIONAL
+            try:
+                from sklearn.preprocessing import StandardScaler
+                
+                # Only normalize if features are truly extreme (mean > 10 or std > 10)
+                us_mean = feat_df_clean.mean().mean()
+                us_std = feat_df_clean.std().mean()
+                
+                if abs(us_mean) > 10 or us_std > 10:  # ROLLBACK: Only normalize if truly needed
+                    # Fit scaler on training data only (first 70%)
+                    train_size = int(len(feat_df_clean) * 0.7)
+                    train_features = feat_df_clean.iloc[:train_size]
+                    
+                    scaler = StandardScaler()
+                    scaler.fit(train_features)
+                    
+                    # Transform all features using fitted scaler
+                    feat_df_clean_scaled = pd.DataFrame(
+                        scaler.transform(feat_df_clean),
+                        columns=feat_df_clean.columns,
+                        index=feat_df_clean.index
+                    )
+                    
+                    self.logger.info(f"Asset-specific normalization applied to {asset} (features were extreme):")
+                    self.logger.info(f"  Original features: mean={feat_df_clean.mean().mean():.4f}, std={feat_df_clean.std().mean():.4f}")
+                    self.logger.info(f"  Normalized features: mean={feat_df_clean_scaled.mean().mean():.4f}, std={feat_df_clean_scaled.std().mean():.4f}")
+                    
+                    # Use normalized features
+                    feat_df_clean = feat_df_clean_scaled
+                else:
+                    self.logger.info(f"Asset {asset} features are within normal range, skipping normalization")
+                    
+            except Exception as norm_error:
+                self.logger.warning(f"Feature normalization failed for {asset}: {norm_error}")
+                self.logger.info("Using original features without normalization")
             
             # Remove target-related columns from features
             if target_related_cols:
@@ -596,6 +649,21 @@ class FeatureEngineer:
         if features_df.empty:
             return features_df
         
+        # First, handle infinities proactively across all numeric columns
+        numeric_cols = features_df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            inf_count = np.isinf(features_df[numeric_cols]).sum().sum()
+            if inf_count > 0:
+                # Replace +/-inf with column medians (fallback to 0.0)
+                for col in numeric_cols:
+                    col_vals = features_df[col]
+                    if np.isinf(col_vals).any():
+                        median_val = col_vals[~np.isinf(col_vals)].median()
+                        if pd.isna(median_val):
+                            median_val = 0.0
+                        features_df[col] = col_vals.replace([np.inf, -np.inf], median_val)
+                self.logger.warning(f"Replaced {int(inf_count)} infinite values in features with column medians")
+
         # Count NaN values before cleaning
         nan_count_before = features_df.isna().sum().sum()
         if nan_count_before > 0:

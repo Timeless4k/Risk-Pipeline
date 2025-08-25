@@ -1,0 +1,16 @@
+{
+  "name": "simple_run_1755354626",
+  "description": "Complete pipeline run",
+  "created_at": "2025-08-17T00:30:26.294835",
+  "assets_processed": 6,
+  "models_run": [
+    "arima",
+    "lstm",
+    "stockmixer",
+    "xgboost"
+  ],
+  "shap_analysis": true,
+  "models_saved": true,
+  "execution_time_minutes": 25.15804382165273,
+  "peak_memory_mb": 817.6875
+}

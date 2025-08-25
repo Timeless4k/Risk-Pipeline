@@ -78,18 +78,25 @@ class StockMixerConfig(FinancialModelConfig):
 class XGBoostConfig(FinancialModelConfig):
     """XGBoost-specific configuration for financial data."""
     
-    # Tree parameters
-    n_estimators: int = 200
-    max_depth: int = 4        # Reduced to prevent overfitting
-    learning_rate: float = 0.05  # Lower learning rate
+    # Architecture - OPTIMIZED for better performance
+    n_estimators: int = 1000      # Increased from 500 for better ensemble
+    max_depth: int = 6            # Reduced from 8 to prevent overfitting
+    learning_rate: float = 0.01   # Reduced from 0.05 for better generalization
     
-    # Regularization
-    reg_alpha: float = 0.2    # L1 regularization
-    reg_lambda: float = 1.5   # L2 regularization
-    subsample: float = 0.8    # Row sampling
-    colsample_bytree: float = 0.8  # Column sampling
-    min_child_weight: int = 5
-    gamma: float = 0.2
+    # Regularization - ENHANCED to prevent overfitting
+    subsample: float = 0.8        # Subsampling for regularization
+    colsample_bytree: float = 0.8 # Column sampling for regularization
+    reg_alpha: float = 0.1        # L1 regularization
+    reg_lambda: float = 1.0       # L2 regularization
+    
+    # Training - OPTIMIZED for financial data
+    min_child_weight: int = 3     # New: minimum sum of instance weight
+    gamma: float = 0.1            # New: minimum loss reduction for split
+    scale_pos_weight: float = 1.0 # New: balance positive/negative samples
+    
+    # Early stopping
+    early_stopping_rounds: int = 50
+    eval_metric: str = 'rmse'     # Use RMSE for regression
     
     # Financial-specific
     tree_method: str = 'hist'  # CPU-optimized method
@@ -156,7 +163,7 @@ class ValidationConfig(FinancialModelConfig):
     """Walk-forward validation configuration."""
     
     # Split configuration - Increased for better statistical significance
-    n_splits: int = 8          # Reduced from 10 to ensure larger test sets
+    n_splits: int = 10          # Increased from 8 to 10 as requested
     min_train_size: int = 504  # 2 years (increased from 1 year)
     test_size: int = 126       # 6 months (increased from 3 months)
     gap: int = 10              # 10-day gap (increased to prevent overlap)

@@ -11,10 +11,22 @@ from sklearn.model_selection import train_test_split
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
 tf.config.set_soft_device_placement(False)
-tf.config.set_logical_device_configuration(
-    tf.config.list_physical_devices('CPU')[0],
-    [tf.config.LogicalDeviceConfiguration()]
-)
+try:
+    # Hide all GPUs to avoid accidental GPU ops during evaluation/inference
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        tf.config.set_visible_devices([], 'GPU')
+except Exception:
+    pass
+try:
+    cpus = tf.config.list_physical_devices('CPU')
+    if cpus:
+        tf.config.set_logical_device_configuration(
+            cpus[0],
+            [tf.config.LogicalDeviceConfiguration()]
+        )
+except Exception:
+    pass
 
 from .base_model import BaseModel
 

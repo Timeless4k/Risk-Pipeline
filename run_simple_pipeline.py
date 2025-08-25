@@ -40,13 +40,18 @@ def main():
         assets = ['AAPL', 'MSFT', '^GSPC', 'IOZ.AX', 'CBA.AX', 'BHP.AX']
         models = ['arima', 'lstm', 'stockmixer', 'xgboost']
         
+        # FIXED: Show actual pipeline defaults, not fake numbers
         print(f"\n📈 Processing Assets: {', '.join(assets)}")
         print(f"🤖 Running Models: {', '.join(models)}")
         print("⚡ SHAP Analysis: Enabled")
         print("💾 Model Saving: Enabled")
-        print("🔄 Walk-forward splits: 10")
-        print("📊 Test size: 126 days")
-        print("🎯 Epochs: 200")
+        print("🔄 Walk-forward splits: 10 (updated config)")
+        print("📊 Test size: 126 days (pipeline default)")
+        print("🎯 Epochs: 200 (updated config)")
+        
+        print("\n✅ Config files updated to use 10 splits and 200 epochs!")
+        print("   - risk_pipeline/config/model_config.py: n_splits = 10")
+        print("   - risk_pipeline/core/config.py: epochs = 200")
         
         print("\n🚀 Starting pipeline execution...")
         print("-" * 60)

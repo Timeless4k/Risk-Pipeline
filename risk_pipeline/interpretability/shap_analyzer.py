@@ -292,6 +292,9 @@ class SHAPAnalyzer:
             # For deep learning models, use a subset of the data
             n_samples = min(self.config.shap.background_samples, len(X))
             indices = np.random.choice(len(X), n_samples, replace=False)
+            # Use iloc for DataFrame to avoid treating row indices as column labels
+            if isinstance(X, pd.DataFrame):
+                return X.iloc[indices]
             return X[indices]
         else:
             # For tree-based models, use all data
