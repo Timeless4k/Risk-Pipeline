@@ -99,25 +99,33 @@ class ExplainerFactory:
             elif model_type == 'xgboost':
                 # 🌲 KILL-SWITCH: Ensure XGBoost model is fitted before SHAP
                 est = _unwrap(model)
-                
-                # Assert model is fitted
-                if not hasattr(est, 'get_booster'):
-                    logger.error("🌲 KILL-SWITCH: XGBoost model not fitted - missing get_booster; returning safe dummy explainer")
-                    # Return a safe dummy explainer to avoid SHAP crash
-                    class _DummyExplainer:
-                        def __init__(self):
-                            self.expected_value = 0.0
-                        def shap_values(self, data):
-                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
-                            return np.zeros_like(arr2d)
-                    return _DummyExplainer()
-                
-                # Get the fitted booster
-                try:
-                    booster = est.get_booster()
-                    if booster is None:
-                        logger.error("🌲 KILL-SWITCH: XGBoost booster is None - returning safe dummy explainer")
+
+                # Prefer underlying sklearn XGB estimator if wrapped (e.g., our XGBoostModel)
+                if hasattr(est, 'model') and hasattr(est.model, 'get_booster'):
+                    est = est.model
+
+                # Helper to safely obtain a fitted booster
+                def _safe_get_booster(xgb_est) -> Optional[Any]:
+                    try:
+                        # Fast fitted check used by xgboost scikit API
+                        if hasattr(xgb_est, '_Booster') and xgb_est._Booster is not None:
+                            return xgb_est.get_booster()
+                        # Some callers may pass a raw Booster already
+                        if hasattr(xgb_est, 'predict') and not hasattr(xgb_est, 'get_booster'):
+                            return None
+                        # Last resort: attempt to get booster (may raise if not fitted)
+                        return xgb_est.get_booster() if hasattr(xgb_est, 'get_booster') else None
+                    except Exception:
+                        return None
+
+                booster = _safe_get_booster(est)
+
+                if booster is not None:
+                    try:
+                        logger.info(f"🌲 XGBoost SHAP: Using fitted booster with {getattr(booster, 'num_boosted_rounds', 'unknown')} rounds")
+                        return shap.TreeExplainer(booster)
+                    except Exception as e:
+                        logger.error(f"🌲 KILL-SWITCH: Failed to create TreeExplainer from booster: {e}; using safe dummy explainer")
                         class _DummyExplainer:
                             def __init__(self):
                                 self.expected_value = 0.0
@@ -126,26 +134,17 @@ class ExplainerFactory:
                                 arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
                                 return np.zeros_like(arr2d)
                         return _DummyExplainer()
-                    
-                    # Additional validation
-                    if not hasattr(booster, 'num_boosted_rounds'):
-                        logger.warning("🌲 KILL-SWITCH: Booster missing num_boosted_rounds; proceeding with TreeExplainer")
-                    
-                    # Log booster info for debugging
-                    logger.info(f"🌲 XGBoost SHAP: Using fitted booster with {getattr(booster, 'num_boosted_rounds', 'unknown')} rounds")
-                    
-                    return shap.TreeExplainer(booster)
-                    
-                except Exception as e:
-                    logger.error(f"🌲 KILL-SWITCH: Failed to get XGBoost booster: {e}; returning safe dummy explainer")
-                    class _DummyExplainer:
-                        def __init__(self):
-                            self.expected_value = 0.0
-                        def shap_values(self, data):
-                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
-                            return np.zeros_like(arr2d)
-                    return _DummyExplainer()
+
+                # Unfitted: return safe dummy explainer and clear message
+                logger.error("🌲 KILL-SWITCH: XGBoost estimator appears unfitted (no _Booster). Returning safe dummy explainer")
+                class _DummyExplainer:
+                    def __init__(self):
+                        self.expected_value = 0.0
+                    def shap_values(self, data):
+                        arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                        arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                        return np.zeros_like(arr2d)
+                return _DummyExplainer()
                         
             elif model_type == 'xgboost_regression' or (model_type == 'xgboost' and task == 'regression'):
                 # Explicitly support SHAP for XGBoost regression models

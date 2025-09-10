@@ -1,0 +1,32 @@
+{
+  "asset": "MSFT",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-09-10T20:10:50.293140",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.5282738095238095,
+    "Accuracy_std": 0.09268685812729942,
+    "F1": 0.48046744611218717,
+    "F1_std": 0.1480383472779221,
+    "Precision": 0.6564790933247594,
+    "Precision_std": 0.11987747999290545,
+    "Recall": 0.5282738095238095,
+    "Recall_std": 0.09268685812729942,
+    "Baseline Accuracy": 0.5565476190476191,
+    "Baseline Accuracy_std": 0.16175894349404468,
+    "Baseline F1": 0.41045566619692886,
+    "Baseline F1_std": 0.1869263566479773,
+    "LogLoss": NaN,
+    "LogLoss_std": NaN,
+    "Fit Time": 7.889130714875137,
+    "Fit Time_std": 1.269577549958272,
+    "Prediction Time": 0.25430859075004264,
+    "Prediction Time_std": 0.027543203822646984,
+    "total_samples": 8921,
+    "n_splits": 8
+  }
+}

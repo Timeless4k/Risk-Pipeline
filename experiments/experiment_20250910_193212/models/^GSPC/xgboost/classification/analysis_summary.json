@@ -1,0 +1,32 @@
+{
+  "asset": "^GSPC",
+  "model_type": "xgboost",
+  "task": "classification",
+  "timestamp": "2025-09-10T20:34:11.848067",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.6116071428571428,
+    "Accuracy_std": 0.15806888189954438,
+    "F1": 0.5573456310123976,
+    "F1_std": 0.1750629372049384,
+    "Precision": 0.6552418024268348,
+    "Precision_std": 0.12628780371552312,
+    "Recall": 0.6116071428571428,
+    "Recall_std": 0.15806888189954438,
+    "Baseline Accuracy": 0.5932539682539683,
+    "Baseline Accuracy_std": 0.15092785530546923,
+    "Baseline F1": 0.4520157861696672,
+    "Baseline F1_std": 0.17897355607350893,
+    "LogLoss": 0.857593500083828,
+    "LogLoss_std": 0.4382973122885918,
+    "Fit Time": 82.14148117974946,
+    "Fit Time_std": 6.26754473136327,
+    "Prediction Time": 0.03012344462422334,
+    "Prediction Time_std": 0.016254371120631432,
+    "total_samples": 8921,
+    "n_splits": 8
+  }
+}

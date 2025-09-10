@@ -19,9 +19,19 @@ class SeqAdapterModel(BaseModel):
         return self.wrapped.build_model(input_spec)
 
     def fit(self, X_seq, y, config) -> None:
-        # Prefer unified fit API if available
+        # Prefer explicit train API if available (allows kwargs)
+        if hasattr(self.wrapped, 'train'):
+            kwargs = {
+                "epochs": getattr(config, "max_epochs", None),
+                "batch_size": getattr(config, "batch_size", None),
+                "early_stopping_patience": getattr(config, "patience", None),
+                "learning_rate": getattr(config, "lr", None),
+            }
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            return self.wrapped.train(X_seq, y, **kwargs)
+        # Fallback to fit without passing config
         if hasattr(self.wrapped, 'fit'):
-            return self.wrapped.fit(X_seq, y, config)
+            return self.wrapped.fit(X_seq, y)
         # Fallback to legacy train signature
         kwargs = {
             "epochs": getattr(config, "max_epochs", None),
@@ -52,8 +62,15 @@ class FlatAdapterModel(BaseModel):
         return self.wrapped.build_model(input_spec)
 
     def fit(self, X_flat, y, config) -> None:
+        if hasattr(self.wrapped, 'train'):
+            kwargs = {
+                "epochs": getattr(config, "max_epochs", None),
+                "early_stopping_patience": getattr(config, "patience", None),
+            }
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            return self.wrapped.train(X_flat, y, **kwargs)
         if hasattr(self.wrapped, 'fit'):
-            return self.wrapped.fit(X_flat, y, config)
+            return self.wrapped.fit(X_flat, y)
         kwargs = {
             "epochs": getattr(config, "max_epochs", None),
             "early_stopping_patience": getattr(config, "patience", None),

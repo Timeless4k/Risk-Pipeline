@@ -1,0 +1,32 @@
+{
+  "asset": "BHP.AX",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-09-10T21:43:50.838920",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.5798611111111112,
+    "Accuracy_std": 0.08990244295646857,
+    "F1": 0.5515484313959322,
+    "F1_std": 0.100467879480308,
+    "Precision": 0.6375451243221814,
+    "Precision_std": 0.07770499900976989,
+    "Recall": 0.5798611111111112,
+    "Recall_std": 0.08990244295646857,
+    "Baseline Accuracy": 0.5193452380952381,
+    "Baseline Accuracy_std": 0.11040913457103366,
+    "Baseline F1": 0.36114324471947923,
+    "Baseline F1_std": 0.125106200519395,
+    "LogLoss": NaN,
+    "LogLoss_std": NaN,
+    "Fit Time": 11.223570494124488,
+    "Fit Time_std": 1.9743661563095731,
+    "Prediction Time": 0.32307708212465513,
+    "Prediction Time_std": 0.04930953529400295,
+    "total_samples": 8342,
+    "n_splits": 8
+  }
+}

@@ -39,13 +39,13 @@ class FeatureConfig:
     bollinger_period: int = 20
     bollinger_std: int = 2
     
-    # Moving average parameters - INCREASED for better temporal separation
-    ma_short: int = 20  # Changed from 10 to 20
-    ma_long: int = 60   # Changed from 100 to 60
+    # Moving average parameters
+    ma_short: int = 10  # Default expected by tests
+    ma_long: int = 50   # Default expected by tests
     
     # Volatility and correlation windows - COMPLETELY REDESIGNED to prevent overlap
     volatility_windows: List[int] = None
-    correlation_window: int = 60  # Increased from 30 to 60
+    correlation_window: int = 30
     
     # Regime classification
     regime_window: int = 60
@@ -109,10 +109,12 @@ class TechnicalFeatureModule(BaseFeatureModule):
         return ['Close', 'High', 'Low']
     
     def get_feature_names(self) -> List[str]:
+        short_name = f"MA{self.config.ma_short}"
+        long_name = f"MA{self.config.ma_long}"
         return [
             'RSI', 'MACD', 'ATR', 'Bollinger_Upper', 'Bollinger_Lower',
-            'MA20', 'MA60', 'MA_ratio', 'ROC20', 'RollingStd30',
-            'Corr_MA20', 'Corr_MA60'
+            short_name, long_name, 'MA_ratio', 'ROC20', 'RollingStd30',
+            f"Corr_{short_name}", f"Corr_{long_name}"
         ]
     
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -148,10 +150,11 @@ class TechnicalFeatureModule(BaseFeatureModule):
         shifted_price = df['Price'].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
         
         # Use simple rolling calculations without exponential decay to avoid NaN issues
-        features['MA20'] = shifted_price.rolling(window=self.config.ma_short, min_periods=1).mean()
-        # Replace MA100 by MA60 to reduce NaNs/lag
-        features['MA60'] = shifted_price.rolling(window=self.config.ma_long, min_periods=1).mean()
-        features['MA_ratio'] = features['MA20'] / features['MA60']
+        short_name = f"MA{self.config.ma_short}"
+        long_name = f"MA{self.config.ma_long}"
+        features[short_name] = shifted_price.rolling(window=self.config.ma_short, min_periods=1).mean()
+        features[long_name] = shifted_price.rolling(window=self.config.ma_long, min_periods=1).mean()
+        features['MA_ratio'] = features[short_name] / features[long_name]
         
         # Rate of Change - ULTIMATE FIX: Use optimal shift for full feature set
         features['ROC20'] = shifted_price.pct_change(periods=10)  # ULTIMATE FIX: Use 10 periods
@@ -165,12 +168,12 @@ class TechnicalFeatureModule(BaseFeatureModule):
         
         # Correlation with Moving Averages - ULTIMATE FIX: Use optimal shifts for full feature set
         shifted_returns = returns.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
-        ma20_shifted = features['MA20'].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
-        ma60_shifted = features['MA60'].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        ma_short_shifted = features[short_name].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        ma_long_shifted = features[long_name].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
         
         # Use simple rolling correlations without exponential decay to avoid NaN issues
-        features['Corr_MA20'] = shifted_returns.rolling(window=self.config.ma_short, min_periods=1).corr(ma20_shifted)
-        features['Corr_MA60'] = shifted_returns.rolling(window=self.config.ma_long, min_periods=1).corr(ma60_shifted)
+        features[f'Corr_{short_name}'] = shifted_returns.rolling(window=self.config.ma_short, min_periods=1).corr(ma_short_shifted)
+        features[f'Corr_{long_name}'] = shifted_returns.rolling(window=self.config.ma_long, min_periods=1).corr(ma_long_shifted)
         
         return features
     
@@ -290,13 +293,8 @@ class TimeFeatureModule(BaseFeatureModule):
             if not isinstance(data.index, pd.DatetimeIndex):
                 self.logger.error(f"Data index must be datetime for time features. Got: {type(data.index)}")
                 self.logger.debug(f"Index sample: {data.index[:5] if len(data.index) > 0 else 'Empty index'}")
-                # Try to convert index to datetime
-                try:
-                    data.index = pd.to_datetime(data.index)
-                    self.logger.info("Successfully converted index to datetime")
-                except Exception as conv_e:
-                    self.logger.error(f"Failed to convert index to datetime: {conv_e}")
-                    return pd.DataFrame()
+                # Per tests, do not auto-convert; return empty to signal invalid input
+                return pd.DataFrame()
             
             features = pd.DataFrame(index=data.index)
             

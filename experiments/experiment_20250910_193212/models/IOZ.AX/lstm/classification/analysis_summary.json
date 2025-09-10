@@ -1,0 +1,32 @@
+{
+  "asset": "IOZ.AX",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-09-10T20:55:16.431304",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.5168650793650794,
+    "Accuracy_std": 0.058657720234501935,
+    "F1": 0.4702365548238664,
+    "F1_std": 0.09520267827598565,
+    "Precision": 0.6047363840067557,
+    "Precision_std": 0.087624777600931,
+    "Recall": 0.5168650793650794,
+    "Recall_std": 0.058657720234501935,
+    "Baseline Accuracy": 0.4935515873015873,
+    "Baseline Accuracy_std": 0.13649438147908885,
+    "Baseline F1": 0.3366582220292409,
+    "Baseline F1_std": 0.14268652008985672,
+    "LogLoss": NaN,
+    "LogLoss_std": NaN,
+    "Fit Time": 6.662944232874452,
+    "Fit Time_std": 1.6218709481877973,
+    "Prediction Time": 0.24988759887537526,
+    "Prediction Time_std": 0.02066929940594669,
+    "total_samples": 3662,
+    "n_splits": 8
+  }
+}

@@ -131,9 +131,18 @@ class WalkForwardValidator:
         if not quality_report['is_valid']:
             self.logger.warning(f"Data quality issues detected: {quality_report['issues']}")
         
-        # Calculate adaptive parameters
-        adaptive_test_size = min(self.config.test_size, len(X) // 4)
-        max_splits = min(self.config.n_splits, (len(X) - adaptive_test_size) // adaptive_test_size)
+        # Calculate adaptive parameters with guards to respect min sizes and single-split edge cases
+        total_n = len(X)
+        if self.config.n_splits == 1:
+            # Prefer the requested test size if it fits exactly the min constraints
+            max_feasible_test = max(0, total_n - self.config.min_train_size - self.config.gap)
+            adaptive_test_size = min(self.config.test_size, max_feasible_test)
+            adaptive_test_size = max(adaptive_test_size, self.config.min_test_size)
+            max_splits = 1 if (self.config.min_train_size + self.config.gap + adaptive_test_size) <= total_n else 0
+        else:
+            # Multi-split heuristic: cap by 1/4th of data but not below min_test_size
+            adaptive_test_size = min(self.config.test_size, max(self.config.min_test_size, total_n // 4))
+            max_splits = min(self.config.n_splits, (total_n - adaptive_test_size) // max(1, adaptive_test_size))
         
         self.logger.info(f"Adaptive test_size: {adaptive_test_size} (requested: {self.config.test_size})")
         self.logger.info(f"Maximum possible splits: {max_splits} (requested: {self.config.n_splits})")
@@ -1150,10 +1159,17 @@ class WalkForwardValidator:
             ax.grid(True, alpha=0.3)
             
             if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                self.logger.info(f"Split visualization saved to {save_path}")
+                try:
+                    with open(save_path, 'wb') as _fh:
+                        fig.savefig(_fh, dpi=300, bbox_inches='tight')
+                finally:
+                    self.logger.info(f"Split visualization saved to {save_path}")
+                    # Ensure all figure resources are released (prevents Windows file locks)
+                    plt.close(fig)
+                return
             
             plt.show()
+            plt.close(fig)
             
         except ImportError:
             self.logger.warning("matplotlib not available, skipping split visualization")

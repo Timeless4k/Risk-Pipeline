@@ -6,34 +6,41 @@ import logging
 from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+try:
+    import tensorflow as tf  # Optional dependency
+    TF_AVAILABLE = True
+except Exception:  # pragma: no cover - environment-specific
+    tf = None  # type: ignore
+    TF_AVAILABLE = False
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
-tf.config.set_soft_device_placement(False)
-try:
-    # Hide all GPUs to avoid accidental GPU ops during evaluation/inference
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        tf.config.set_visible_devices([], 'GPU')
-except Exception:
-    pass
-try:
-    cpus = tf.config.list_physical_devices('CPU')
-    if cpus:
-        tf.config.set_logical_device_configuration(
-            cpus[0],
-            [tf.config.LogicalDeviceConfiguration()]
-        )
-except Exception:
-    pass
+if TF_AVAILABLE:
+    tf.config.set_soft_device_placement(False)
+    try:
+        # Hide all GPUs to avoid accidental GPU ops during evaluation/inference
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            tf.config.set_visible_devices([], 'GPU')
+    except Exception:
+        pass
+    try:
+        cpus = tf.config.list_physical_devices('CPU')
+        if cpus:
+            tf.config.set_logical_device_configuration(
+                cpus[0],
+                [tf.config.LogicalDeviceConfiguration()]
+            )
+    except Exception:
+        pass
 
-# QUICK CPU OPTIMIZATION: Use all 24 cores for maximum performance
+# QUICK CPU OPTIMIZATION: Use all physical cores for maximum performance (if TF available)
 import psutil
-cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
-tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
-tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
+cpu_count = psutil.cpu_count(logical=False)
+if TF_AVAILABLE:
+    tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
+    tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
 
 from .base_model import BaseModel
 
@@ -72,6 +79,8 @@ class LSTMModel(BaseModel):
     
     def build_model(self, input_shape: Tuple[int, ...]) -> 'LSTMModel':
         """Build the LSTM model architecture with GPU fallback."""
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow is not available. Install TensorFlow or disable LSTM model.")
         self.input_shape = input_shape
         
         # FIXED: Properly handle 2D input for tabular data
@@ -157,6 +166,8 @@ class LSTMModel(BaseModel):
         Returns:
             Training results dictionary
         """
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow is not available. Install TensorFlow or disable LSTM model.")
         if not self.model:
             raise ValueError("Model must be built before training. Call build_model() first.")
         
@@ -270,6 +281,8 @@ class LSTMModel(BaseModel):
         Returns:
             Predictions array
         """
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow is not available. Install TensorFlow or disable LSTM model.")
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
         

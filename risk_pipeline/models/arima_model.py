@@ -136,10 +136,14 @@ class ARIMAModel(BaseModel):
         mae = mean_absolute_error(y, predictions)
         r2 = r2_score(y, predictions)
         
+        # Provide both lowercase and uppercase keys for compatibility with tests
         return {
             'mse': mse,
             'mae': mae,
-            'r2': r2
+            'r2': r2,
+            'MSE': mse,
+            'MAE': mae,
+            'R2': r2,
         }
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], 

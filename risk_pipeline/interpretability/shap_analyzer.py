@@ -235,6 +235,25 @@ class SHAPAnalyzer:
                 logger.warning(f"🔎 KILL-SWITCH: Model has background_data attribute, removing: {model.background_data}")
                 delattr(model, 'background_data')
             
+            # Ensure XGBoost models are fitted: try to auto-load trained artifact if needed
+            if model_type == 'xgboost':
+                try:
+                    est = getattr(model, 'model', model)
+                    booster = getattr(est, '_Booster', None)
+                    if booster is None:
+                        exp_dir = self.results_manager.get_experiment_dir()
+                        model_pkl = Path(exp_dir) / 'models' / asset / model_type / task / 'model.pkl'
+                        if model_pkl.exists():
+                            import pickle as _pkl
+                            with open(model_pkl, 'rb') as _f:
+                                loaded = _pkl.load(_f)
+                            model = loaded
+                            logger.info(f"Auto-loaded fitted XGBoost model for {asset}_{task} from {model_pkl}")
+                        else:
+                            logger.warning(f"No fitted XGBoost artifact found at {model_pkl}; proceeding with current model")
+                except Exception as _autold_err:
+                    logger.warning(f"Auto-load of fitted XGBoost model failed: {_autold_err}")
+
             # Create output directory early for saving eval sample
             output_dir = Path(self.config.output.shap_dir) / asset / model_type / task
             output_dir.mkdir(parents=True, exist_ok=True)

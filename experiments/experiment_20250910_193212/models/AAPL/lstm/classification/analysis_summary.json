@@ -1,0 +1,32 @@
+{
+  "asset": "AAPL",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-09-10T19:48:20.254044",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.6324404761904763,
+    "Accuracy_std": 0.07502106807955157,
+    "F1": 0.6260121342453553,
+    "F1_std": 0.08486498871831215,
+    "Precision": 0.6501160962391763,
+    "Precision_std": 0.08288022158463984,
+    "Recall": 0.6324404761904763,
+    "Recall_std": 0.07502106807955157,
+    "Baseline Accuracy": 0.5694444444444444,
+    "Baseline Accuracy_std": 0.10618323936714008,
+    "Baseline F1": 0.4183488152377287,
+    "Baseline F1_std": 0.12592188979690466,
+    "LogLoss": NaN,
+    "LogLoss_std": NaN,
+    "Fit Time": 8.637105487750205,
+    "Fit Time_std": 1.4284729588223972,
+    "Prediction Time": 0.26890898887518233,
+    "Prediction Time_std": 0.033571818940166025,
+    "total_samples": 8921,
+    "n_splits": 8
+  }
+}
