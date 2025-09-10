@@ -216,8 +216,12 @@ class StockMixerModel(BaseModel):
         self.model: Optional[tf.keras.Model] = None if TF_AVAILABLE else None
 
     def _ensure_4d(self, X: np.ndarray) -> np.ndarray:
-        # Accept [N,T,F] or [N,S,T,F]; convert to [N,S,T,F]
+        # Accept [N,F], [N,T,F] or [N,S,T,F]; convert to [N,S,T,F]
+        if X.ndim == 2:
+            # Interpret as single stock with a single timestep
+            return X.reshape(X.shape[0], 1, 1, X.shape[1])
         if X.ndim == 3:
+            # Single stock, multiple timesteps
             return X.reshape(X.shape[0], 1, X.shape[1], X.shape[2])
         if X.ndim == 4:
             return X
@@ -228,7 +232,12 @@ class StockMixerModel(BaseModel):
             raise ImportError("TensorFlow is not available. Install TensorFlow to use StockMixer.")
 
         # Infer dims from input_shape
-        if len(input_shape) == 3:
+        if len(input_shape) == 2:
+            # [N, F] → treat as single timestep sequence with one stock
+            self.n_stocks = 1
+            self.sequence_length = 1
+            self.n_indicators = int(input_shape[1])
+        elif len(input_shape) == 3:
             # [N,T,F]
             self.n_stocks = 1
             self.sequence_length = int(input_shape[1])

@@ -187,7 +187,7 @@ class SHAPVisualizer:
             ))
             
             # Model-specific plots
-            if model_type == 'arima':
+            if model_type in ('arima', 'enhanced_arima'):
                 plots.update(self._create_arima_plots(
                     explainer, X, feature_names, output_dir, asset, task
                 ))
@@ -203,6 +203,9 @@ class SHAPVisualizer:
                 plots.update(self._create_xgboost_plots(
                     shap_values, X, feature_names, output_dir, asset, task
                 ))
+            elif model_type == 'garch':
+                # No bespoke SHAP for GARCH; rely on basic plots already added.
+                pass
             
             # Time-series specific plots
             plots.update(self._create_time_series_plots(

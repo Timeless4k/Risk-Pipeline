@@ -77,6 +77,23 @@ class ModelConfig:
     xgboost_colsample_bytree: float = 0.8  # New parameter for column sampling
     xgboost_reg_alpha: float = 0.1  # New parameter for L1 regularization
     xgboost_reg_lambda: float = 1.0  # New parameter for L2 regularization
+
+    # ARIMA/GARCH
+    arima_order: List[int] = field(default_factory=lambda: [1, 1, 1])
+    arima_seasonal_order: List[int] = field(default_factory=lambda: [0, 0, 0, 0])
+    arima_auto_order: bool = True
+    arima_max_p: int = 5
+    arima_max_d: int = 2
+    arima_max_q: int = 5
+
+    garch_p: int = 1
+    garch_q: int = 1
+    garch_auto_order: bool = True
+    garch_max_p: int = 3
+    garch_max_q: int = 3
+    garch_vol: str = 'Garch'
+    garch_mean: str = 'Zero'
+    garch_dist: str = 'Normal'
     
     # New advanced models for high-performance systems
     transformer_heads: int = 8
@@ -246,6 +263,20 @@ class SHAPConfig:
     save_plots: bool = True
 
 
+@dataclass
+class FeatureEngineeringToggles:
+    """Feature engineering toggles parsed from config."""
+    enable_vix_features: bool = True
+    enable_correlation_features: bool = True
+    enable_technical_indicators: bool = True
+    enable_regime_features: bool = True
+    correlation_pairs: List[List[str]] = field(default_factory=list)
+    feature_selection_method: str = 'mutual_info'
+    feature_selection_k: int = 50
+    min_correlation_threshold: float = 0.01
+    max_feature_correlation: float = 0.95
+
+
 class PipelineConfig:
     """
     Main configuration class for RiskPipeline with dependency injection support.
@@ -290,27 +321,65 @@ class PipelineConfig:
             cache_dir=data_config.get('cache_dir', 'data_cache')
         )
         
-        # Feature configuration
+        # Feature configuration (read extended fields when present)
         feature_config = config_dict.get('features', {})
         self.features = FeatureConfig(
             volatility_window=feature_config.get('volatility_window', 5),
             ma_short=feature_config.get('ma_short', 10),
             ma_long=feature_config.get('ma_long', 50),
             correlation_window=feature_config.get('correlation_window', 30),
-            sequence_length=feature_config.get('sequence_length', 7)
+            sequence_length=feature_config.get('sequence_length', 30),
+            rsi_period=feature_config.get('rsi_period', 14),
+            macd_fast=feature_config.get('macd_fast', 12),
+            macd_slow=feature_config.get('macd_slow', 26),
+            macd_signal=feature_config.get('macd_signal', 9),
+            bollinger_period=feature_config.get('bollinger_period', 20),
+            bollinger_std=feature_config.get('bollinger_std', 2.0),
+            atr_period=feature_config.get('atr_period', 14),
+            stochastic_k=feature_config.get('stochastic_k', 14),
+            stochastic_d=feature_config.get('stochastic_d', 3),
+            use_only_price_lags=feature_config.get('use_only_price_lags', False),
+            price_lag_days=feature_config.get('price_lag_days', [1, 2, 3, 5, 10]),
+            volatility_windows=feature_config.get('volatility_windows', [5, 10, 20]),
+            temporal_separation_days=feature_config.get('temporal_separation_days', 30)
         )
         
-        # Model configuration
+        # Model configuration (include ARIMA/GARCH/XGB extras)
         model_config = config_dict.get('models', {})
         self.models = ModelConfig(
-            lstm_units=model_config.get('lstm_units', [50, 30]),
-            lstm_dropout=model_config.get('lstm_dropout', 0.2),
-            stockmixer_temporal_units=model_config.get('stockmixer_temporal_units', 64),
-            stockmixer_indicator_units=model_config.get('stockmixer_indicator_units', 64),
-            stockmixer_cross_stock_units=model_config.get('stockmixer_cross_stock_units', 64),
-            stockmixer_fusion_units=model_config.get('stockmixer_fusion_units', 128),
-            xgboost_n_estimators=model_config.get('xgboost_n_estimators', 100),
-            xgboost_max_depth=model_config.get('xgboost_max_depth', 5)
+            lstm_units=model_config.get('lstm_units', [128, 96, 64, 32]),
+            lstm_dropout=model_config.get('lstm_dropout', 0.3),
+            lstm_recurrent_dropout=model_config.get('lstm_recurrent_dropout', 0.2),
+            lstm_bidirectional=model_config.get('lstm_bidirectional', True),
+            lstm_attention=model_config.get('lstm_attention', True),
+            stockmixer_temporal_units=model_config.get('stockmixer_temporal_units', 256),
+            stockmixer_indicator_units=model_config.get('stockmixer_indicator_units', 256),
+            stockmixer_cross_stock_units=model_config.get('stockmixer_cross_stock_units', 256),
+            stockmixer_fusion_units=model_config.get('stockmixer_fusion_units', 512),
+            stockmixer_num_layers=model_config.get('stockmixer_num_layers', 6),
+            stockmixer_attention_heads=model_config.get('stockmixer_attention_heads', 8),
+            stockmixer_dropout=model_config.get('stockmixer_dropout', 0.3),
+            xgboost_n_estimators=model_config.get('xgboost_n_estimators', 500),
+            xgboost_max_depth=model_config.get('xgboost_max_depth', 8),
+            xgboost_learning_rate=model_config.get('xgboost_learning_rate', 0.05),
+            xgboost_subsample=model_config.get('xgboost_subsample', 0.8),
+            xgboost_colsample_bytree=model_config.get('xgboost_colsample_bytree', 0.8),
+            xgboost_reg_alpha=model_config.get('xgboost_reg_alpha', 0.1),
+            xgboost_reg_lambda=model_config.get('xgboost_reg_lambda', 1.0),
+            arima_order=model_config.get('arima_order', [1, 1, 1]),
+            arima_seasonal_order=model_config.get('arima_seasonal_order', [0, 0, 0, 0]),
+            arima_auto_order=model_config.get('arima_auto_order', True),
+            arima_max_p=model_config.get('arima_max_p', 5),
+            arima_max_d=model_config.get('arima_max_d', 2),
+            arima_max_q=model_config.get('arima_max_q', 5),
+            garch_p=model_config.get('garch_p', 1),
+            garch_q=model_config.get('garch_q', 1),
+            garch_auto_order=model_config.get('garch_auto_order', True),
+            garch_max_p=model_config.get('garch_max_p', 3),
+            garch_max_q=model_config.get('garch_max_q', 3),
+            garch_vol=model_config.get('garch_vol', 'Garch'),
+            garch_mean=model_config.get('garch_mean', 'Zero'),
+            garch_dist=model_config.get('garch_dist', 'Normal'),
         )
         
         # Training configuration
@@ -353,6 +422,20 @@ class PipelineConfig:
             max_display=shap_config.get('max_display', 20),
             plot_type=shap_config.get('plot_type', 'bar'),
             save_plots=shap_config.get('save_plots', True)
+        )
+
+        # Feature engineering toggles
+        fe_config = config_dict.get('feature_engineering', {})
+        self.feature_engineering = FeatureEngineeringToggles(
+            enable_vix_features=fe_config.get('enable_vix_features', True),
+            enable_correlation_features=fe_config.get('enable_correlation_features', True),
+            enable_technical_indicators=fe_config.get('enable_technical_indicators', True),
+            enable_regime_features=fe_config.get('enable_regime_features', True),
+            correlation_pairs=fe_config.get('correlation_pairs', []),
+            feature_selection_method=fe_config.get('feature_selection_method', 'mutual_info'),
+            feature_selection_k=fe_config.get('feature_selection_k', 50),
+            min_correlation_threshold=fe_config.get('min_correlation_threshold', 0.01),
+            max_feature_correlation=fe_config.get('max_feature_correlation', 0.95),
         )
         
         # DYNAMIC CPU OPTIMIZATION: Auto-detect and configure cores

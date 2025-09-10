@@ -405,6 +405,36 @@ class VolatilityVisualizer:
         except Exception as e:
             self.logger.error(f"Failed to plot model comparison: {e}")
     
+    def plot_transfer_matrix(self,
+                             transfer_df: pd.DataFrame,
+                             metric: str = 'R2',
+                             save_path: Optional[Path] = None) -> None:
+        """Plot a heatmap of cross-asset transfer performance.
+        Expects a DataFrame with columns: Source, Target, Model, Task, metric.
+        """
+        try:
+            if transfer_df.empty or metric not in transfer_df.columns:
+                self.logger.warning("No transfer data or metric not found for plotting")
+                return
+            # Build pivot per model; if multiple models present, average them
+            pivot = transfer_df.pivot_table(index='Source', columns='Target', values=metric, aggfunc='mean')
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlBu_r', center=0)
+            plt.title(f'Cross-Asset Transfer ({metric})')
+            plt.xlabel('Target Asset')
+            plt.ylabel('Source Asset')
+            plt.tight_layout()
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                self.logger.info(f"Transfer matrix plot saved to {save_path}")
+            else:
+                out = self.output_dir / f'transfer_matrix_{metric}.png'
+                plt.savefig(out, dpi=300, bbox_inches='tight')
+                self.logger.info(f"Transfer matrix plot saved to {out}")
+            plt.close()
+        except Exception as e:
+            self.logger.error(f"Failed to plot transfer matrix: {e}")
+    
     def generate_summary_report(self, results_df: pd.DataFrame, 
                               config: Dict, output_dir: Path) -> None:
         """

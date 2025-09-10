@@ -86,7 +86,7 @@ class ExplainerFactory:
                             return obj
                 return est
 
-            if model_type == 'arima':
+            if model_type in ('arima',):
                 return self._create_arima_explainer(model, X, task, **kwargs)
             elif model_type == 'lstm':
                 if not TENSORFLOW_AVAILABLE:
@@ -144,6 +144,14 @@ class ExplainerFactory:
                         arr = data if isinstance(data, np.ndarray) else np.asarray(data)
                         arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
                         return np.zeros_like(arr2d)
+                    # Allow new SHAP API style calls
+                    def __call__(self, data):
+                        arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                        arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                        class _Vals:
+                            def __init__(self, v):
+                                self.values = np.zeros_like(v)
+                        return _Vals(arr2d)
                 return _DummyExplainer()
                         
             elif model_type == 'xgboost_regression' or (model_type == 'xgboost' and task == 'regression'):
@@ -171,49 +179,59 @@ class ExplainerFactory:
                 except Exception as e:
                     logger.error(f"Failed to create XGBoost regression explainer: {e}")
                     raise
-            elif model_type == 'enhanced_arima' and task == 'regression':
-                # Explain residual model if present, otherwise fall back to TreeExplainer on features
+            elif model_type == 'garch':
+                # Provide SHAP support for GARCH via KernelExplainer over predict
                 try:
-                    # Access underlying residual estimator if available
-                    residual_est = None
-                    if hasattr(model, 'current_model') and hasattr(model.current_model, 'residual_est_'):
-                        residual_est = model.current_model.residual_est_
-                    
-                    if residual_est is not None:
-                        explainer = shap.TreeExplainer(residual_est)
-                        explainer._explainer_tag = 'residual_model'
-                        return explainer
-                    else:
-                        # Fall back to TreeExplainer on the feature data if no residual model
-                        logger.info("EnhancedARIMA has no residual model, using TreeExplainer on features")
-                        # Create a simple tree explainer that can handle the feature data
-                        try:
-                            # Use a simple tree model to explain the features
-                            from sklearn.ensemble import RandomForestRegressor
-                            dummy_model = RandomForestRegressor(n_estimators=10, random_state=42)
-                            # Fit on a small sample to avoid memory issues
-                            X_sample = X.iloc[:min(1000, len(X))] if hasattr(X, 'iloc') else X[:min(1000, len(X))]
-                            y_sample = np.random.randn(len(X_sample))  # Dummy target for explainer
-                            dummy_model.fit(X_sample, y_sample)
-                            explainer = shap.TreeExplainer(dummy_model)
-                            explainer._explainer_tag = 'fallback_model'
-                            return explainer
-                        except Exception as fallback_error:
-                            logger.warning(f"Fallback explainer failed: {fallback_error}")
-                            # Last resort: use a simple explainer
-                            explainer = shap.Explainer(lambda x: np.zeros(len(x)), X.iloc[:100] if hasattr(X, 'iloc') else X[:100])
-                            explainer._explainer_tag = 'simple_fallback'
-                            return explainer
+                    def _predict_fn(data):
+                        arr = np.asarray(data)
+                        arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                        # Unwrap to underlying model if needed
+                        mdl = model.model if hasattr(model, 'model') else model
+                        preds = mdl.predict(arr2d)
+                        # Ensure 1D output for KernelExplainer expectations
+                        preds = np.asarray(preds)
+                        if preds.ndim > 1:
+                            preds = preds.reshape(preds.shape[0], -1).mean(axis=1)
+                        return preds
+                    # Prepare small background sample
+                    bg = X.iloc[:min(100, len(X))].values if hasattr(X, 'iloc') else np.asarray(X)[:min(100, len(X))]
+                    bg2d = bg if bg.ndim == 2 else bg.reshape(bg.shape[0], -1)
+                    explainer = shap.KernelExplainer(_predict_fn, bg2d)
+                    self._explainers[f"garch_{task}"] = explainer
+                    self._background_data[f"garch_{task}"] = bg2d
+                    return explainer
                 except Exception as e:
-                    logger.error(f"Failed to create EnhancedARIMA explainer: {e}")
-                    # Create a basic explainer as fallback
-                    try:
-                        explainer = shap.Explainer(lambda x: np.zeros(len(x)), X.iloc[:100] if hasattr(X, 'iloc') else X[:100])
-                        explainer._explainer_tag = 'error_fallback'
-                        return explainer
-                    except Exception as fallback_e:
-                        logger.error(f"All EnhancedARIMA explainer attempts failed: {fallback_e}")
-                        raise ValueError(f"Unable to create explainer for EnhancedARIMA: {e}")
+                    logger.warning(f"GARCH KernelExplainer failed ({e}); using zero explainer")
+                    class _ZeroExplainer:
+                        def __init__(self):
+                            self.expected_value = 0.0
+                        def shap_values(self, data):
+                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                            return np.zeros_like(arr2d)
+                    return _ZeroExplainer()
+            elif model_type == 'garch':
+                # GARCH: fall back to Kernel/Permutation style simple explainer on linearized features
+                try:
+                    X_bg = X.iloc[:min(200, len(X))] if hasattr(X, 'iloc') else X[:min(200, len(X))]
+                    def predict_wrapped(x):
+                        try:
+                            return np.asarray(model.predict(x)).reshape(-1)
+                        except Exception:
+                            return np.zeros((len(x),), dtype=float)
+                    explainer = shap.KernelExplainer(predict_wrapped, X_bg)
+                    explainer._explainer_tag = 'kernel_garch'
+                    return explainer
+                except Exception as e:
+                    logger.warning(f"GARCH KernelExplainer failed ({e}); using zero explainer")
+                    class _ZeroExplainer:
+                        def __init__(self):
+                            self.expected_value = 0.0
+                        def shap_values(self, data):
+                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                            return np.zeros_like(arr2d)
+                    return _ZeroExplainer()
             else:
                 # Try to detect model type from the model object
                 detected_type = self._detect_model_type(model)

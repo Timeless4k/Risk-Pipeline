@@ -132,41 +132,63 @@ class WalkForwardValidator:
         if not quality_report['is_valid']:
             self.logger.warning(f"Data quality issues detected: {quality_report['issues']}")
         
-        # Calculate adaptive parameters with guards to respect min sizes and single-split edge cases
+        # Calculate adaptive parameters with stronger dynamic behavior per series length
         total_n = len(X)
-        if self.config.n_splits == 1:
-            # Prefer the requested test size if it fits exactly the min constraints
-            max_feasible_test = max(0, total_n - self.config.min_train_size - self.config.gap)
-            adaptive_test_size = min(self.config.test_size, max_feasible_test)
-            adaptive_test_size = max(adaptive_test_size, self.config.min_test_size)
-            max_splits = 1 if (self.config.min_train_size + self.config.gap + adaptive_test_size) <= total_n else 0
-        else:
-            # Multi-split heuristic: cap by 1/4th of data but not below min_test_size
-            adaptive_test_size = min(self.config.test_size, max(self.config.min_test_size, total_n // 4))
-            max_splits = min(self.config.n_splits, (total_n - adaptive_test_size) // max(1, adaptive_test_size))
-        
-        self.logger.info(f"Adaptive test_size: {adaptive_test_size} (requested: {self.config.test_size})")
-        self.logger.info(f"Maximum possible splits: {max_splits} (requested: {self.config.n_splits})")
-        
-        # Generate splits (expanding window with optional gap/embargo)
-        splits = []
-        total = len(X)
         gap = max(0, self.config.gap)
-        embargo = max(0, getattr(self.config, 'embargo', 0))
-        start_test = max(adaptive_test_size, self.config.min_train_size)
-        for s in range(1, max_splits + 1):
-            end_test = min(total, start_test + adaptive_test_size)
-            train_end = start_test - gap
-            # Apply embargo by removing the last 'embargo' observations from the training window
-            train_end = max(0, train_end - embargo)
-            if train_end <= 0:
-                break
-            train_idx = X.index[:train_end]
-            test_idx = X.index[start_test:end_test]
-            if len(test_idx) < self.config.min_test_size:
-                break
-            splits.append((train_idx, test_idx))
-            start_test = end_test
+        requested_splits = max(1, self.config.n_splits)
+        requested_test = max(self.config.min_test_size, self.config.test_size)
+
+        # Dynamic test size: ~10% of data, capped to a trading year, floor at min_test_size
+        test_by_fraction = max(self.config.min_test_size, min(504, max(1, total_n // 10)))
+        adaptive_test_size = min(requested_test, test_by_fraction)
+
+        # Dynamic target splits by dataset size
+        if total_n >= 5000:
+            target_splits_by_length = 12
+        elif total_n >= 2000:
+            target_splits_by_length = 8
+        elif total_n >= 1000:
+            target_splits_by_length = 5
+        elif total_n >= 500:
+            target_splits_by_length = 3
+        else:
+            target_splits_by_length = 1
+
+        # Feasible splits given size and chosen test block
+        feasible_by_blocks = max(1, (total_n - max(self.config.min_train_size, 10)) // max(1, adaptive_test_size))
+        max_splits = min(requested_splits, target_splits_by_length, feasible_by_blocks)
+
+        # Dynamic min train size: scale with data; prefer at least 2 test blocks when possible
+        original_min_train = self.config.min_train_size
+        if max_splits == 1:
+            # Single split: use almost all data for training
+            min_train_eff = max(original_min_train, total_n - adaptive_test_size - gap)
+            adaptive_test_size = max(self.config.min_test_size, min(requested_test, max(1, total_n // 5)))
+        else:
+            # Multi-split: ensure reasonable initial context
+            min_train_eff = max(original_min_train, min(756, max(126, total_n // 8)))
+
+        # Log adaptive decisions
+        self.logger.info(f"Adaptive decisions → total_n={total_n}, adaptive_test_size={adaptive_test_size}, requested_test={requested_test}")
+        self.logger.info(f"Target splits by length={target_splits_by_length}, feasible_by_blocks={feasible_by_blocks}, using_splits={max_splits}")
+        self.logger.info(f"Effective min_train_size set to {min_train_eff} (original {original_min_train})")
+        
+        # Generate splits using proportional expanding/sliding strategies
+        # This ensures later folds leverage much larger training windows from the full history.
+        if max_splits <= 0:
+            splits = []
+        else:
+            # Temporarily override min_train_size for this run with dynamic value
+            prev_min_train = self.config.min_train_size
+            try:
+                self.config.min_train_size = min_train_eff
+                if self.config.expanding_window:
+                    splits = self._generate_expanding_splits(X, max_splits, adaptive_test_size)
+                else:
+                    splits = self._generate_sliding_splits(X, max_splits, adaptive_test_size)
+            finally:
+                # Restore original min_train_size to avoid side effects
+                self.config.min_train_size = prev_min_train
         
         # Log split summary
         for i, (train_idx, test_idx) in enumerate(splits, 1):
@@ -288,6 +310,26 @@ class WalkForwardValidator:
                         y_test_clean = np.log(y_test_clean + eps)
                         use_log_target = True
                 
+                # Centralized scaling: fit on training fold, apply to train/test
+                try:
+                    from sklearn.preprocessing import StandardScaler as _StdScaler
+                    scaler_cols = X_train_clean.select_dtypes(include=[np.number]).columns
+                    _scaler = _StdScaler()
+                    X_train_num = _scaler.fit_transform(X_train_clean[scaler_cols].values)
+                    X_test_num = _scaler.transform(X_test_clean[scaler_cols].values)
+                    # Rebuild DataFrames to preserve indices/columns
+                    X_train_clean = X_train_clean.copy()
+                    X_test_clean = X_test_clean.copy()
+                    X_train_clean.loc[:, scaler_cols] = X_train_num
+                    X_test_clean.loc[:, scaler_cols] = X_test_num
+                    # Signal to model that inputs are pre-scaled
+                    try:
+                        setattr(model, 'expects_scaled_input', True)
+                    except Exception:
+                        pass
+                except Exception as _scale_err:
+                    logger.warning(f"Centralized scaling skipped due to error: {_scale_err}")
+
                 # Fit model with timing
                 start_time = time.perf_counter()
                 try:
@@ -325,6 +367,15 @@ class WalkForwardValidator:
                         logger.debug(f"Predicting with {model_type} model on {len(X_test_clean)} test samples")
                         logger.debug(f"Test data shapes: X={X_test_clean.shape}, y={y_test_clean.shape}")
                         y_pred = model.predict(X_test_clean)
+                        # Classification guard: convert probabilities to class labels if needed
+                        try:
+                            if getattr(model, 'task', None) == 'classification' and isinstance(y_pred, np.ndarray) and y_pred.ndim > 1:
+                                if y_pred.shape[1] > 1:
+                                    y_pred = np.argmax(y_pred, axis=1)
+                                else:
+                                    y_pred = (y_pred.ravel() >= 0.5).astype(int)
+                        except Exception:
+                            pass
                     else:
                         # For models without predict method
                         logger.debug(f"Forecasting {len(X_test_clean)} steps")
@@ -375,29 +426,41 @@ class WalkForwardValidator:
                 
                 # Handle classification task
                 if task_type == 'classification':
-                    # Convert to integer labels
+                    # Convert to labels; support probability inputs in [0,1]
                     y_true_arr = y_true.astype(int)
-                    y_pred_arr = y_pred.astype(int)
-                    
+                    y_pred_input = np.asarray(y_pred)
+                    if y_pred_input.ndim == 1 and np.all((y_pred_input >= 0.0) & (y_pred_input <= 1.0)):
+                        y_pred_arr = (y_pred_input >= 0.5).astype(int)
+                    elif y_pred_input.ndim == 2 and y_pred_input.shape[1] == 2:
+                        y_pred_arr = (y_pred_input[:, 1] >= 0.5).astype(int)
+                    else:
+                        y_pred_arr = y_pred_input.astype(int)
+
                     # DEBUG: Log prediction details for classification
                     logger.debug(f"Classification debug - y_true unique: {np.unique(y_true_arr)}, y_pred unique: {np.unique(y_pred_arr)}")
                     logger.debug(f"Classification debug - y_true shape: {y_true_arr.shape}, y_pred shape: {y_pred_arr.shape}")
                     logger.debug(f"Classification debug - y_true range: [{y_true_arr.min()}, {y_true_arr.max()}], y_pred range: [{y_pred_arr.min()}, {y_pred_arr.max()}]")
-                    
+
                     # Calculate classification metrics
                     from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, balanced_accuracy_score, roc_auc_score
-                    
+
                     acc = float(accuracy_score(y_true_arr, y_pred_arr))
                     f1 = float(f1_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
                     prec = float(precision_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
                     rec = float(recall_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
                     bacc = float(balanced_accuracy_score(y_true_arr, y_pred_arr))
-                    
+
                     # ROC-AUC (if binary classification)
                     roc_auc = np.nan
                     if len(np.unique(y_true_arr)) == 2:
                         try:
-                            roc_auc = float(roc_auc_score(y_true_arr, y_pred_arr))
+                            # Prefer probability inputs if available
+                            if y_pred_input.ndim == 1 and np.all((y_pred_input >= 0.0) & (y_pred_input <= 1.0)):
+                                roc_auc = float(roc_auc_score(y_true_arr, y_pred_input))
+                            elif y_pred_input.ndim == 2 and y_pred_input.shape[1] == 2:
+                                roc_auc = float(roc_auc_score(y_true_arr, y_pred_input[:, 1]))
+                            else:
+                                roc_auc = float(roc_auc_score(y_true_arr, y_pred_arr))
                         except Exception:
                             pass
                     
@@ -552,18 +615,26 @@ class WalkForwardValidator:
                 self.logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
         
-        # Parallel evaluation using all 24 cores
-        logger.info(f"Starting parallel evaluation of {len(splits)} splits")
-        split_results = Parallel(n_jobs=psutil.cpu_count(logical=False), verbose=1)(
-            delayed(evaluate_single_split)(split) for split in splits
-        )
+        # Parallel evaluation using threads to avoid pickling issues with TF models
+        # On Windows, some TF models (LSTM/StockMixer) still cause serialization issues in joblib.
+        # For those, fall back to a safe serial path.
+        logger.debug(f"Starting parallel evaluation of {len(splits)} splits")
+        tf_like_model = str(model_type).lower() in ["lstm", "stockmixer"]
+        if tf_like_model:
+            logger.debug("Detected TensorFlow-like model; using serial evaluation to avoid pickling issues")
+            split_results = [evaluate_single_split(split) for split in splits]
+        else:
+            split_results = Parallel(n_jobs=psutil.cpu_count(logical=False), backend="threading", verbose=0)(
+                delayed(evaluate_single_split)(split) for split in splits
+            )
         
         # Log results for debugging
-        logger.info(f"Split results: {len(split_results)} total, {[type(r) for r in split_results]}")
+        logger.debug(f"Split results: {len(split_results)} total, {[type(r) for r in split_results]}")
         
-        # Filter out failed evaluations
-        valid_results = [r for r in split_results if r is not None]
-        logger.info(f"Valid results: {len(valid_results)} out of {len(split_results)} splits")
+        # Build validity mask and filtered list while preserving original ordering for later per-fold mapping
+        valid_mask = [isinstance(r, dict) for r in split_results]
+        valid_results = [r for r in split_results if isinstance(r, dict)]
+        logger.debug(f"Valid results: {len(valid_results)} out of {len(split_results)} splits")
 
         # Diagnostics: detect NaNs per-fold to avoid silent aggregation issues
         try:
@@ -592,11 +663,12 @@ class WalkForwardValidator:
         fit_times = [r.get('fit_time', 0.0) for r in valid_results if 'fit_time' in r]
         pred_times = [r.get('pred_time', 0.0) for r in valid_results if 'pred_time' in r]
         
-        # ⏱️ TIMING GUARDRAILS: Assert timing lists have correct length
-        if len(fit_times) != len(splits):
-            self.logger.error(f"⏱️ TIMING GUARDRAIL FAILED: fit_times length {len(fit_times)} != n_splits {len(splits)}")
-        if len(pred_times) != len(splits):
-            self.logger.error(f"⏱️ TIMING GUARDRAIL FAILED: pred_times length {len(pred_times)} != n_splits {len(splits)}")
+        # ⏱️ TIMING GUARDRAILS: Compare to number of successful splits to avoid false alarms
+        expected_success = len(valid_results)
+        if len(fit_times) != expected_success:
+            self.logger.warning(f"⏱️ TIMING GUARDRAIL: fit_times length {len(fit_times)} != successful_splits {expected_success} (total requested {len(splits)})")
+        if len(pred_times) != expected_success:
+            self.logger.warning(f"⏱️ TIMING GUARDRAIL: pred_times length {len(pred_times)} != successful_splits {expected_success} (total requested {len(splits)})")
         
         # Use centralized metrics summarizer for proper aggregation
         from .metrics_summarizer import summarize_regression, summarize_classification
@@ -674,8 +746,8 @@ class WalkForwardValidator:
             all_fold_indices.append(fold_indices)
             
             # Collect actuals and predictions from this fold
-            if i < len(valid_results) and valid_results[i] is not None:
-                r = valid_results[i]
+            if i < len(split_results) and isinstance(split_results[i], dict):
+                r = split_results[i]
                 if isinstance(r, dict):
                     # Store fold-level metrics
                     fold_metrics = {
@@ -757,8 +829,8 @@ class WalkForwardValidator:
                 y_pred_all = []
                 reg_all = []
                 for i, (train_idx, test_idx) in enumerate(splits):
-                    if i < len(valid_results) and valid_results[i] is not None and isinstance(valid_results[i], dict):
-                        r = valid_results[i]
+                    if i < len(split_results) and isinstance(split_results[i], dict):
+                        r = split_results[i]
                         if 'y_true' in r and 'y_pred' in r:
                             y_true_all.extend(r['y_true'])
                             y_pred_all.extend(r['y_pred'])

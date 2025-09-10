@@ -132,8 +132,8 @@ class SHAPAnalyzer:
             for task in tasks
         ]
         
-        # Parallel SHAP analysis using all 24 cores
-        parallel_results = Parallel(n_jobs=cpu_count, verbose=1)(
+        # Parallel SHAP analysis using threading backend to avoid pickling issues on Windows
+        parallel_results = Parallel(n_jobs=cpu_count, backend="threading", verbose=1)(
             delayed(analyze_single_model_parallel)(combo) for combo in model_combinations
         )
         
@@ -302,20 +302,7 @@ class SHAPAnalyzer:
             )
 
             # Compute SHAP values on the saved eval sample
-            # If Enhanced ARIMA residual model explainer, align transforms
-            if model_type == 'enhanced_arima' and getattr(explainer, '_explainer_tag', '') == 'residual_model':
-                try:
-                    # Ensure we pass the same transformed features used by residual model
-                    if hasattr(model, 'current_model') and hasattr(model.current_model, 'transform_features'):
-                        X_eval_used = model.current_model.transform_features(X_eval)
-                    else:
-                        X_eval_used = np.asarray(X_eval)
-                    shap_values = explainer.shap_values(X_eval_used)
-                except Exception as e:
-                    logger.error(f"EnhancedARIMA residual SHAP failed, fallback to raw X: {e}")
-                    shap_values = explainer.shap_values(X_eval)
-            else:
-                shap_values = explainer.shap_values(X_eval)
+            shap_values = explainer.shap_values(X_eval)
             # Guard for empty/None returns
             if shap_values is None or (isinstance(shap_values, (list, tuple)) and len(shap_values) == 0):
                 raise RuntimeError("StockMixer returned empty SHAP values")
@@ -334,10 +321,7 @@ class SHAPAnalyzer:
                 sv = sv[..., 0]
 
             # Align X to SHAP features
-            if model_type == 'enhanced_arima' and getattr(explainer, '_explainer_tag', '') == 'residual_model':
-                X_eval_2d = X_eval_used if 'X_eval_used' in locals() else (X_eval.values if isinstance(X_eval, pd.DataFrame) else np.asarray(X_eval))
-            else:
-                X_eval_2d = X_eval.values if isinstance(X_eval, pd.DataFrame) else np.asarray(X_eval)
+            X_eval_2d = X_eval.values if isinstance(X_eval, pd.DataFrame) else np.asarray(X_eval)
             
             # Ensure X_eval_2d is 2D
             if X_eval_2d.ndim > 2:
@@ -947,7 +931,7 @@ class SHAPAnalyzer:
             )
             
             # Add model-specific analysis
-            if model_type == 'arima':
+            if model_type in ('arima', 'enhanced_arima'):
                 explanation['arima_analysis'] = self._analyze_arima_prediction(
                     explainer, instance, feature_names
                 )

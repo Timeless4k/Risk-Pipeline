@@ -322,19 +322,22 @@ class LSTMModel(BaseModel):
             train_len = n_samples - val_len
             X_train, X_val = X_seq[:train_len], X_seq[train_len:]
             y_train, y_val = (y_reshaped[:train_len], y_reshaped[train_len:]) if y_reshaped is not None else (None, None)
-            # Scale features for both 2D and 3D
-            if X_train.ndim == 3:
-                tr_shape = X_train.shape
-                vl_shape = X_val.shape
-                X_tr_flat = X_train.reshape(-1, tr_shape[-1])
-                X_vl_flat = X_val.reshape(-1, vl_shape[-1])
-                X_tr_flat = self.scaler.fit_transform(X_tr_flat)
-                X_vl_flat = self.scaler.transform(X_vl_flat)
-                X_train = X_tr_flat.reshape(tr_shape)
-                X_val = X_vl_flat.reshape(vl_shape)
-            else:
-                X_train = self.scaler.fit_transform(X_train)
-                X_val = self.scaler.transform(X_val)
+            # Centralized scaling: if inputs are pre-scaled, skip internal scaler
+            expects_scaled = bool(getattr(self, 'expects_scaled_input', False))
+            if not expects_scaled:
+                # Scale features for both 2D and 3D
+                if X_train.ndim == 3:
+                    tr_shape = X_train.shape
+                    vl_shape = X_val.shape
+                    X_tr_flat = X_train.reshape(-1, tr_shape[-1])
+                    X_vl_flat = X_val.reshape(-1, vl_shape[-1])
+                    X_tr_flat = self.scaler.fit_transform(X_tr_flat)
+                    X_vl_flat = self.scaler.transform(X_vl_flat)
+                    X_train = X_tr_flat.reshape(tr_shape)
+                    X_val = X_vl_flat.reshape(vl_shape)
+                else:
+                    X_train = self.scaler.fit_transform(X_train)
+                    X_val = self.scaler.transform(X_val)
             
             # FIXED: Train on CPU to match model device
             with tf.device('/CPU:0'):
@@ -447,17 +450,19 @@ class LSTMModel(BaseModel):
             else:
                 X_reshaped = X_arr
             
-            # Scale features using fitted scaler
-            try:
-                if X_reshaped.ndim == 3:
-                    shp = X_reshaped.shape
-                    flat = X_reshaped.reshape(-1, shp[-1])
-                    flat = self.scaler.transform(flat)
-                    X_reshaped = flat.reshape(shp)
-                else:
-                    X_reshaped = self.scaler.transform(X_reshaped)
-            except Exception:
-                pass
+            # Scale features using fitted scaler unless pre-scaled
+            expects_scaled = bool(getattr(self, 'expects_scaled_input', False))
+            if not expects_scaled:
+                try:
+                    if X_reshaped.ndim == 3:
+                        shp = X_reshaped.shape
+                        flat = X_reshaped.reshape(-1, shp[-1])
+                        flat = self.scaler.transform(flat)
+                        X_reshaped = flat.reshape(shp)
+                    else:
+                        X_reshaped = self.scaler.transform(X_reshaped)
+                except Exception:
+                    pass
 
             # FIXED: Force CPU device context during prediction to match training
             with tf.device('/CPU:0'):

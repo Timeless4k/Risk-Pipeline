@@ -10,6 +10,14 @@ import sys
 import time
 from pathlib import Path
 
+# Silence TensorFlow/absl/CUDA noise before any heavy imports
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')  # 0=all,1=INFO,2=WARNING,3=ERROR
+os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
+os.environ.setdefault('TF_XLA_FLAGS', '--xla_gpu_cuda_data_dir=\"\"')
+os.environ.setdefault('ABSL_LOGLEVEL', '3')  # absl to ERROR
+os.environ.setdefault('NVIDIA_TF32_OVERRIDE', '0')
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')  # hide GPUs to avoid CUDA init
+
 # Add the project root to Python path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -39,7 +47,13 @@ def main():
         
         # Define assets and models from config
         assets = pipeline.config.data.all_assets
-        models = list(getattr(pipeline.config, 'models_to_run', [])) or ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
+        # Preferred run order: run regression-first models then ML
+        default_order = ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
+        models_cfg = list(getattr(pipeline.config, 'models_to_run', []))
+        models = models_cfg if models_cfg else default_order
+        # Normalize aliases (e.g., xgb -> xgboost) and preserve order
+        alias = {'xgb': 'xgboost'}
+        models = [alias.get(m, m) for m in models]
         
         # Minimal, concise output
         print(f"Assets: {', '.join(assets)}")
@@ -53,7 +67,8 @@ def main():
             assets=assets,
             models=models,
             save_models=True,
-            run_shap=True
+            run_shap=True,
+            run_cross_transfer=True
         )
         
         # Calculate execution time

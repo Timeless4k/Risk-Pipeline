@@ -296,12 +296,16 @@ class ARIMAModel(BaseModel):
             X_selected = self.feature_selector_.fit_select(X, y)
             self.selected_features_ = self.feature_selector_.selected_features_
             if not X_selected.empty:
-                X_scaled = pd.DataFrame(
-                    self.scaler_.fit_transform(X_selected),
-                    columns=X_selected.columns,
-                    index=X_selected.index
-                )
-                exog_processed = X_scaled
+                # Centralized scaling compatibility: use pre-scaled inputs if flagged
+                if bool(getattr(self, 'expects_scaled_input', False)):
+                    exog_processed = X_selected.copy()
+                else:
+                    X_scaled = pd.DataFrame(
+                        self.scaler_.fit_transform(X_selected),
+                        columns=X_selected.columns,
+                        index=X_selected.index
+                    )
+                    exog_processed = X_scaled
                 self.exog_train_ = exog_processed.copy()
             else:
                 self.use_exog = False
@@ -378,11 +382,15 @@ class ARIMAModel(BaseModel):
             if self.selected_features_:
                 steps = len(X)
                 X_selected = X[self.selected_features_]
-                exog_forecast = pd.DataFrame(
-                    self.scaler_.transform(X_selected),
-                    columns=X_selected.columns,
-                    index=X_selected.index
-                )
+                # Centralized scaling compatibility: pass-through if pre-scaled
+                if bool(getattr(self, 'expects_scaled_input', False)):
+                    exog_forecast = X_selected.copy()
+                else:
+                    exog_forecast = pd.DataFrame(
+                        self.scaler_.transform(X_selected),
+                        columns=X_selected.columns,
+                        index=X_selected.index
+                    )
         else:
             try:
                 steps = len(X)

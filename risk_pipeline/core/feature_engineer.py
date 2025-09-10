@@ -393,39 +393,53 @@ class CorrelationFeatureModule(BaseFeatureModule):
         self.logger.info("Starting correlation calculation")
         correlations = pd.DataFrame()
         
+        # If no pairs configured, auto-generate all unique pairs from available symbols
+        if not self.correlation_pairs:
+            symbols = [s for s in data.keys() if s != 'VIX']
+            auto_pairs: List[List[str]] = []
+            for i in range(len(symbols)):
+                for j in range(i + 1, len(symbols)):
+                    auto_pairs.append([symbols[i], symbols[j]])
+            self.correlation_pairs = auto_pairs
+            if not auto_pairs:
+                self.logger.info("No symbols to pair; skipping correlation features")
+                return correlations
+        
         # Extract returns for correlation calculation
-        returns = {}
+        returns: Dict[str, pd.Series] = {}
         for symbol, df in data.items():
-            if symbol != 'VIX':
+            if symbol != 'VIX' and isinstance(df, pd.DataFrame) and not df.empty:
                 price_col = 'Adj Close' if 'Adj Close' in df.columns else 'Close'
-                
                 if price_col in df.columns and not df[price_col].dropna().empty:
                     log_ret = np.log(df[price_col] / df[price_col].shift(1))
                     if isinstance(log_ret, pd.Series) and not log_ret.dropna().empty:
                         returns[symbol] = log_ret
                         self.logger.info(f"✅ {symbol} - Valid return series with {log_ret.dropna().shape[0]} non-NaN values")
-                    else:
-                        self.logger.warning(f"⚠️ {symbol} - Log returns are empty after calculation")
-                else:
-                    self.logger.warning(f"⚠️ {symbol} - Missing or empty price column '{price_col}'")
-        
+                
         if len(returns) < 2:
-            self.logger.warning("Insufficient assets for correlation calculation")
-            return pd.DataFrame()
+            self.logger.info("Insufficient assets for correlation calculation; skipping")
+            return correlations
         
         returns_df = pd.DataFrame(returns)
         
         # Calculate rolling correlations dynamically from configured pairs
+        created_cols: List[str] = []
         for a, b in self.correlation_pairs:
             if a in returns_df.columns and b in returns_df.columns:
                 a_s = a.replace('^', '').replace('.', '').replace('-', '')
                 b_s = b.replace('^', '').replace('.', '').replace('-', '')
                 col_name = f"{a_s}_{b_s}_corr"
-                correlations[col_name] = returns_df[a].rolling(
-                    window=self.config.correlation_window
-                ).corr(returns_df[b])
+                try:
+                    correlations[col_name] = returns_df[a].rolling(
+                        window=self.config.correlation_window, min_periods=1
+                    ).corr(returns_df[b])
+                    created_cols.append(col_name)
+                except Exception as _e:
+                    self.logger.warning(f"Failed to compute correlation {a}-{b}: {_e}")
+            else:
+                self.logger.info(f"Skipping pair ({a}, {b}) not present in returns data")
         
-        self.logger.info(f"Created correlation features: {correlations.columns.tolist()}")
+        self.logger.info(f"Created correlation features: {created_cols}")
         return correlations
 
 class FeatureEngineerConfig:
@@ -441,33 +455,72 @@ class FeatureEngineer:
     
     def __init__(self, config: Optional[PipelineConfig] = None):
         self.config = config or PipelineConfig()
+        # Safely pull optional fields from config.features with sensible defaults
+        # and sanitize non-positive values coming from JSON
+        def _sanitize(value: Any, default: int, min_value: int = 1) -> int:
+            try:
+                iv = int(value)
+                return iv if iv >= min_value else default
+            except Exception:
+                return default
+
+        fe = getattr(self.config, 'features', None)
+        ma_short = _sanitize(getattr(fe, 'ma_short', 10), 10, 1)
+        ma_long = _sanitize(getattr(fe, 'ma_long', 50), 50, 2)
+        rsi_period = _sanitize(getattr(fe, 'rsi_period', 14), 14, 2)
+        macd_fast = _sanitize(getattr(fe, 'macd_fast', 12), 12, 2)
+        macd_slow = _sanitize(getattr(fe, 'macd_slow', 26), 26, 3)
+        macd_signal = _sanitize(getattr(fe, 'macd_signal', 9), 9, 2)
+        atr_period = _sanitize(getattr(fe, 'atr_period', 14), 14, 2)
+        bollinger_period = _sanitize(getattr(fe, 'bollinger_period', 20), 20, 2)
+        bollinger_std = _sanitize(getattr(fe, 'bollinger_std', 2), 2, 1)
+        correlation_window = _sanitize(getattr(fe, 'correlation_window', 30), 30, 2)
+        temporal_separation_days = _sanitize(getattr(fe, 'temporal_separation_days', 30), 30, 0)
+        price_lag_days = getattr(fe, 'price_lag_days', [1, 2, 3, 5, 10])
+        if isinstance(price_lag_days, list):
+            price_lag_days = [int(l) for l in price_lag_days if isinstance(l, (int, float)) and int(l) > 0]
+            if not price_lag_days:
+                price_lag_days = [1, 2, 3, 5, 10]
+
         self.feature_config = FeatureConfig(
-            ma_short=self.config.features.ma_short,
-            ma_long=self.config.features.ma_long,
-            correlation_window=self.config.features.correlation_window,
-            rsi_period=self.config.features.rsi_period,
-            macd_fast=self.config.features.macd_fast,
-            macd_slow=self.config.features.macd_slow,
-            macd_signal=self.config.features.macd_signal,
-            atr_period=self.config.features.atr_period,
-            bollinger_period=self.config.features.bollinger_period,
-            bollinger_std=int(self.config.features.bollinger_std) if isinstance(self.config.features.bollinger_std, float) else self.config.features.bollinger_std,
+            ma_short=ma_short,
+            ma_long=ma_long,
+            correlation_window=correlation_window,
+            rsi_period=rsi_period,
+            macd_fast=macd_fast,
+            macd_slow=macd_slow,
+            macd_signal=macd_signal,
+            atr_period=atr_period,
+            bollinger_period=bollinger_period,
+            bollinger_std=int(bollinger_std),
             volatility_windows=getattr(self.config.features, 'volatility_windows', [5, 10, 20]),
-            temporal_separation_days=getattr(self.config.features, 'temporal_separation_days', 30),
-            price_lag_days=getattr(self.config.features, 'price_lag_days', [1, 2, 3, 5, 10]),
+            temporal_separation_days=temporal_separation_days,
+            price_lag_days=price_lag_days,
         )
         
         # Initialize feature modules
         # Build modules honoring toggles from config if present
         self.modules = {}
-        if getattr(self.config, 'feature_engineering', None) is None or self.config.feature_engineering.enable_technical_indicators:
-            self.modules['technical'] = TechnicalFeatureModule(self.feature_config)
-        self.modules['statistical'] = StatisticalFeatureModule(self.feature_config)
-        self.modules['time'] = TimeFeatureModule(self.feature_config)
-        self.modules['lag'] = LagFeatureModule(self.feature_config)
-        self.modules['nonlinear'] = NonlinearReturnsModule(self.feature_config)
-        if getattr(self.config, 'feature_engineering', None) is None or self.config.feature_engineering.enable_correlation_features:
-            self.modules['correlation'] = CorrelationFeatureModule(self.feature_config, correlation_pairs=getattr(self.config.feature_engineering, 'correlation_pairs', []))
+        fe_toggles = getattr(self.config, 'feature_engineering', None)
+        use_only_price_lags = bool(getattr(self.config.features, 'use_only_price_lags', False))
+
+        if use_only_price_lags:
+            # Honor config: only lag features, but still allow correlation if enabled
+            self.modules['lag'] = LagFeatureModule(self.feature_config)
+            if fe_toggles is None or getattr(fe_toggles, 'enable_correlation_features', True):
+                correlation_pairs = getattr(fe_toggles, 'correlation_pairs', []) if fe_toggles is not None else []
+                self.modules['correlation'] = CorrelationFeatureModule(self.feature_config, correlation_pairs=correlation_pairs)
+        else:
+            if fe_toggles is None or getattr(fe_toggles, 'enable_technical_indicators', True):
+                self.modules['technical'] = TechnicalFeatureModule(self.feature_config)
+            self.modules['statistical'] = StatisticalFeatureModule(self.feature_config)
+            self.modules['time'] = TimeFeatureModule(self.feature_config)
+            self.modules['lag'] = LagFeatureModule(self.feature_config)
+            self.modules['nonlinear'] = NonlinearReturnsModule(self.feature_config)
+            # Only reference fe_toggles if present; otherwise use defaults
+            if fe_toggles is None or getattr(fe_toggles, 'enable_correlation_features', True):
+                correlation_pairs = getattr(fe_toggles, 'correlation_pairs', []) if fe_toggles is not None else []
+                self.modules['correlation'] = CorrelationFeatureModule(self.feature_config, correlation_pairs=correlation_pairs)
         
         self.logger = logging.getLogger(__name__)
         self.logger.info("FeatureEngineer initialized with modular architecture")
@@ -525,8 +578,8 @@ class FeatureEngineer:
                 self.logger.error(f"❌ {asset}: Feature creation failed: {str(e)}")
                 return asset, pd.DataFrame()
         
-        # Parallel feature creation using all 24 cores
-        parallel_results = Parallel(n_jobs=cpu_count, verbose=1)(
+        # Parallel feature creation using threading backend to avoid pickling issues on Windows
+        parallel_results = Parallel(n_jobs=cpu_count, backend="threading", verbose=1)(
             delayed(create_asset_features_parallel)(asset, df) 
             for asset, df in data.items() 
             if asset != 'VIX'
@@ -540,14 +593,19 @@ class FeatureEngineer:
         
         # Add correlation features if requested
         if not skip_correlations and len(all_features) > 1:
-            self.logger.info("Adding correlation features")
-            correlations = self.modules['correlation'].create_features(data)
-            
-            if not correlations.empty:
-                for asset in all_features.keys():
-                    # Align correlation features with asset features
-                    asset_correlations = correlations.reindex(all_features[asset].index, method='ffill')
-                    all_features[asset] = pd.concat([all_features[asset], asset_correlations], axis=1)
+            try:
+                if 'correlation' in self.modules:
+                    self.logger.info("Adding correlation features")
+                    correlations = self.modules['correlation'].create_features(data)
+                    if not correlations.empty:
+                        for asset in all_features.keys():
+                            # Align correlation features with asset features
+                            asset_correlations = correlations.reindex(all_features[asset].index, method='ffill')
+                            all_features[asset] = pd.concat([all_features[asset], asset_correlations], axis=1)
+                else:
+                    self.logger.info("Skipping correlation features: module not enabled")
+            except Exception as _e:
+                self.logger.error(f"Failed to add correlation features: {_e}")
         
         # Add VIX features if available
         if 'VIX' in data:

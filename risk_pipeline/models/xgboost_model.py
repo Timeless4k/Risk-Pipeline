@@ -49,6 +49,9 @@ class XGBoostModel(BaseModel):
             'colsample_bytree': kwargs.get('colsample_bytree', 0.8),
             'min_child_weight': kwargs.get('min_child_weight', 5),
             'gamma': kwargs.get('gamma', 0.2),
+            # Force CPU to avoid accidental CUDA selection
+            'device': 'cpu',
+            'predictor': 'cpu_predictor',
         }
         
         # Update with any additional parameters
@@ -56,7 +59,10 @@ class XGBoostModel(BaseModel):
         
         # Force reliable CPU defaults; avoid flaky GPU selection in mixed environments
         self.params.setdefault('tree_method', 'hist')
-        self.params.pop('predictor', None)
+        # Ensure CPU device settings take precedence
+        self.params['device'] = 'cpu'
+        self.params['predictor'] = 'cpu_predictor'
+        # Remove any GPU-specific parameters that may have been passed in
         self.params.pop('gpu_id', None)
 
         # Create model
@@ -72,12 +78,14 @@ class XGBoostModel(BaseModel):
         self.input_shape = input_shape
         
         # QUICK CPU OPTIMIZATION: Use parallel cores for maximum performance
-        cpu_count =  max(1, __import__('psutil').cpu_count(logical=False) or 4)
+        cpu_count =  max(1, (__import__('psutil').cpu_count(logical=False) or 4))
         
         # Tuned defaults for stability and generalization
         xgb_params = {
             'n_jobs': cpu_count,
             'tree_method': 'hist',
+            'device': 'cpu',
+            'predictor': 'cpu_predictor',
             'n_estimators': self.params.get('n_estimators', 800),
             'max_depth': self.params.get('max_depth', 6),
             'learning_rate': self.params.get('learning_rate', 0.05),
@@ -141,8 +149,12 @@ class XGBoostModel(BaseModel):
         self.logger.info(f"Training XGBoost model with {len(X)} observations")
         
         try:
-            # Scale features
-            X_scaled = self.scaler.fit_transform(X)
+            # Centralized scaling compatibility: skip internal scaling if provided
+            expects_scaled = bool(getattr(self, 'expects_scaled_input', False))
+            if expects_scaled:
+                X_scaled = X
+            else:
+                X_scaled = self.scaler.fit_transform(X)
             # Optional log-target transform (regression only)
             if self.task == 'regression' and (kwargs.get('use_log_vol_target', self.use_log_vol_target)):
                 eps = kwargs.get('log_target_epsilon', self.log_target_epsilon)
@@ -151,7 +163,17 @@ class XGBoostModel(BaseModel):
                 except Exception:
                     pass
             
-            # Simple fit without early stopping (early_stopping_rounds not supported in current XGBoost version)
+            # Balance classes if classification (optional, auto-on for heavy imbalance)
+            if self.task == 'classification':
+                try:
+                    class_counts = Counter(np.asarray(y).ravel())
+                    imbalance_ratio = max(class_counts.values()) / max(1, min(class_counts.values()))
+                    if imbalance_ratio >= 5 and hasattr(self, '_apply_smote_tomek'):
+                        X_scaled, y = self._apply_smote_tomek(X_scaled, np.asarray(y).ravel())
+                except Exception:
+                    pass
+
+            # Fit
             self.model.fit(X_scaled, y)
             
             self.is_trained = True
@@ -188,16 +210,36 @@ class XGBoostModel(BaseModel):
             elif X.ndim > 2:
                 X = X.reshape(X.shape[0], -1)
             
-            # Scale features
-            X_scaled = self.scaler.transform(X)
+            # Scale features (or pass-through if already scaled)
+            expects_scaled = bool(getattr(self, 'expects_scaled_input', False))
+            X_scaled = X if expects_scaled else self.scaler.transform(X)
             
             # Make predictions
-            y_pred = self.model.predict(X_scaled)
+            if self.task == 'classification' and hasattr(self.model, 'predict_proba'):
+                proba = self.model.predict_proba(X_scaled)
+                # Convert to labels: argmax for multiclass, threshold 0.5 for binary
+                if isinstance(proba, np.ndarray) and proba.ndim == 2:
+                    if proba.shape[1] > 1:
+                        y_pred = np.argmax(proba, axis=1)
+                    else:
+                        y_pred = (proba.ravel() >= 0.5).astype(int)
+                else:
+                    y_pred = (np.asarray(proba).ravel() >= 0.5).astype(int)
+            else:
+                y_pred = self.model.predict(X_scaled)
             
             # Ensure output is 1D
             if y_pred.ndim > 1:
                 y_pred = y_pred.ravel()
             
+            # Final NaN/Inf guard
+            try:
+                arr = np.asarray(y_pred, dtype=float)
+                if np.isnan(arr).any() or np.isinf(arr).any():
+                    self.logger.error("XGBoost predict produced NaN/Inf; returning zeros")
+                    return np.zeros(len(X), dtype=float)
+            except Exception:
+                pass
             return y_pred
             
         except Exception as e:
@@ -230,8 +272,9 @@ class XGBoostModel(BaseModel):
             elif X.ndim > 2:
                 X = X.reshape(X.shape[0], -1)
             
-            # Scale features
-            X_scaled = self.scaler.transform(X)
+            # Scale features (or pass-through if already scaled)
+            expects_scaled = bool(getattr(self, 'expects_scaled_input', False))
+            X_scaled = X if expects_scaled else self.scaler.transform(X)
             
             # Get probabilities
             proba = self.model.predict_proba(X_scaled)

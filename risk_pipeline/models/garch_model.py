@@ -8,14 +8,15 @@ import numpy as np
 import pandas as pd
 from arch import arch_model
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import StandardScaler
 
 from .base_model import BaseModel
 
 
 class GARCHModel(BaseModel):
-    """GARCH model for volatility forecasting."""
+    """GARCH model for volatility forecasting and derived classification."""
 
-    def __init__(self, p: int = 1, q: int = 1, **kwargs):
+    def __init__(self, p: int = 1, q: int = 1, task: str = 'regression', threshold: Optional[float] = None, **kwargs):
         """
         Initialize GARCH model.
 
@@ -27,10 +28,17 @@ class GARCHModel(BaseModel):
         super().__init__(name="GARCH", **kwargs)
         self.p = p
         self.q = q
-        self.task = 'regression'
+        self.task = task or 'regression'
         self.fitted_model = None
         self.returns_data = None
         self.last_returns = None
+        self.classification_threshold = threshold  # used if task == 'classification'
+
+        # Exogenous feature support (mean model ARX)
+        self.use_exog_mean = bool(kwargs.get('use_exog_mean', True))
+        self.max_exog_features = int(kwargs.get('max_exog_features', 64))
+        self.exog_scaler: Optional[StandardScaler] = StandardScaler()
+        self.exog_feature_names: Optional[list] = None
 
         self.logger.info(f"GARCH({p}, {q}) model initialized")
 
@@ -43,11 +51,11 @@ class GARCHModel(BaseModel):
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray],
             y: Union[pd.Series, np.ndarray], **kwargs) -> 'GARCHModel':
-        """Fit GARCH model (alias for train)."""
+        """Fit GARCH model. For classification, we still fit volatility model."""
         self.train(X, y, **kwargs)
         return self
 
-    def train(self, X: Union[pd.DataFrame, np.ndarray],
+    def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
         Train GARCH model.
@@ -79,8 +87,41 @@ class GARCHModel(BaseModel):
 
             # Scale to percentage for stability
             returns_scaled = np.asarray(returns_data, dtype=float) * 100.0
+            # Prepare exogenous features for mean model (ARX)
+            exog_train = None
+            if X is not None and self.use_exog_mean:
+                try:
+                    if isinstance(X, np.ndarray):
+                        X_df = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
+                    else:
+                        X_df = X.copy()
+                    # Align lengths defensively
+                    n = min(len(X_df), len(returns_scaled))
+                    if n <= 10:
+                        self.logger.warning("Insufficient aligned samples for exogenous features; skipping exog")
+                        exog_train = None
+                    else:
+                        X_df = X_df.iloc[-n:]
+                        ret_vec = returns_scaled[-n:]
+                        # Basic feature cap to avoid ill-posed ARX when features are huge
+                        if X_df.shape[1] > self.max_exog_features:
+                            X_df = X_df.iloc[:, :self.max_exog_features]
+                        self.exog_feature_names = X_df.columns.tolist()
+                        # Fit scaler on training exog unless centralized scaling is enabled
+                        if bool(getattr(self, 'expects_scaled_input', False)):
+                            exog_train = X_df.values
+                        else:
+                            exog_train = self.exog_scaler.fit_transform(X_df.values)
+                        returns_scaled = ret_vec  # ensure same horizon
+                except Exception as e:
+                    self.logger.warning(f"Failed to prepare exogenous features for GARCH mean model: {e}")
+                    exog_train = None
 
-            model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+            if exog_train is not None:
+                model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
+            else:
+                model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+
             self.fitted_model = model.fit(disp='off')
             self.is_trained = True
 
@@ -114,7 +155,8 @@ class GARCHModel(BaseModel):
             steps: Optional number of steps to forecast
 
         Returns:
-            Array of volatility forecasts (in decimal units)
+            Array of predictions. For regression: volatility forecasts (decimal units).
+            For classification: probability of positive class (bull regime) by thresholding volatility.
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
@@ -128,20 +170,67 @@ class GARCHModel(BaseModel):
                 horizon = 1
 
         try:
-            forecast = self.fitted_model.forecast(horizon=horizon)
+            # Prepare exogenous for forecasting if model was trained with exog
+            exog_forecast = None
+            if self.exog_feature_names is not None and X is not None and self.use_exog_mean:
+                try:
+                    if isinstance(X, np.ndarray):
+                        X_df = pd.DataFrame(X, columns=self.exog_feature_names + [f'extra_{i}' for i in range(max(0, X.shape[1] - len(self.exog_feature_names)))] )
+                        X_df = X_df[self.exog_feature_names]
+                    else:
+                        # Select only trained exog columns; missing columns will raise
+                        X_df = X[self.exog_feature_names]
+                    # Ensure we only take the amount needed
+                    X_df = X_df.iloc[:horizon]
+                    if bool(getattr(self, 'expects_scaled_input', False)):
+                        exog_forecast = X_df.values
+                    else:
+                        exog_forecast = self.exog_scaler.transform(X_df.values)
+                except Exception as e:
+                    self.logger.warning(f"Failed to prepare exogenous features for forecast; proceeding without exog: {e}")
+                    exog_forecast = None
+
+            if exog_forecast is not None:
+                forecast = self.fitted_model.forecast(horizon=horizon, x=exog_forecast)
+            else:
+                forecast = self.fitted_model.forecast(horizon=horizon)
             volatility_forecast = np.sqrt(forecast.variance.values[-1, :])
             volatility_forecast = volatility_forecast / 100.0
+
+            if (self.task or 'regression') == 'classification':
+                # Lower volatility often associated with positive/neutral regime; map to class probability.
+                vol = np.asarray(volatility_forecast, dtype=float)
+                # Determine threshold: use provided or median of training vol if available
+                thr = self.classification_threshold
+                if thr is None:
+                    try:
+                        hist_vol = np.abs(np.asarray(self.returns_data, dtype=float))
+                        hist_vol = np.where(np.isfinite(hist_vol), hist_vol, np.nan)
+                        thr = np.nanmedian(np.abs(hist_vol))
+                    except Exception:
+                        thr = float(np.nanmedian(vol)) if np.isfinite(np.nanmedian(vol)) else float(np.nanmean(vol))
+                # Convert vol to probability: higher prob when vol below threshold
+                # Use a smooth logistic transform around the threshold
+                eps = 1e-9
+                scale = max(eps, float(np.nanstd(vol)) or 1e-3)
+                logits = -(vol - thr) / (scale + eps)
+                probs = 1.0 / (1.0 + np.exp(-logits))
+                return probs
+
             return volatility_forecast
         except Exception as e:
             self.logger.error(f"GARCH prediction failed: {e}")
             if self.last_returns is not None:
                 last_vol = float(np.std(self.last_returns))
+                if (self.task or 'regression') == 'classification':
+                    # map to neutral probability
+                    return np.full(horizon, 0.5)
                 return np.full(horizon, last_vol)
             return np.zeros(horizon)
 
     def evaluate(self, X: Union[pd.DataFrame, np.ndarray],
                  y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
-        """Evaluate the GARCH model with regression metrics."""
+        """Evaluate the GARCH model with regression or classification metrics."""
         if not self.is_trained:
             raise ValueError("Model must be trained before evaluation")
 
@@ -152,18 +241,40 @@ class GARCHModel(BaseModel):
         predictions = predictions[:min_len]
         y_true = y_true[:min_len]
 
-        mse = mean_squared_error(y_true, predictions)
-        mae = mean_absolute_error(y_true, predictions)
-        r2 = r2_score(y_true, predictions)
-
-        return {
-            'mse': mse,
-            'mae': mae,
-            'r2': r2,
-            'MSE': mse,
-            'MAE': mae,
-            'R2': r2,
-        }
+        if (self.task or 'regression') == 'classification':
+            # Convert probabilities to labels for metrics
+            try:
+                y_prob = np.asarray(predictions, dtype=float)
+                y_pred = (y_prob >= 0.5).astype(int)
+                y_true_int = y_true.astype(int)
+                from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+                return {
+                    'accuracy': float(accuracy_score(y_true_int, y_pred)),
+                    'f1': float(f1_score(y_true_int, y_pred, average='weighted', zero_division=0)),
+                    'precision': float(precision_score(y_true_int, y_pred, average='weighted', zero_division=0)),
+                    'recall': float(recall_score(y_true_int, y_pred, average='weighted', zero_division=0)),
+                    'logloss': np.nan,
+                }
+            except Exception as _:
+                return {
+                    'accuracy': 0.0,
+                    'f1': 0.0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'logloss': np.nan,
+                }
+        else:
+            mse = mean_squared_error(y_true, predictions)
+            mae = mean_absolute_error(y_true, predictions)
+            r2 = r2_score(y_true, predictions)
+            return {
+                'mse': mse,
+                'mae': mae,
+                'r2': r2,
+                'MSE': mse,
+                'MAE': mae,
+                'R2': r2,
+            }
 
     def get_model_summary(self) -> str:
         """Get model summary."""

@@ -33,9 +33,9 @@ class ModelFactory:
     _models: Dict[str, Type[BaseModel]] = {
         'arima': ARIMAModel,
         'garch': GARCHModel,
-        # Map legacy enhanced_arima to the modern ARIMAModel implementation
-        'enhanced_arima': ARIMAModel,
         'xgboost': XGBoostModel,
+        # Aliases
+        'xgb': XGBoostModel,
     }
     
     if LSTM_AVAILABLE:
@@ -47,6 +47,13 @@ class ModelFactory:
     @classmethod
     def create_model(cls, model_type: str, task: str = 'regression', **kwargs) -> BaseModel:
         """Create a model instance of the specified type."""
+        # Normalize aliases
+        model_type = (model_type or '').lower()
+        alias_map = {
+            'xgb': 'xgboost',
+        }
+        model_type = alias_map.get(model_type, model_type)
+
         if model_type not in cls._models:
             available_models = list(cls._models.keys())
             raise ValueError(f"Unknown model type '{model_type}'. Available: {available_models}")
@@ -57,11 +64,6 @@ class ModelFactory:
         # Handle model-specific parameters
         if model_type == 'arima':
             # ARIMA only supports regression
-            if task != 'regression':
-                logger.warning("ARIMA only supports regression tasks. Using regression.")
-            return model_class(**kwargs)
-        elif model_type == 'enhanced_arima':
-            # Backward compatibility: use the modern ARIMAModel for enhanced_arima requests
             if task != 'regression':
                 logger.warning("ARIMA only supports regression tasks. Using regression.")
             return model_class(**kwargs)
@@ -81,10 +83,8 @@ class ModelFactory:
                 pass
             return model_class(task=task, **kwargs)
         elif model_type == 'garch':
-            # GARCH is for volatility (regression)
-            if task != 'regression':
-                logger.warning("GARCH only supports regression tasks. Using regression.")
-            return model_class(**kwargs)
+            # GARCH supports regression and derived classification (via thresholding)
+            return model_class(task=task, **kwargs)
         elif model_type == 'stockmixer':
             # StockMixer supports both tasks
             return model_class(task=task, **kwargs)
@@ -109,7 +109,7 @@ def create_arima_model(**kwargs) -> ARIMAModel:
     return ARIMAModel(**kwargs)
 
 def create_enhanced_arima_model(**kwargs) -> ARIMAModel:
-    """Create a Modern ARIMA model (legacy enhanced_arima alias)."""
+    """[DEPRECATED] Enhanced ARIMA removed. Use create_arima_model instead."""
     return ARIMAModel(**kwargs)
 
 def create_xgboost_model(**kwargs) -> XGBoostModel:

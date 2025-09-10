@@ -13,28 +13,29 @@ from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 import pandas as pd
 import numpy as np
+import os
 
-# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+# Set suppression env vars BEFORE TF import
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
+os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
+os.environ.setdefault('ABSL_LOGLEVEL', '3')
+
+# Global TensorFlow device configuration to prevent automatic GPU usage
 try:
     import tensorflow as tf
-    
-    # Suppress TensorFlow warnings and errors
-    import os
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress warnings
-    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations
-    
+
     # Force CPU-only mode
     tf.config.set_soft_device_placement(False)
-    
+
     # Hide all GPUs from TensorFlow
     try:
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
             tf.config.set_visible_devices([], 'GPU')
-            print("TensorFlow: All GPUs hidden - forcing CPU-only mode")
     except Exception:
         pass
-    
+
     # Configure CPU devices
     try:
         cpus = tf.config.list_physical_devices('CPU')
@@ -43,11 +44,8 @@ try:
                 cpus[0],
                 [tf.config.LogicalDeviceConfiguration()]
             )
-            print("TensorFlow: CPU device configured")
     except Exception:
         pass
-    
-    print("TensorFlow device configuration: Forced CPU usage for deep learning models")
 except ImportError:
     pass
 
@@ -65,13 +63,12 @@ from .models.model_factory import ModelFactory
 # Import models conditionally to handle missing dependencies
 try:
     from .models.arima_model import ARIMAModel
-    from .models.enhanced_arima_model import EnhancedARIMAModel  # 🚀 NEW: Enhanced ARIMAX
     from .models.xgboost_model import XGBoostModel
     from .models.stockmixer_model import StockMixerModel
-    ARIMA_AVAILABLE = ENHANCED_ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
+    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
 except ImportError as e:
-    print(f"[WARNING] Some models not available: {e}")
-    ARIMA_AVAILABLE = ENHANCED_ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
+    logger.warning(f"Some models not available: {e}")
+    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
 
 try:
     from .models.lstm_model import LSTMModel
@@ -95,8 +92,8 @@ logger = logging.getLogger(__name__)
 
 # 🚀 24-CORE OPTIMIZATION: Global CPU optimization for all components
 import psutil
-cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
-logger.info(f"🚀 RISKPIPELINE: Detected {cpu_count}-core Intel i9-14900HX system!")
+cpu_count = psutil.cpu_count(logical=False)
+logger.debug(f"🚀 RISKPIPELINE: Detected {cpu_count}-core system")
 
 # Set global environment variables for maximum CPU utilization
 import os
@@ -108,8 +105,8 @@ os.environ['NUMEXPR_NUM_THREADS'] = str(cpu_count)
 os.environ['BLAS_NUM_THREADS'] = str(cpu_count)
 os.environ['LAPACK_NUM_THREADS'] = str(cpu_count)
 
-logger.info(f"⚡ Environment variables set for {cpu_count}-core optimization")
-logger.info(f"💪 All math libraries will use maximum CPU power!")
+logger.debug(f"⚡ Environment variables set for {cpu_count}-core optimization")
+logger.debug(f"💪 All math libraries will use maximum CPU power!")
 
 
 class RiskPipeline:
@@ -268,7 +265,8 @@ class RiskPipeline:
     def run_complete_pipeline(self, assets: Optional[List[str]] = None, 
                              models: Optional[List[str]] = None,
                              save_models: bool = True, 
-                             run_shap: bool = True, 
+                             run_shap: bool = True,
+                             run_cross_transfer: bool = False,
                              **kwargs) -> Dict[str, Any]:
         """
         Run complete pipeline with all features including experiment management.
@@ -303,9 +301,9 @@ class RiskPipeline:
             # Use configured models if none provided
             if models is None:
                 try:
-                    models = list(getattr(self.config, 'models_to_run', [])) or ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
+                    models = list(getattr(self.config, 'models_to_run', [])) or ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
                 except Exception:
-                    models = ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
+                    models = ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
             
             logger.info(f"Processing assets: {assets}")
             logger.info(f"Running models: {models}")
@@ -353,11 +351,13 @@ class RiskPipeline:
                 
                 classification_results = {}
                 if getattr(self.config, 'tasks', None) is None or getattr(self.config.tasks, 'classification_enabled', True):
+                    # Exclude regression-only models from classification runs (allow garch now)
+                    classification_models = [m for m in models if m not in ['arima', 'enhanced_arima']]
                     classification_results = self._run_models(
                         features=asset_features,
                         asset=asset,
                         task='classification',
-                        models=[m for m in models if m != 'arima'],  # ARIMA doesn't support classification
+                        models=classification_models,
                         save_models=save_models
                     )
                 
@@ -369,13 +369,23 @@ class RiskPipeline:
                 # Run SHAP analysis if requested
                 if run_shap:
                     logger.info(f"Running SHAP analysis for {asset}")
-                    # Analyze both tasks using the analyzer's public API
-                    shap_results[asset] = self.shap_analyzer._analyze_task_models(
-                        asset=asset,
-                        task_results={**results[asset].get('regression', {}), **results[asset].get('classification', {})},
-                        features=asset_features,
-                        task='regression'
-                    )
+                    shap_results[asset] = {}
+                    # Analyze regression models (if any)
+                    if isinstance(results[asset].get('regression'), dict) and results[asset]['regression']:
+                        shap_results[asset]['regression'] = self.shap_analyzer._analyze_task_models(
+                            asset=asset,
+                            task_results=results[asset]['regression'],
+                            features=asset_features,
+                            task='regression'
+                        )
+                    # Analyze classification models (if any)
+                    if isinstance(results[asset].get('classification'), dict) and results[asset]['classification']:
+                        shap_results[asset]['classification'] = self.shap_analyzer._analyze_task_models(
+                            asset=asset,
+                            task_results=results[asset]['classification'],
+                            features=asset_features,
+                            task='classification'
+                        )
             
             # Store results centrally
             self.results_manager.store_results(results)
@@ -385,6 +395,18 @@ class RiskPipeline:
             # Generate visualizations
             logger.info("Generating visualizations")
             self._generate_comprehensive_visualizations(results, shap_results if run_shap else {})
+
+            # Optional: run cross-asset transfer matrix within main pipeline
+            if run_cross_transfer:
+                try:
+                    logger.info("Running cross-asset transfer matrix as part of main pipeline")
+                    _ = self.run_cross_asset_matrix(
+                        assets=assets,
+                        models=models,
+                        task='regression'
+                    )
+                except Exception as _xfer_err:
+                    logger.warning(f"Cross-asset transfer matrix skipped due to error: {_xfer_err}")
             
             # Save experiment metadata
             self.results_manager.save_experiment_metadata({
@@ -532,6 +554,135 @@ class RiskPipeline:
                 )
             transfer_results[m] = per_target
         return transfer_results
+
+    def run_cross_asset_matrix(self,
+                               assets: Optional[List[str]] = None,
+                               models: Optional[List[str]] = None,
+                               task: str = 'regression',
+                               save_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+        """Evaluate inter-stock transfer: train per source asset, test on all targets.
+
+        Returns nested dict and writes a CSV heatmap-style table to experiments dir.
+        """
+        logger.info("Running cross-asset transfer matrix experiment")
+        if assets is None:
+            assets = list(self.config.data.all_assets)
+        if not assets:
+            return {'error': 'No assets provided'}
+        if models is None:
+            models = ['xgboost', 'lstm']
+
+        # Load data once
+        data = self.data_loader.download_data(
+            symbols=assets,
+            start_date=self.config.data.start_date,
+            end_date=self.config.data.end_date
+        )
+        feats = self.feature_engineer.create_features(data=data)
+
+        # Prepare output dir
+        exp_dir = Path(self.results_manager.base_dir) / self.experiment_name
+        matrices_dir = exp_dir / 'transfer_matrices'
+        matrices_dir.mkdir(parents=True, exist_ok=True)
+        if save_dir is None:
+            save_dir = matrices_dir
+        save_dir = Path(save_dir)
+
+        all_results: Dict[str, Any] = {}
+        import pandas as _pd
+
+        for m in models:
+            logger.info(f"Cross-asset matrix for model: {m}")
+            # Build per-source models and evaluate on all targets
+            rows = []
+            per_model_results: Dict[str, Any] = {}
+
+            for src in assets:
+                if src not in feats or feats[src]['features'].empty:
+                    continue
+                X_src = feats[src]['features']
+                y_src = feats[src]['volatility_target'] if task == 'regression' else feats[src]['regime_target']
+                X_src_clean, y_src_clean = self.validator.clean_data_for_training(X_src, y_src)
+
+                # Create model instance
+                try:
+                    params = self.config.get_model_config(m)
+                except Exception:
+                    params = {}
+                model = ModelFactory.create_model(
+                    model_type=m,
+                    task=task,
+                    input_shape=X_src_clean.shape,
+                    n_classes=(len(_pd.Series(y_src_clean).unique()) if task == 'classification' else None),
+                    **params
+                )
+                if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):
+                    try:
+                        model.build_model(X_src_clean.shape)
+                    except Exception:
+                        pass
+                # Fit on source asset only
+                model.fit(X_src_clean, y_src_clean)
+
+                per_target: Dict[str, Any] = {}
+                for tgt in assets:
+                    if tgt not in feats:
+                        continue
+                    X_t = feats[tgt]['features']
+                    y_t = feats[tgt]['volatility_target'] if task == 'regression' else feats[tgt]['regime_target']
+                    X_t_clean, y_t_clean = self.validator.clean_data_for_training(X_t, y_t)
+                    splits = self.validator.split(X_t_clean)
+                    eval_res = self.validator.evaluate_model(
+                        model=model,
+                        X=X_t_clean,
+                        y=y_t_clean,
+                        splits=splits,
+                        asset=tgt,
+                        model_type=m,
+                        regimes=feats[tgt].get('regime_target') if task == 'regression' else None
+                    )
+                    per_target[tgt] = eval_res
+
+                    # Row for compact DataFrame
+                    metrics = eval_res.get('metrics', {}) if isinstance(eval_res, dict) else {}
+                    row = {'Source': src, 'Target': tgt, 'Model': m, 'Task': task}
+                    row.update(metrics)
+                    rows.append(row)
+
+                per_model_results[src] = per_target
+
+            # Save per-model results and CSV
+            all_results[m] = per_model_results
+            try:
+                df = _pd.DataFrame(rows)
+                csv_path = save_dir / f"transfer_{m}_{task}.csv"
+                df.to_csv(csv_path, index=False)
+                logger.info(f"Saved transfer table to {csv_path}")
+
+                # Optional pivot heatmap for regression R2 if present
+                try:
+                    if task == 'regression' and 'R2' in df.columns:
+                        pivot = df.pivot_table(index='Source', columns='Target', values='R2', aggfunc='mean')
+                    elif task == 'classification' and 'Accuracy' in df.columns:
+                        pivot = df.pivot_table(index='Source', columns='Target', values='Accuracy', aggfunc='mean')
+                    else:
+                        pivot = None
+                    if pivot is not None:
+                        pivot.to_csv(save_dir / f"transfer_{m}_{task}_pivot.csv")
+                except Exception:
+                    pass
+
+                # Plot via visualizer if available
+                try:
+                    if hasattr(self.visualizer, 'plot_transfer_matrix'):
+                        self.visualizer.plot_transfer_matrix(df, metric=('R2' if task == 'regression' else 'Accuracy'),
+                                                             save_path=save_dir / f"transfer_{m}_{task}.png")
+                except Exception as _e:
+                    logger.warning(f"Transfer matrix plotting skipped: {_e}")
+            except Exception as e:
+                logger.warning(f"Failed to save transfer CSV for {m}: {e}")
+
+        return all_results
     
     def train_models_only(self, assets: List[str], models: List[str], save: bool = True) -> Dict[str, Any]:
         """
@@ -807,10 +958,12 @@ class RiskPipeline:
                 
                 # Save model if requested
                 if save_models:
+                    # Use the model's own task attribute if available (e.g., GARCH is regression-only)
+                    save_task = getattr(model, 'task', task) or task
                     self.results_manager.save_model_results(
                         asset=asset,
                         model_name=model_type,
-                        task=task,
+                        task=save_task,
                         metrics=model_results.get('metrics', {}),
                         predictions={
                             'actual': model_results.get('all_actuals', []),
@@ -1068,8 +1221,6 @@ __all__ = [
 # Add available models to exports
 if ARIMA_AVAILABLE:
     __all__.append('ARIMAModel')
-if ENHANCED_ARIMA_AVAILABLE:
-    __all__.append('EnhancedARIMAModel')
 if XGBOOST_AVAILABLE:
     __all__.append('XGBoostModel')
 if STOCKMIXER_AVAILABLE:
