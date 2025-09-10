@@ -1,25 +1,27 @@
 """
-StockMixer model implementation for RiskPipeline.
+StockMixer model implementation (AAAI-24) for RiskPipeline.
+Implements three-stage mixing: Indicator, Time (causal multi-scale), Stock (market-aware).
 """
 
-import logging
 from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
+
 try:
-    import tensorflow as tf  # Optional dependency
+    import tensorflow as tf
     TF_AVAILABLE = True
 except Exception:
     tf = None  # type: ignore
     TF_AVAILABLE = False
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
-# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+from sklearn.model_selection import train_test_split
+
+import psutil
+
+# TensorFlow device/threading configuration (CPU-only, deterministic)
 if TF_AVAILABLE:
     tf.config.set_soft_device_placement(False)
     try:
-        # Hide all GPUs from TensorFlow to avoid stray GPU ops during inference
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
             tf.config.set_visible_devices([], 'GPU')
@@ -29,429 +31,318 @@ if TF_AVAILABLE:
         cpus = tf.config.list_physical_devices('CPU')
         if cpus:
             tf.config.set_logical_device_configuration(
-                cpus[0],
-                [tf.config.LogicalDeviceConfiguration()]
+                cpus[0], [tf.config.LogicalDeviceConfiguration()]
             )
     except Exception:
         pass
-
-# 🚀 24-CORE OPTIMIZATION: Use all cores for TensorFlow operations
-import psutil
-cpu_count = psutil.cpu_count(logical=False)
-if TF_AVAILABLE:
-    tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
-    tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
+    threads = psutil.cpu_count(logical=False) or 1
+    tf.config.threading.set_inter_op_parallelism_threads(threads)
+    tf.config.threading.set_intra_op_parallelism_threads(threads)
 
 from .base_model import BaseModel
 
 
+class IndicatorMixingBlock(tf.keras.layers.Layer):
+    def __init__(self, indicator_dim: int, hidden_dim: Optional[int] = None, dropout: float = 0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.indicator_dim = indicator_dim
+        self.hidden_dim = hidden_dim or indicator_dim
+        self.layer_norm = tf.keras.layers.LayerNormalization()
+        self.dense1 = tf.keras.layers.Dense(self.hidden_dim, activation='relu')
+        self.dropout = tf.keras.layers.Dropout(dropout)
+        self.dense2 = tf.keras.layers.Dense(indicator_dim)
+
+    def call(self, inputs, training=None):
+        x = self.layer_norm(inputs)
+        mixed = self.dense1(x)
+        mixed = self.dropout(mixed, training=training)
+        mixed = self.dense2(mixed)
+        return inputs + mixed
+
+
+class TimeMixingBlock(tf.keras.layers.Layer):
+    def __init__(self, time_dim: int, patch_sizes: List[int] = [1, 2, 4], hidden_dim: Optional[int] = None, dropout: float = 0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.time_dim = time_dim
+        self.patch_sizes = patch_sizes
+        self.hidden_dim = hidden_dim or time_dim
+        self.patch_processors = {}
+        for patch_size in patch_sizes:
+            compressed_dim = max(1, time_dim // patch_size)
+            self.patch_processors[patch_size] = {
+                'layer_norm': tf.keras.layers.LayerNormalization(),
+                'dense1': tf.keras.layers.Dense(compressed_dim, activation='relu'),
+                'dropout': tf.keras.layers.Dropout(dropout),
+                'dense2': tf.keras.layers.Dense(compressed_dim)
+            }
+        self.fusion_dense = tf.keras.layers.Dense(time_dim)
+
+    def _create_causal_mask(self, seq_len: Union[int, tf.Tensor]):
+        if isinstance(seq_len, int):
+            mask = np.triu(np.ones((seq_len, seq_len)), k=0).astype(np.float32)
+            return tf.constant(mask)
+        seq_len_int = tf.cast(seq_len, tf.int32)
+        row = tf.range(seq_len_int)[:, None]
+        col = tf.range(seq_len_int)[None, :]
+        mask = tf.cast(col >= row, tf.float32)
+        return mask
+
+    def _apply_causal_mixing(self, x, mask):
+        # x: [B, T, F], mask: [T, T]
+        mixed = tf.linalg.matmul(mask, x)
+        return mixed
+
+    def call(self, inputs, training=None):
+        batch_size = tf.shape(inputs)[0]
+        seq_len = tf.shape(inputs)[1]
+
+        patch_outputs = []
+        for patch_size in self.patch_sizes:
+            if patch_size > 1:
+                pad_len = (patch_size - seq_len % patch_size) % patch_size
+                padded = tf.pad(inputs, [[0, 0], [0, pad_len], [0, 0]])
+                new_seq_len = tf.shape(padded)[1]
+                patches = tf.reshape(padded, [batch_size, new_seq_len // patch_size, patch_size, -1])
+                patch_input = tf.reduce_mean(patches, axis=2)
+            else:
+                patch_input = inputs
+
+            patch_len = tf.shape(patch_input)[1]
+            scale_mask = self._create_causal_mask(patch_len)
+            mixed_patch = self._apply_causal_mixing(patch_input, scale_mask)
+
+            processor = self.patch_processors[patch_size]
+            x = processor['layer_norm'](mixed_patch)
+            x = processor['dense1'](x)
+            x = processor['dropout'](x, training=training)
+            x = processor['dense2'](x)
+            processed_patch = mixed_patch + x
+
+            if patch_size > 1:
+                upsampled = tf.repeat(processed_patch, patch_size, axis=1)
+                upsampled = upsampled[:, :seq_len, :]
+                patch_outputs.append(upsampled)
+            else:
+                patch_outputs.append(processed_patch)
+
+        concatenated = tf.concat(patch_outputs, axis=-1)
+        fused = self.fusion_dense(concatenated)
+        return fused
+
+
+class StockMixingBlock(tf.keras.layers.Layer):
+    def __init__(self, n_stocks: int, market_dim: int = 32, dropout: float = 0.1, **kwargs):
+        super().__init__(**kwargs)
+        self.layer_norm = tf.keras.layers.LayerNormalization()
+        self.stock_to_market = tf.keras.layers.Dense(market_dim, activation='relu')
+        self.market_dropout = tf.keras.layers.Dropout(dropout)
+        self.market_to_stock = tf.keras.layers.Dense(n_stocks)
+
+    def call(self, inputs, training=None):
+        # inputs: [B, S, F]
+        x = self.layer_norm(inputs)
+        market_states = tf.reduce_mean(x, axis=1)
+        market_states = self.stock_to_market(market_states)
+        market_states = self.market_dropout(market_states, training=training)
+        market_influence = self.market_to_stock(market_states)
+        market_influence = tf.expand_dims(market_influence, axis=-1)
+        feature_dim = tf.shape(inputs)[-1]
+        market_influence = tf.tile(market_influence, [1, 1, feature_dim])
+        return inputs + market_influence
+
+
+class StockMixerNet(tf.keras.Model):
+    def __init__(self, n_stocks: int, n_indicators: int, sequence_length: int,
+                 indicator_hidden_dim: int = 64, time_patch_sizes: List[int] = [1, 2, 4],
+                 market_dim: int = 32, dropout: float = 0.1, num_classes: int = 1, task: str = 'regression', **kwargs):
+        super().__init__(**kwargs)
+        self.n_stocks = n_stocks
+        self.n_indicators = n_indicators
+        self.sequence_length = sequence_length
+        self.task = task
+        self.num_classes = num_classes
+
+        self.indicator_mixing = IndicatorMixingBlock(indicator_dim=n_indicators, hidden_dim=indicator_hidden_dim, dropout=dropout)
+        self.time_mixing = TimeMixingBlock(time_dim=sequence_length, patch_sizes=time_patch_sizes, dropout=dropout)
+        self.stock_mixing = StockMixingBlock(n_stocks=n_stocks, market_dim=market_dim, dropout=dropout)
+        if task == 'regression':
+            self.prediction_head = tf.keras.layers.Dense(1, activation='linear')
+        else:
+            self.prediction_head = tf.keras.layers.Dense(num_classes, activation='softmax')
+
+    def call(self, inputs, training=None):
+        # inputs: [B, S, T, I]
+        batch_size = tf.shape(inputs)[0]
+        reshaped_for_ind = tf.reshape(inputs, [-1, self.n_indicators])
+        mixed_ind = self.indicator_mixing(reshaped_for_ind, training=training)
+        mixed_ind = tf.reshape(mixed_ind, [batch_size, self.n_stocks, self.sequence_length, self.n_indicators])
+
+        x = tf.transpose(mixed_ind, [0, 1, 3, 2])
+        x = tf.reshape(x, [-1, self.sequence_length, 1])
+        mixed_time = self.time_mixing(x, training=training)
+        mixed_time = tf.reshape(mixed_time, [batch_size, self.n_stocks, self.n_indicators, self.sequence_length])
+        mixed_time = tf.transpose(mixed_time, [0, 1, 2, 3])
+        mixed_time = tf.transpose(mixed_time, [0, 1, 3, 2])
+
+        stock_features = tf.reshape(mixed_time, [batch_size, self.n_stocks, -1])
+        mixed_stocks = self.stock_mixing(stock_features, training=training)
+        pooled = tf.reduce_mean(mixed_stocks, axis=1)
+        preds = self.prediction_head(pooled)
+        return preds
+
+
 class StockMixerModel(BaseModel):
-    """StockMixer model with parallel pathways for temporal, indicator, and cross-stock mixing."""
-    
+    """Wrapper integrating StockMixerNet with RiskPipeline BaseModel."""
+
     def __init__(self, task: str = 'regression', **kwargs):
-        """
-        Initialize StockMixer model.
-        
-        Args:
-            task: 'regression' or 'classification'
-            **kwargs: Additional parameters
-        """
         super().__init__(name="StockMixer", **kwargs)
         self.task = task
-        self.temporal_units = kwargs.get('temporal_units', 64)
-        self.indicator_units = kwargs.get('indicator_units', 64)
-        self.cross_stock_units = kwargs.get('cross_stock_units', 64)
-        self.fusion_units = kwargs.get('fusion_units', 128)
-        self.dropout = kwargs.get('dropout', 0.2)
-        self.input_shape = None
-        self.model = None
-        self.scaler = StandardScaler()
-        
-        # Training parameters
-        self.params = {
-            'batch_size': kwargs.get('batch_size', 16),
-            'epochs': kwargs.get('epochs', 100),
-            'validation_split': kwargs.get('validation_split', 0.2),
-            'early_stopping_patience': kwargs.get('early_stopping_patience', 5),
-            'reduce_lr_patience': kwargs.get('reduce_lr_patience', 5),
-            'learning_rate': kwargs.get('learning_rate', 0.001)
-        }
-        
-        self.logger.info(f"StockMixer model initialized with pathways: "
-                        f"temporal={self.temporal_units}, indicator={self.indicator_units}, "
-                        f"cross_stock={self.cross_stock_units}, fusion={self.fusion_units}")
-    
+        # architecture params
+        self.n_stocks = int(kwargs.get('n_stocks', 1))
+        self.n_indicators = int(kwargs.get('n_indicators', 4))
+        self.sequence_length = int(kwargs.get('sequence_length', 30))
+        self.num_classes = int(kwargs.get('num_classes', 2 if task == 'classification' else 1))
+        self.indicator_hidden_dim = int(kwargs.get('indicator_hidden_dim', 64))
+        self.time_patch_sizes = list(kwargs.get('time_patch_sizes', [1, 2, 4]))
+        self.market_dim = int(kwargs.get('market_dim', 32))
+        self.dropout = float(kwargs.get('dropout', 0.1))
+        # training params
+        self.params.update({
+            'batch_size': int(kwargs.get('batch_size', 32)),
+            'epochs': int(kwargs.get('epochs', 100)),
+            'learning_rate': float(kwargs.get('learning_rate', 1e-3)),
+            'validation_split': float(kwargs.get('validation_split', 0.2)),
+        })
+        self.model: Optional[tf.keras.Model] = None if TF_AVAILABLE else None
+
+    def _ensure_4d(self, X: np.ndarray) -> np.ndarray:
+        # Accept [N,T,F] or [N,S,T,F]; convert to [N,S,T,F]
+        if X.ndim == 3:
+            return X.reshape(X.shape[0], 1, X.shape[1], X.shape[2])
+        if X.ndim == 4:
+            return X
+        raise ValueError(f"Unsupported input shape {X.shape}; expected [N,T,F] or [N,S,T,F]")
+
     def build_model(self, input_shape: Tuple[int, ...]) -> 'StockMixerModel':
-        """Build the StockMixer model architecture with GPU fallback."""
         if not TF_AVAILABLE:
-            raise ImportError("TensorFlow is not available. Install TensorFlow or disable StockMixer model.")
-        self.input_shape = input_shape
-        
-        # FIXED: Handle different input shapes - properly handle 2D input
-        if len(input_shape) == 2:
-            # [N, F] - use as is for tabular data
-            self.input_shape = input_shape
-            self.logger.info(f"Using 2D input shape for tabular data: {self.input_shape}")
-        elif len(input_shape) == 3:
-            # [N, T, F] - flatten to [N, T*F] for tabular processing
-            self.input_shape = (input_shape[0], input_shape[1] * input_shape[2])
-            self.logger.info(f"Flattening 3D input {input_shape} to 2D {self.input_shape}")
+            raise ImportError("TensorFlow is not available. Install TensorFlow to use StockMixer.")
+
+        # Infer dims from input_shape
+        if len(input_shape) == 3:
+            # [N,T,F]
+            self.n_stocks = 1
+            self.sequence_length = int(input_shape[1])
+            self.n_indicators = int(input_shape[2])
+        elif len(input_shape) == 4:
+            # [N,S,T,F]
+            self.n_stocks = int(input_shape[1])
+            self.sequence_length = int(input_shape[2])
+            self.n_indicators = int(input_shape[3])
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
-        
-        # FIXED: Force CPU mode to avoid device conflicts
-        device = '/CPU:0'
-        self.logger.info(f"Using {device} for StockMixer to avoid device conflicts")
-        
-        try:
-            with tf.device(device):
-                # FIXED: Build model with correct input shape for tabular data
-                inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
-                
-                # Tabular data processing layers with L2 weight decay (kernel_regularizer)
-                reg = tf.keras.regularizers.l2(1e-4)
-                x = tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=reg)(inputs)
-                x = tf.keras.layers.Dropout(0.2)(x)
-                x = tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=reg)(x)
-                x = tf.keras.layers.Dropout(0.2)(x)
-                x = tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=reg)(x)
-                x = tf.keras.layers.Dropout(0.2)(x)
-                
-                # Output layer
-                if self.task == 'classification':
-                    # FIXED: Use 2 classes for binary classification (regime prediction)
-                    outputs = tf.keras.layers.Dense(2, activation='softmax')(x)  # 2 classes for binary classification
-                else:
-                    outputs = tf.keras.layers.Dense(1, activation='linear')(x)
-                
-                self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
-                
-                # Compile model
-                if self.task == 'classification':
-                    self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(
-                            learning_rate=0.001,
-                            clipnorm=1.0
-                        ),
-                        loss='sparse_categorical_crossentropy',
-                        metrics=['accuracy']
-                    )
-                else:
-                    self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(
-                            learning_rate=0.001,
-                            clipnorm=1.0
-                        ),
-                        loss='huber',  # Use Huber loss for robustness
-                        metrics=['mae', 'mse']
-                    )
-                
-        except Exception as build_error:
-            self.logger.error(f"StockMixer build failed: {build_error}")
-            raise RuntimeError(f"Failed to build StockMixer model: {build_error}")
-        
-        self.logger.info(f"StockMixer model built successfully with input shape: {self.input_shape}")
-        return self
-    
-    def train(self, X: Union[pd.DataFrame, np.ndarray], 
-              y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
-        """
-        Train StockMixer model.
-        
-        Args:
-            X: Training features
-            y: Training targets
-            **kwargs: Additional training parameters
-            
-        Returns:
-            Training results dictionary
-        """
-        if not TF_AVAILABLE:
-            raise ImportError("TensorFlow is not available. Install TensorFlow or disable StockMixer model.")
-        if not self.model:
-            raise ValueError("Model must be built before training. Call build_model() first.")
-        
-        # Validate input
-        X, y = self._validate_input(X, y)
-        
-        # ROLLBACK: Relaxed input normalization to prevent over-aggressive filtering
-        try:
-            # Check for extreme values in features - RELAXED from 100 to 1000
-            X_abs = np.abs(X)
-            if np.any(X_abs > 1000):  # ROLLBACK: Increased from 100 to 1000
-                self.logger.warning(f"Large feature values detected: max={np.max(X_abs):.2f}, min={np.min(X_abs):.2f}")
-                # Clip extreme values to prevent training instability - RELAXED clipping
-                X = np.clip(X, -1000, 1000)  # ROLLBACK: Increased from [-100, 100] to [-1000, 1000]
-                self.logger.info("Clipped extreme feature values to [-1000, 1000]")
-            
-            # Check for NaN or infinite values
-            if np.any(np.isnan(X)) or np.any(np.isinf(X)):
-                self.logger.error("NaN or infinite values detected in features")
-                raise ValueError("Features contain NaN or infinite values")
-            
-            # Check target values
-            if np.any(np.isnan(y)) or np.any(np.isinf(y)):
-                self.logger.error("NaN or infinite values detected in targets")
-                raise ValueError("Targets contain NaN or infinite values")
-            
-            # Log input statistics for debugging
-            self.logger.info(f"Input X stats: shape={X.shape}, mean={np.mean(X):.4f}, std={np.std(X):.4f}")
-            self.logger.info(f"Target y stats: shape={y.shape}, mean={np.mean(y):.4f}, std={np.std(y):.4f}")
-            
-        except Exception as validation_error:
-            self.logger.error(f"Input validation failed: {validation_error}")
-            raise RuntimeError(f"Input validation failed: {validation_error}")
-        
-        try:
-            # FIXED: Ensure X has the right shape for StockMixer model architecture
-            if X.ndim == 2:
-                # [N, F] - use as is for tabular data
-                X_reshaped = X
-                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
-            elif X.ndim == 3:
-                # [N, T, F] - flatten to [N, T*F] for tabular processing
-                X_reshaped = X.reshape(X.shape[0], -1)
-                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
-            else:
-                raise ValueError(f"Unsupported input shape: {X.shape}")
-            
-            # Ensure y has the right shape
-            if y.ndim == 1:
-                y_reshaped = y.values.reshape(-1, 1) if isinstance(y, pd.Series) else y.reshape(-1, 1)
-            else:
-                y_reshaped = y
-            
-            # Split data
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_reshaped, y_reshaped, test_size=0.2, random_state=42
+
+        with tf.device('/CPU:0'):
+            net = StockMixerNet(
+                n_stocks=self.n_stocks,
+                n_indicators=self.n_indicators,
+                sequence_length=self.sequence_length,
+                indicator_hidden_dim=self.indicator_hidden_dim,
+                time_patch_sizes=self.time_patch_sizes,
+                market_dim=self.market_dim,
+                dropout=self.dropout,
+                num_classes=self.num_classes,
+                task=self.task,
             )
-            # Fit scaler on train only, transform val
-            try:
-                X_train = self.scaler.fit_transform(X_train)
-                X_val = self.scaler.transform(X_val)
-                self.logger.info("Applied StandardScaler (fit on train) to StockMixer features")
-            except Exception:
-                pass
-            
-            # FIXED: Train on CPU to match model device
-            with tf.device('/CPU:0'):
-                # Training callbacks
-                callbacks = [
-                    tf.keras.callbacks.EarlyStopping(
-                        monitor='val_loss', patience=10, restore_best_weights=True
-                    ),
-                    tf.keras.callbacks.ReduceLROnPlateau(
-                        monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
-                    )
-                ]
-                
-                # Train the model
-                history = self.model.fit(
-                    X_train, y_train,
-                    validation_data=(X_val, y_val),
-                    epochs=100,
-                    batch_size=128,
-                    callbacks=callbacks,
-                    verbose=0
-                )
-            
-            # Store training history
-            self.training_history = history.history
-            
-            # Mark as trained
-            self.is_trained = True
-            
-            # Calculate metrics
-            train_loss = history.history['loss'][-1]
-            val_loss = history.history['val_loss'][-1]
-            
-            if self.task == 'classification':
-                train_acc = history.history['accuracy'][-1]
-                val_acc = history.history['val_accuracy'][-1]
-                metrics = {
-                    'train_accuracy': train_acc,
-                    'val_accuracy': val_acc,
-                    'train_loss': train_loss,
-                    'val_loss': val_loss
-                }
+            # Build Keras functional wrapper for compile/fit
+            inputs = tf.keras.Input(shape=(self.n_stocks, self.sequence_length, self.n_indicators))
+            outputs = net(inputs)
+            self.model = tf.keras.Model(inputs=inputs, outputs=outputs, name='StockMixer')
+
+            if self.task == 'regression':
+                loss = 'mse'
+                metrics = ['mae']
             else:
-                train_mae = history.history['mae'][-1]
-                val_mae = history.history['val_mae'][-1]
-                metrics = {
-                    'train_mae': train_mae,
-                    'val_mae': val_mae,
-                    'train_loss': train_loss,
-                    'val_loss': val_loss
-                }
-            
-            self.logger.info(f"StockMixer training completed successfully. Final val_loss: {val_loss:.4f}")
-            return metrics
-            
-        except Exception as e:
-            self.logger.error(f"StockMixer training failed: {e}")
-            raise RuntimeError(f"StockMixer training failed: {e}")
-    
-    def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
-        """
-        Make predictions with StockMixer model.
-        
-        Args:
-            X: Input features
-            
-        Returns:
-            Predictions array
-        """
+                loss = 'sparse_categorical_crossentropy'
+                metrics = ['accuracy']
+            self.model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=self.params['learning_rate'], clipnorm=1.0),
+                loss=loss,
+                metrics=metrics,
+            )
+
+        return self
+
+    def train(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         if not TF_AVAILABLE:
-            raise ImportError("TensorFlow is not available. Install TensorFlow or disable StockMixer model.")
+            raise ImportError("TensorFlow is not available. Install TensorFlow to use StockMixer.")
+        if self.model is None:
+            # Build from observed data shape
+            X_arr, y_arr = self._validate_input(X, y)
+            self.build_model(X_arr.shape)
+        else:
+            X_arr, y_arr = self._validate_input(X, y)
+
+        X4 = self._ensure_4d(X_arr)
+
+        if np.any(np.isnan(X4)) or np.any(np.isinf(X4)):
+            raise ValueError("Features contain NaN or infinite values")
+        if np.any(np.isnan(y_arr)) or np.any(np.isinf(y_arr)):
+            raise ValueError("Targets contain NaN or infinite values")
+
+        # Train/val split
+        idx = np.arange(X4.shape[0])
+        train_idx, val_idx = train_test_split(idx, test_size=self.params['validation_split'], random_state=42)
+        X_train, X_val = X4[train_idx], X4[val_idx]
+        y_train, y_val = y_arr[train_idx], y_arr[val_idx]
+
+        with tf.device('/CPU:0'):
+            history = self.model.fit(
+                X_train,
+                y_train,
+                validation_data=(X_val, y_val),
+                epochs=int(kwargs.get('epochs', self.params['epochs'])),
+                batch_size=int(kwargs.get('batch_size', self.params['batch_size'])),
+                verbose=0,
+            )
+
+        self.training_history = history.history
+        self.is_trained = True
+
+        result: Dict[str, Any] = {
+            'train_loss': history.history['loss'][-1],
+            'val_loss': history.history['val_loss'][-1],
+        }
+        if self.task == 'classification':
+            result.update({
+                'train_accuracy': history.history.get('accuracy', [np.nan])[-1],
+                'val_accuracy': history.history.get('val_accuracy', [np.nan])[-1],
+            })
+        else:
+            result.update({
+                'train_mae': history.history.get('mae', [np.nan])[-1],
+                'val_mae': history.history.get('val_mae', [np.nan])[-1],
+            })
+        return result
+
+    def predict(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow is not available. Install TensorFlow to use StockMixer.")
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
-        
-        # Validate input
-        X, _ = self._validate_input(X)
-        
-        try:
-            # FIXED: Ensure X has the right shape for StockMixer model architecture
-            if X.ndim == 2:
-                # [N, F] - use as is for tabular data
-                X_reshaped = X
-                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
-            elif X.ndim == 3:
-                # [N, T, F] - flatten to [N, T*F] for tabular processing
-                X_reshaped = X.reshape(X.shape[0], -1)
-                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
-            else:
-                raise ValueError(f"Unsupported input shape: {X.shape}")
-            
-            # Scale features using fitted scaler
-            try:
-                X_reshaped = self.scaler.transform(X_reshaped)
-            except Exception:
-                pass
 
-            # FIXED: Force CPU device context during prediction to match training
-            with tf.device('/CPU:0'):
-                # Make predictions
-                predictions = self.model.predict(X_reshaped, verbose=0)
-            
-            # Reshape predictions to match expected output
-            if self.task == 'classification':
-                # Return class predictions
-                return np.argmax(predictions, axis=1)
-            else:
-                # Return regression predictions
-                return predictions.flatten()
-                
-        except Exception as e:
-            self.logger.error(f"StockMixer prediction failed: {e}")
-            raise RuntimeError(f"StockMixer prediction failed: {e}")
-    
-    def evaluate(self, X: Union[pd.DataFrame, np.ndarray], 
-                y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
-        """
-        Evaluate StockMixer model.
-        
-        Args:
-            X: Test features
-            y: Test targets
-            
-        Returns:
-            Dictionary containing evaluation metrics
-        """
+        X_arr, _ = self._validate_input(X)
+        X4 = self._ensure_4d(X_arr)
+        with tf.device('/CPU:0'):
+            preds = self.model.predict(X4, verbose=0)
+        if self.task == 'classification':
+            return np.argmax(preds, axis=1)
+        return preds.flatten()
+
+    def evaluate(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
         if not self.is_trained:
             raise ValueError("Model must be trained before evaluation")
-        
-        # Validate input
-        X, y = self._validate_input(X, y)
-        
-        try:
-            # Make predictions
-            y_pred = self.predict(X)
-            
-            # Calculate metrics
-            if self.task == 'classification':
-                metrics = self._calculate_classification_metrics(y, y_pred)
-            else:
-                metrics = self._calculate_regression_metrics(y, y_pred)
-            
-            self.logger.info(f"StockMixer evaluation completed")
-            
-            return metrics
-            
-        except Exception as e:
-            self.logger.error(f"StockMixer evaluation failed: {e}")
-            if self.task == 'classification':
-                return {
-                    'Accuracy': 0.0,
-                    'F1': 0.0,
-                    'Precision': 0.0,
-                    'Recall': 0.0
-                }
-            else:
-                return {
-                    'RMSE': float('inf'),
-                    'MAE': float('inf'),
-                    'R2': -float('inf')
-                }
-    
-    def get_model_summary(self) -> str:
-        """Get model summary."""
-        if not self.is_trained:
-            return "Model not trained"
-        
-        try:
-            stringlist = []
-            self.model.summary(print_fn=lambda x: stringlist.append(x))
-            return "\n".join(stringlist)
-        except Exception as e:
-            self.logger.error(f"Failed to get model summary: {e}")
-            return "Summary not available"
-    
-    def save_model(self, filepath: str) -> None:
-        """Save the trained model."""
-        if not self.is_trained:
-            raise ValueError("Cannot save untrained model")
-        
-        try:
-            import joblib
-            model_data = {
-                'model': self.model,
-                'params': self.params,
-                'feature_names': self.feature_names,
-                'task': self.task,
-                'name': self.name,
-                'input_shape': self.input_shape,
-                'temporal_units': self.temporal_units,
-                'indicator_units': self.indicator_units,
-                'cross_stock_units': self.cross_stock_units,
-                'fusion_units': self.fusion_units,
-                'dropout': self.dropout
-            }
-            joblib.dump(model_data, filepath)
-            self.logger.info(f"StockMixer model saved to {filepath}")
-        except Exception as e:
-            self.logger.error(f"Failed to save StockMixer model: {e}")
-            raise
-    
-    def load_model(self, filepath: str) -> None:
-        """Load a trained StockMixer model."""
-        try:
-            import joblib
-            model_data = joblib.load(filepath)
-            
-            self.model = model_data['model']
-            self.params = model_data['params']
-            self.feature_names = model_data['feature_names']
-            self.task = model_data['task']
-            self.name = model_data['name']
-            self.input_shape = model_data['input_shape']
-            self.temporal_units = model_data['temporal_units']
-            self.indicator_units = model_data['indicator_units']
-            self.cross_stock_units = model_data['cross_stock_units']
-            self.fusion_units = model_data['fusion_units']
-            self.dropout = model_data['dropout']
-            self.is_trained = True
-            
-            self.logger.info(f"StockMixer model loaded from {filepath}")
-        except Exception as e:
-            self.logger.error(f"Failed to load StockMixer model: {e}")
-            raise 
+        X_arr, y_arr = self._validate_input(X, y)
+        y_pred = self.predict(X_arr)
+        if self.task == 'classification':
+            return self._calculate_classification_metrics(np.asarray(y_arr).astype(int), np.asarray(y_pred).astype(int))
+        return self._calculate_regression_metrics(np.asarray(y_arr), np.asarray(y_pred))

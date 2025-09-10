@@ -1,5 +1,12 @@
 """
 LSTM model implementation for RiskPipeline.
+
+Enhanced architecture for financial time series with:
+- Proper sequence handling (overlapping windows)
+- Optional multi-scale processing
+- Bidirectional LSTMs
+- Attention mechanism
+- Advanced regularization and training dynamics
 """
 
 import logging
@@ -12,7 +19,6 @@ try:
 except Exception:  # pragma: no cover - environment-specific
     tf = None  # type: ignore
     TF_AVAILABLE = False
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
@@ -45,6 +51,69 @@ if TF_AVAILABLE:
 from .base_model import BaseModel
 
 
+if TF_AVAILABLE:
+    class AttentionLayer(tf.keras.layers.Layer):
+        """Simple additive attention over time dimension."""
+
+        def __init__(self, hidden_dim: int, **kwargs):
+            super().__init__(**kwargs)
+            self.hidden_dim = hidden_dim
+            self.W = tf.keras.layers.Dense(hidden_dim, use_bias=False)
+            self.V = tf.keras.layers.Dense(1, use_bias=False)
+
+        def call(self, lstm_output):
+            score = self.V(tf.nn.tanh(self.W(lstm_output)))
+            weights = tf.nn.softmax(score, axis=1)
+            attended = tf.reduce_sum(lstm_output * weights, axis=1)
+            return attended, weights
+
+    class MultiScaleLSTMBlock(tf.keras.layers.Layer):
+        """Processes inputs at multiple temporal scales and fuses representations."""
+
+        def __init__(self, units: int, scales: List[int], dropout: float, recurrent_dropout: float, **kwargs):
+            super().__init__(**kwargs)
+            self.units = units
+            self.scales = scales
+            self.dropout = dropout
+            self.recurrent_dropout = recurrent_dropout
+            self.scale_lstms: Dict[int, tf.keras.layers.Layer] = {}
+            self.scale_attn: Dict[int, AttentionLayer] = {}
+            for s in scales:
+                self.scale_lstms[s] = tf.keras.layers.LSTM(
+                    max(4, units // max(1, len(scales))),
+                    return_sequences=True,
+                    dropout=dropout,
+                    recurrent_dropout=recurrent_dropout,
+                    name=f"lstm_scale_{s}"
+                )
+                self.scale_attn[s] = AttentionLayer(max(4, units // max(1, len(scales))), name=f"attn_scale_{s}")
+            self.fusion = tf.keras.layers.Dense(units, activation='tanh')
+            self.layer_norm = tf.keras.layers.LayerNormalization()
+
+        def _pool(self, x, scale: int):
+            if scale == 1:
+                return x
+            b = tf.shape(x)[0]
+            t = tf.shape(x)[1]
+            f = tf.shape(x)[2]
+            pad = (scale - t % scale) % scale
+            x = tf.pad(x, [[0, 0], [0, pad], [0, 0]]) if pad > 0 else x
+            new_t = tf.shape(x)[1]
+            x = tf.reshape(x, [b, new_t // scale, scale, f])
+            x = tf.reduce_mean(x, axis=2)
+            return x
+
+        def call(self, inputs, training=None):
+            outputs = []
+            for s in self.scales:
+                xi = self._pool(inputs, s)
+                xo = self.scale_lstms[s](xi, training=training)
+                att, _ = self.scale_attn[s](xo)
+                outputs.append(att)
+            fused = self.fusion(tf.concat(outputs, axis=-1))
+            return self.layer_norm(fused)
+
+
 class LSTMModel(BaseModel):
     """LSTM model for time series forecasting and classification."""
     
@@ -59,11 +128,23 @@ class LSTMModel(BaseModel):
         super().__init__(name="LSTM", **kwargs)
         self.task = task
         self.units = kwargs.get('units', [128, 64])
-        self.dropout = kwargs.get('dropout', 0.1)
+        self.dropout = kwargs.get('dropout', 0.2)
+        self.recurrent_dropout = kwargs.get('recurrent_dropout', 0.1)
         self.sequence_length = kwargs.get('sequence_length', 15)
         self.input_shape = None
         self.model = None
         self.scaler = StandardScaler()
+        # Advanced architecture toggles
+        self.use_attention = kwargs.get('use_attention', True)
+        self.use_bidirectional = kwargs.get('use_bidirectional', True)
+        self.use_multi_scale = kwargs.get('use_multi_scale', True)
+        self.scales = kwargs.get('scales', [1, 2, 4])
+        self.multi_scale_units = kwargs.get('multi_scale_units', max(self.units[0], 64))
+        self.num_classes = kwargs.get('num_classes', 2)
+        # Advanced training options
+        self.use_class_weights = kwargs.get('use_class_weights', True)
+        self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
+        self.label_smoothing = kwargs.get('label_smoothing', 0.1 if task == 'classification' else 0.0)
         
         # Training parameters
         self.params = {
@@ -101,50 +182,68 @@ class LSTMModel(BaseModel):
         
         try:
             with tf.device(device):
-                # FIXED: Build model with correct input shape
+                # Enhanced architecture
                 if len(self.input_shape) == 2:
-                    # Tabular data - use Dense layers
-                    inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
-                    
-                    # Dense layers for tabular data
-                    x = tf.keras.layers.Dense(self.units[0], activation='relu')(inputs)
-                    x = tf.keras.layers.Dropout(self.dropout)(x)
-                    x = tf.keras.layers.Dense(self.units[1] if len(self.units) > 1 else max(16, self.units[0] // 2), activation='relu')(x)
-                    x = tf.keras.layers.Dropout(self.dropout)(x)
-                    x = tf.keras.layers.Dense(max(16, (self.units[1] if len(self.units) > 1 else self.units[0] // 2) // 2), activation='relu')(x)
-                    x = tf.keras.layers.Dropout(self.dropout)(x)
+                    inputs = tf.keras.Input(shape=(self.input_shape[1],))
+                    x = tf.keras.layers.BatchNormalization()(inputs)
+                    x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
+                    for i, u in enumerate([max(self.units[0], 64), max(self.units[1] if len(self.units) > 1 else self.units[0]//2, 32), 32]):
+                        x = tf.keras.layers.Dense(u, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(1e-4), name=f'dense_tab_{i}')(x)
+                        x = tf.keras.layers.BatchNormalization()(x)
+                        x = tf.keras.layers.Dropout(self.dropout)(x)
                 else:
-                    # Sequence data - use LSTM layers
-                    inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))  # Remove batch dimension
-                    
-                    # LSTM layers for sequence data
-                    x = tf.keras.layers.LSTM(self.units[0], return_sequences=True)(inputs)
-                    x = tf.keras.layers.Dropout(self.dropout)(x)
-                    x = tf.keras.layers.LSTM(self.units[1] if len(self.units) > 1 else max(16, self.units[0] // 2))(x)
-                    x = tf.keras.layers.Dropout(self.dropout)(x)
+                    inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))
+                    x = tf.keras.layers.BatchNormalization()(inputs)
+                    x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
+                    # Multi-scale residual features
+                    if self.use_multi_scale:
+                        ms_block = MultiScaleLSTMBlock(self.multi_scale_units, self.scales, self.dropout, self.recurrent_dropout, name='multi_scale')
+                        ms_feat = ms_block(x)
+                        ms_feat = tf.keras.layers.Dense(self.input_shape[2], activation='tanh', name='ms_dense')(ms_feat)
+                        ms_feat = tf.keras.layers.Reshape((1, self.input_shape[2]))(ms_feat)
+                        ms_feat = tf.keras.layers.Lambda(lambda t: tf.tile(t, [1, tf.shape(x)[1], 1]))(ms_feat)
+                        x = tf.keras.layers.Add()([x, ms_feat])
+                    # Stacked (bi)LSTMs with BN+Dropout
+                    for i, u in enumerate(self.units):
+                        return_sequences = (i < len(self.units) - 1) or self.use_attention
+                        lstm = tf.keras.layers.LSTM(
+                            u,
+                            return_sequences=return_sequences,
+                            dropout=self.dropout,
+                            recurrent_dropout=self.recurrent_dropout,
+                            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+                            name=f'lstm_{i}'
+                        )
+                        if self.use_bidirectional:
+                            x = tf.keras.layers.Bidirectional(lstm, name=f'bilstm_{i}')(x)
+                        else:
+                            x = lstm(x)
+                        x = tf.keras.layers.BatchNormalization(name=f'bn_lstm_{i}')(x)
+                        x = tf.keras.layers.Dropout(self.dropout, name=f'dp_lstm_{i}')(x)
+                    # Attention or last timestep
+                    if self.use_attention and len(self.units) > 0:
+                        last_dim = self.units[-1] * (2 if self.use_bidirectional else 1)
+                        attn = AttentionLayer(last_dim, name='attention')
+                        x, _ = attn(x)
+                    elif len(x.shape) == 3:
+                        x = x[:, -1, :]
                 
                 # Output layer
                 if self.task == 'classification':
-                    # FIXED: Use 2 classes for binary classification (regime prediction)
-                    outputs = tf.keras.layers.Dense(2, activation='softmax')(x)  # 2 classes for binary classification
+                    outputs = tf.keras.layers.Dense(self.num_classes, activation='softmax', name='classification_output')(x)
                 else:
-                    outputs = tf.keras.layers.Dense(1, activation='linear')(x)
+                    outputs = tf.keras.layers.Dense(1, activation='linear', name='regression_output')(x)
                 
                 self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
                 
                 # Compile model
+                opt = tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001), clipnorm=self.gradient_clip_norm, epsilon=1e-7)
                 if self.task == 'classification':
-                    self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001)),
-                        loss='sparse_categorical_crossentropy',
-                        metrics=['accuracy']
-                    )
+                    loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=self.label_smoothing, from_logits=False)
+                    self.model.compile(optimizer=opt, loss=loss, metrics=['accuracy'])
                 else:
-                    self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001)),
-                        loss='mse',
-                        metrics=['mae']
-                    )
+                    loss = tf.keras.losses.Huber(delta=1.0)
+                    self.model.compile(optimizer=opt, loss=loss, metrics=['mae', 'mse'])
                     
         except Exception as build_error:
             self.logger.error(f"LSTM build failed: {build_error}")
@@ -153,6 +252,25 @@ class LSTMModel(BaseModel):
         self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape}")
         return self
     
+    def _prepare_sequences(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Convert 2D tabular data to overlapping sequences of length sequence_length."""
+        if X.ndim == 3:
+            return X, y
+        if X.ndim != 2:
+            raise ValueError(f"Unsupported input shape for sequence prep: {X.shape}")
+        n, f = X.shape
+        if n <= self.sequence_length:
+            return np.empty((0, self.sequence_length, f)), None if y is None else np.empty((0, 1))
+        seqs = []
+        targets = []
+        for i in range(self.sequence_length, n):
+            seqs.append(X[i - self.sequence_length:i])
+            if y is not None:
+                targets.append(y[i])
+        X_seq = np.asarray(seqs)
+        y_seq = None if y is None else np.asarray(targets)
+        return X_seq, y_seq
+
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
@@ -175,43 +293,42 @@ class LSTMModel(BaseModel):
         X, y = self._validate_input(X, y)
         
         try:
-            # FIXED: Ensure X has the right shape for the model
-            if X.ndim == 2 and len(self.input_shape) == 2:
-                # [N, F] - use as is for tabular data
-                X_reshaped = X
-                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
-            elif X.ndim == 3 and len(self.input_shape) == 3:
-                # [N, T, F] - use as is for sequence data
-                X_reshaped = X
-                self.logger.info(f"Using 3D input shape for sequence data: {X_reshaped.shape}")
-            elif X.ndim == 2 and len(self.input_shape) == 3:
-                # [N, F] but model expects [N, T, F] - reshape to single timestep
-                X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
-                self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
-            elif X.ndim == 3 and len(self.input_shape) == 2:
-                # [N, T, F] but model expects [N, F] - flatten to tabular
-                X_reshaped = X.reshape(X.shape[0], -1)
-                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
+            # Proper sequence handling
+            X_arr = X.values if isinstance(X, pd.DataFrame) else X
+            y_arr = y.values if isinstance(y, pd.Series) else y
+            if len(self.input_shape) == 3:
+                if X_arr.ndim == 2:
+                    X_seq, y_seq = self._prepare_sequences(X_arr, y_arr)
+                else:
+                    X_seq, y_seq = X_arr, y_arr
             else:
-                raise ValueError(f"Input shape {X.shape} incompatible with model input shape {self.input_shape}")
+                X_seq, y_seq = X_arr, y_arr
+            if X_seq is None or (isinstance(X_seq, np.ndarray) and X_seq.size == 0):
+                raise ValueError("Insufficient data for LSTM training")
             
-            # Ensure y has the right shape
-            if y.ndim == 1:
-                y_reshaped = y.values.reshape(-1, 1) if isinstance(y, pd.Series) else y.reshape(-1, 1)
+            # Ensure y shape
+            y_reshaped = y_seq.reshape(-1, 1) if y_seq is not None and y_seq.ndim == 1 else y_seq
+            
+            # Time-aware split: last validation_split as validation
+            vs = float(self.params.get('validation_split', 0.2))
+            n_samples = X_seq.shape[0]
+            val_len = max(1, int(n_samples * vs))
+            train_len = n_samples - val_len
+            X_train, X_val = X_seq[:train_len], X_seq[train_len:]
+            y_train, y_val = (y_reshaped[:train_len], y_reshaped[train_len:]) if y_reshaped is not None else (None, None)
+            # Scale features for both 2D and 3D
+            if X_train.ndim == 3:
+                tr_shape = X_train.shape
+                vl_shape = X_val.shape
+                X_tr_flat = X_train.reshape(-1, tr_shape[-1])
+                X_vl_flat = X_val.reshape(-1, vl_shape[-1])
+                X_tr_flat = self.scaler.fit_transform(X_tr_flat)
+                X_vl_flat = self.scaler.transform(X_vl_flat)
+                X_train = X_tr_flat.reshape(tr_shape)
+                X_val = X_vl_flat.reshape(vl_shape)
             else:
-                y_reshaped = y
-            
-            # Split data
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_reshaped, y_reshaped, test_size=0.2, random_state=42
-            )
-            # Fit scaler on train only, transform val
-            try:
                 X_train = self.scaler.fit_transform(X_train)
                 X_val = self.scaler.transform(X_val)
-                self.logger.info("Applied StandardScaler (fit on train) to LSTM features")
-            except Exception:
-                pass
             
             # FIXED: Train on CPU to match model device
             with tf.device('/CPU:0'):
@@ -225,14 +342,35 @@ class LSTMModel(BaseModel):
                     )
                 ]
                 
+                # Class weights and label format
+                class_weight = None
+                y_train_fit = y_train
+                if self.task == 'classification':
+                    # Use one-hot targets for CategoricalCrossentropy
+                    from tensorflow.keras.utils import to_categorical
+                    y_train_fit = to_categorical(y_train.reshape(-1), num_classes=self.num_classes)
+                    y_val_fit = to_categorical(y_val.reshape(-1), num_classes=self.num_classes)
+                    if self.use_class_weights:
+                        try:
+                            from sklearn.utils.class_weight import compute_class_weight
+                            classes = np.unique(y_train.reshape(-1))
+                            weights = compute_class_weight('balanced', classes=classes, y=y_train.reshape(-1))
+                            class_weight = {int(c): float(w) for c, w in zip(classes, weights)}
+                        except Exception:
+                            class_weight = None
+                else:
+                    y_val_fit = y_val
+
                 # Train the model
                 history = self.model.fit(
-                    X_train, y_train,
-                    validation_data=(X_val, y_val),
+                    X_train, y_train_fit,
+                    validation_data=(X_val, y_val_fit),
                     epochs=self.params.get('epochs', 200),
                     batch_size=self.params.get('batch_size', 32),
                     callbacks=callbacks,
-                    verbose=0
+                    verbose=0,
+                    shuffle=False,
+                    class_weight=class_weight
                 )
             
             # Store training history
@@ -255,8 +393,8 @@ class LSTMModel(BaseModel):
                     'val_loss': val_loss
                 }
             else:
-                train_mae = history.history['mae'][-1]
-                val_mae = history.history['val_mae'][-1]
+                train_mae = history.history.get('mae', [np.nan])[-1]
+                val_mae = history.history.get('val_mae', [np.nan])[-1]
                 metrics = {
                     'train_mae': train_mae,
                     'val_mae': val_mae,
@@ -290,29 +428,25 @@ class LSTMModel(BaseModel):
         X, _ = self._validate_input(X)
         
         try:
-            # FIXED: Ensure X has the right shape for the model
-            if X.ndim == 2 and len(self.input_shape) == 2:
-                # [N, F] - use as is for tabular data
-                X_reshaped = X
-                self.logger.info(f"Using 2D input shape for tabular data: {X_reshaped.shape}")
-            elif X.ndim == 3 and len(self.input_shape) == 3:
-                # [N, T, F] - use as is for sequence data
-                X_reshaped = X
-                self.logger.info(f"Using 3D input shape for sequence data: {X_reshaped.shape}")
-            elif X.ndim == 2 and len(self.input_shape) == 3:
-                # [N, F] but model expects [N, T, F] - reshape to single timestep
-                X_reshaped = X.reshape(X.shape[0], 1, X.shape[1])
-                self.logger.info(f"Reshaping 2D input {X.shape} to 3D {X_reshaped.shape}")
-            elif X.ndim == 3 and len(self.input_shape) == 2:
-                # [N, T, F] but model expects [N, F] - flatten to tabular
-                X_reshaped = X.reshape(X.shape[0], -1)
-                self.logger.info(f"Flattening 3D input {X.shape} to 2D {X_reshaped.shape}")
+            # Proper sequence handling
+            X_arr = X.values if isinstance(X, pd.DataFrame) else X
+            if len(self.input_shape) == 3:
+                if X_arr.ndim == 2:
+                    X_reshaped, _ = self._prepare_sequences(X_arr)
+                else:
+                    X_reshaped = X_arr
             else:
-                raise ValueError(f"Input shape {X.shape} incompatible with model input shape {self.input_shape}")
+                X_reshaped = X_arr
             
             # Scale features using fitted scaler
             try:
-                X_reshaped = self.scaler.transform(X_reshaped)
+                if X_reshaped.ndim == 3:
+                    shp = X_reshaped.shape
+                    flat = X_reshaped.reshape(-1, shp[-1])
+                    flat = self.scaler.transform(flat)
+                    X_reshaped = flat.reshape(shp)
+                else:
+                    X_reshaped = self.scaler.transform(X_reshaped)
             except Exception:
                 pass
 

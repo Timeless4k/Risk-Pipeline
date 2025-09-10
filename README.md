@@ -51,10 +51,8 @@ python run_pipeline.py
 ```
 
 ### **Option 4: Custom Configuration**
-```bash
-python run_pipeline.py --custom
-```
-**Tune individual settings as needed**
+All settings now live in a single master file: `configs/pipeline_config.json`.
+Edit this file directly to customize data, features, models, and training.
 
 ## 🎮 **NEW COMPREHENSIVE MENU SYSTEM**
 
@@ -154,6 +152,58 @@ Built-in sample data for immediate testing.
 - Flexible data format handling
 
 ## 📈 **Output & Results**
+## 🧩 Configuration Updates
+
+### LSTM (Enhanced)
+Add or adjust in the single JSON config under `models` and `features`:
+
+```json
+"features": {
+  "sequence_length": 30
+},
+"models": {
+  "lstm_units": [128, 64, 32],
+  "lstm_dropout": 0.2,
+  "lstm_recurrent_dropout": 0.1,
+  "lstm_bidirectional": true,
+  "lstm_attention": true,
+  "lstm_use_multi_scale": true,
+  "lstm_scales": [1, 2, 4],
+  "lstm_multi_scale_units": 128
+}
+```
+
+### StockMixer
+Recommended starting point:
+
+```json
+"models": {
+  "stockmixer_temporal_units": 128,
+  "stockmixer_indicator_units": 128,
+  "stockmixer_cross_stock_units": 128,
+  "stockmixer_fusion_units": 256,
+  "stockmixer_num_layers": 3,
+  "stockmixer_attention_heads": 4,
+  "stockmixer_dropout": 0.25
+}
+```
+
+### ARIMA
+Suggested config for daily equities:
+
+```python
+arima_config = {
+    'max_features': 10,
+    'information_criterion': 'aic',
+    'feature_selection_method': 'mutual_info',
+    'max_p': 5,
+    'max_d': 2,
+    'max_q': 5,
+    'seasonal_period': 0,  # No seasonality for daily data
+    'use_exog': True
+}
+```
+
 
 When you run the pipeline, you'll get:
 
@@ -239,10 +289,9 @@ done
 ```
 
 ### **Custom Configurations**
+Edit `configs/pipeline_config.json` and run:
 ```bash
-# Start with custom settings
-python run_pipeline.py --custom
-# Navigate to specific configuration areas
+python run_pipeline.py --run-all
 ```
 
 ## 🤝 **Contributing**

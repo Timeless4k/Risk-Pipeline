@@ -5,7 +5,6 @@ Model implementations for the RiskPipeline.
 from .base_model import BaseModel
 from .arima_model import ARIMAModel
 from .xgboost_model import XGBoostModel
-from .enhanced_arima_model import EnhancedARIMAModel
 
 # Check TensorFlow availability
 try:
@@ -21,7 +20,7 @@ try:
 except ImportError:
     STOCKMIXER_AVAILABLE = False
 
-__all__ = ['BaseModel', 'ARIMAModel', 'XGBoostModel', 'EnhancedARIMAModel']
+__all__ = ['BaseModel', 'ARIMAModel', 'XGBoostModel']
 
 if STOCKMIXER_AVAILABLE:
     __all__.append('StockMixerModel')

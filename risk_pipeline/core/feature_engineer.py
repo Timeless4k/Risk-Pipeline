@@ -23,6 +23,7 @@ import warnings
 
 from ..utils.logging_utils import log_execution_time
 from .config import PipelineConfig
+from .regime_detector import MarketRegimeDetector, RegimeDetectorConfig
 
 logger = logging.getLogger(__name__)
 
@@ -458,6 +459,16 @@ class FeatureEngineer:
         
         self.logger = logging.getLogger(__name__)
         self.logger.info("FeatureEngineer initialized with modular architecture")
+        # Initialize regime detector
+        try:
+            self.regime_detector = MarketRegimeDetector(RegimeDetectorConfig(
+                window=self.feature_config.regime_window,
+                bull_threshold=self.feature_config.bull_threshold,
+                bear_threshold=self.feature_config.bear_threshold,
+            ))
+        except Exception as _e:
+            self.logger.warning(f"Failed to initialize MarketRegimeDetector, fallback to simple labels: {_e}")
+            self.regime_detector = None
     
     @log_execution_time
     def create_all_features(self, data: Dict[str, pd.DataFrame], 
@@ -575,10 +586,11 @@ class FeatureEngineer:
             prices = raw_data[price_col].astype(float)
             returns = np.log(prices / prices.shift(1))
             
-            # THESIS COMPLIANT: 5-day realized volatility prediction
-            # Use 5-day rolling volatility as the target (Volatility5D), predict 5 days ahead
-            volatility_target = returns.rolling(window=5, min_periods=3).std() * np.sqrt(252)
-            volatility_target = volatility_target.shift(-5)
+            # THESIS COMPLIANT: 5-day realized volatility prediction (primary regression target)
+            # Standardized construction: realized volatility over the next 5 trading days
+            # Compute rolling volatility and align it 5 days ahead so that at time t we predict vol over (t+1..t+5)
+            volatility_5d = returns.rolling(window=5, min_periods=5).std() * np.sqrt(252)
+            volatility_target = volatility_5d.shift(-5)
 
             # Optional: log-transform the target to stabilize variance
             try:
@@ -589,15 +601,22 @@ class FeatureEngineer:
             except Exception as _e:
                 self.logger.warning(f"Log-target option failed, using raw target: {_e}")
             
-            # THESIS COMPLIANT: Regime based on 5-day volatility patterns (3 classes: 0=Low,1=Med,2=High)
-            vol_5d = returns.rolling(window=5, min_periods=3).std() * np.sqrt(252)
-            vol_5d_future = vol_5d.shift(-5)
-            vol_quantiles = vol_5d.quantile([0.33, 0.67])
-            regime_target = pd.cut(
-                vol_5d_future,
-                bins=[-np.inf, vol_quantiles.iloc[0], vol_quantiles.iloc[1], np.inf],
-                labels=[0, 1, 2]
-            ).astype(int)
+            # Proper regime detection: prefer HMM/GARCH, fallback to threshold
+            try:
+                regimes = self.create_regime_labels(returns)
+                # Map to ordinal classes for classification: Bear=0, Sideways=1, Bull=2
+                mapping = {'Bear': 0, 'Sideways': 1, 'Bull': 2}
+                regime_target = regimes.map(mapping).astype('float')
+            except Exception as _e:
+                self.logger.warning(f"Regime detector failed, using volatility-quantile fallback: {_e}")
+                vol_5d = returns.rolling(window=5, min_periods=5).std() * np.sqrt(252)
+                vol_5d_future = vol_5d.shift(-5)
+                vol_quantiles = vol_5d.quantile([0.33, 0.67])
+                regime_target = pd.cut(
+                    vol_5d_future,
+                    bins=[-np.inf, vol_quantiles.iloc[0], vol_quantiles.iloc[1], np.inf],
+                    labels=[0, 1, 2]
+                ).astype('float')
             
             # ULTIMATE FIX: Validate classification target quality
             if regime_target.nunique() < 2:
@@ -620,11 +639,8 @@ class FeatureEngineer:
                     regime_target = (returns.shift(-10) > 0).astype(int)
                     self.logger.info(f"Using simple up/down regime target for {asset}")
             
-            # Ensure targets have no NaN values (forward fill then backward fill)
-            volatility_target = volatility_target.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            regime_target = regime_target.fillna(method='ffill').fillna(method='bfill').fillna(0)
-            
-            # Align features and targets by removing rows where targets are NaN
+            # Align features and targets strictly by removing rows where targets are NaN
+            # This prevents implicit leakage from forward/backward filling future targets
             valid_indices = ~(volatility_target.isna() | regime_target.isna())
             if valid_indices.sum() < 100:
                 self.logger.warning(f"Too few valid samples for {asset} after target alignment: {valid_indices.sum()}")
@@ -948,23 +964,25 @@ class FeatureEngineer:
         return features
     
     def create_regime_labels(self, returns: pd.Series, window: int = None) -> pd.Series:
-        """Create market regime labels (Bull, Bear, Sideways)."""
+        """Create market regime labels using MarketRegimeDetector (HMM/GARCH/threshold)."""
+        try:
+            if getattr(self, 'regime_detector', None) is not None:
+                regimes = self.regime_detector.detect(returns, method='auto')
+                # Align index to original returns
+                return regimes.reindex(returns.index, method='ffill')
+        except Exception as _e:
+            self.logger.warning(f"MarketRegimeDetector failed, using threshold fallback: {_e}")
+
+        # Fallback to local threshold method
         if window is None:
             window = self.feature_config.regime_window
-        
-        # Calculate rolling returns
         rolling_returns = returns.rolling(window=window).sum()
-        
-        # Define regime thresholds
         bull_threshold = self.feature_config.bull_threshold
         bear_threshold = self.feature_config.bear_threshold
-        
-        # Assign regimes
         regimes = pd.Series(index=returns.index, dtype='object')
         regimes[rolling_returns > bull_threshold] = 'Bull'
         regimes[rolling_returns < bear_threshold] = 'Bear'
         regimes[(rolling_returns >= bear_threshold) & (rolling_returns <= bull_threshold)] = 'Sideways'
-        
         return regimes
     
     def create_volatility_labels(self, volatility: pd.Series) -> pd.Series:

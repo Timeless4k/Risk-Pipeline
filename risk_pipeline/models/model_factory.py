@@ -7,7 +7,6 @@ from typing import Dict, Any, Type
 from .base_model import BaseModel
 from .arima_model import ARIMAModel
 from .xgboost_model import XGBoostModel
-from .enhanced_arima_model import EnhancedARIMAModel
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +19,7 @@ except ImportError:
 
 # Check StockMixer availability
 try:
+    # Use the StockMixer implementation in stockmixer_model.py
     from .stockmixer_model import StockMixerModel
     STOCKMIXER_AVAILABLE = True
 except ImportError:
@@ -31,7 +31,8 @@ class ModelFactory:
     
     _models: Dict[str, Type[BaseModel]] = {
         'arima': ARIMAModel,
-        'enhanced_arima': EnhancedARIMAModel,  # 🚀 NEW: Enhanced ARIMAX model
+        # Map legacy enhanced_arima to the modern ARIMAModel implementation
+        'enhanced_arima': ARIMAModel,
         'xgboost': XGBoostModel,
     }
     
@@ -58,10 +59,9 @@ class ModelFactory:
                 logger.warning("ARIMA only supports regression tasks. Using regression.")
             return model_class(**kwargs)
         elif model_type == 'enhanced_arima':
-            # Enhanced ARIMA only supports regression; skip cleanly for classification
+            # Backward compatibility: use the modern ARIMAModel for enhanced_arima requests
             if task != 'regression':
-                logger.warning("Enhanced ARIMA does not support classification. Skipping model creation.")
-                return None
+                logger.warning("ARIMA only supports regression tasks. Using regression.")
             return model_class(**kwargs)
         elif model_type == 'lstm':
             # LSTM supports both tasks
@@ -101,9 +101,9 @@ def create_arima_model(**kwargs) -> ARIMAModel:
     """Create an ARIMA model."""
     return ARIMAModel(**kwargs)
 
-def create_enhanced_arima_model(**kwargs) -> EnhancedARIMAModel:
-    """Create an Enhanced ARIMAX model."""
-    return EnhancedARIMAModel(**kwargs)
+def create_enhanced_arima_model(**kwargs) -> ARIMAModel:
+    """Create a Modern ARIMA model (legacy enhanced_arima alias)."""
+    return ARIMAModel(**kwargs)
 
 def create_xgboost_model(**kwargs) -> XGBoostModel:
     """Create an XGBoost model."""
