@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Type
 from .base_model import BaseModel
 from .arima_model import ARIMAModel
+from .garch_model import GARCHModel
 from .xgboost_model import XGBoostModel
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class ModelFactory:
     
     _models: Dict[str, Type[BaseModel]] = {
         'arima': ARIMAModel,
+        'garch': GARCHModel,
         # Map legacy enhanced_arima to the modern ARIMAModel implementation
         'enhanced_arima': ARIMAModel,
         'xgboost': XGBoostModel,
@@ -78,6 +80,11 @@ class ModelFactory:
             except Exception:
                 pass
             return model_class(task=task, **kwargs)
+        elif model_type == 'garch':
+            # GARCH is for volatility (regression)
+            if task != 'regression':
+                logger.warning("GARCH only supports regression tasks. Using regression.")
+            return model_class(**kwargs)
         elif model_type == 'stockmixer':
             # StockMixer supports both tasks
             return model_class(task=task, **kwargs)
@@ -108,6 +115,10 @@ def create_enhanced_arima_model(**kwargs) -> ARIMAModel:
 def create_xgboost_model(**kwargs) -> XGBoostModel:
     """Create an XGBoost model."""
     return XGBoostModel(**kwargs)
+
+def create_garch_model(**kwargs) -> GARCHModel:
+    """Create a GARCH model."""
+    return GARCHModel(**kwargs)
 
 def create_lstm_model(**kwargs):
     """Create an LSTM model if available."""

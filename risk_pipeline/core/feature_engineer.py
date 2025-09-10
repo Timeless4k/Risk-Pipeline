@@ -44,9 +44,12 @@ class FeatureConfig:
     ma_short: int = 10  # Default expected by tests
     ma_long: int = 50   # Default expected by tests
     
-    # Volatility and correlation windows - COMPLETELY REDESIGNED to prevent overlap
+    # Volatility and correlation windows
     volatility_windows: List[int] = None
     correlation_window: int = 30
+    # Temporal separation and lags
+    temporal_separation_days: int = 30
+    price_lag_days: List[int] = None
     
     # Regime classification
     regime_window: int = 60
@@ -59,8 +62,9 @@ class FeatureConfig:
     
     def __post_init__(self):
         if self.volatility_windows is None:
-            # ULTIMATE FIX: Use optimal windows that ensure 41 features and prevent overlap
-            self.volatility_windows = [5, 10, 20]  # Restored original windows for full feature set
+            self.volatility_windows = [5, 10, 20]
+        if self.price_lag_days is None:
+            self.price_lag_days = [1, 2, 3, 5, 10]
         
         # ULTIMATE FIX: Ensure consistent feature generation
         self.min_correlation_threshold = 0.01  # Relaxed to keep more features
@@ -147,8 +151,8 @@ class TechnicalFeatureModule(BaseFeatureModule):
         features['Bollinger_Upper'] = bb_upper
         features['Bollinger_Lower'] = bb_lower
         
-        # Moving Averages - ULTIMATE FIX: Use optimal shifts for full feature set
-        shifted_price = df['Price'].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        # Moving Averages using configured temporal separation
+        shifted_price = df['Price'].shift(self.config.temporal_separation_days)
         
         # Use simple rolling calculations without exponential decay to avoid NaN issues
         short_name = f"MA{self.config.ma_short}"
@@ -157,20 +161,19 @@ class TechnicalFeatureModule(BaseFeatureModule):
         features[long_name] = shifted_price.rolling(window=self.config.ma_long, min_periods=1).mean()
         features['MA_ratio'] = features[short_name] / features[long_name]
         
-        # Rate of Change - ULTIMATE FIX: Use optimal shift for full feature set
-        features['ROC20'] = shifted_price.pct_change(periods=10)  # ULTIMATE FIX: Use 10 periods
+        # Rate of Change using configured separation
+        features['ROC20'] = shifted_price.pct_change(periods=self.config.temporal_separation_days)
         
-        # Rolling Standard Deviation - ULTIMATE FIX: Use optimal shift for full feature set
-        # CRITICAL: Use 10-day window and shift by 10 days to ensure no overlap but keep all features
-        shifted_returns = returns.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        # Rolling Standard Deviation with configured separation
+        shifted_returns = returns.shift(self.config.temporal_separation_days)
         
         # FIXED: Changed from RollingStd5 to RollingStd30 to prevent overlap with 5-day target volatility
         features['RollingStd30'] = shifted_returns.rolling(window=30, min_periods=15).std()
         
-        # Correlation with Moving Averages - ULTIMATE FIX: Use optimal shifts for full feature set
-        shifted_returns = returns.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
-        ma_short_shifted = features[short_name].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
-        ma_long_shifted = features[long_name].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        # Correlation with Moving Averages using configured separation
+        shifted_returns = returns.shift(self.config.temporal_separation_days)
+        ma_short_shifted = features[short_name].shift(self.config.temporal_separation_days)
+        ma_long_shifted = features[long_name].shift(self.config.temporal_separation_days)
         
         # Use simple rolling correlations without exponential decay to avoid NaN issues
         features[f'Corr_{short_name}'] = shifted_returns.rolling(window=self.config.ma_short, min_periods=1).corr(ma_short_shifted)
@@ -187,8 +190,7 @@ class TechnicalFeatureModule(BaseFeatureModule):
     
     def _calculate_rsi(self, prices: pd.Series) -> pd.Series:
         """Calculate Relative Strength Index."""
-        # ULTIMATE FIX: Use optimal shift for full feature set
-        shifted_prices = prices.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        shifted_prices = prices.shift(self.config.temporal_separation_days)
         
         # Use simple calculation without exponential decay to avoid NaN issues
         delta = shifted_prices.diff()
@@ -199,8 +201,7 @@ class TechnicalFeatureModule(BaseFeatureModule):
     
     def _calculate_macd(self, prices: pd.Series) -> pd.Series:
         """Calculate MACD."""
-        # ULTIMATE FIX: Use optimal shift for full feature set
-        shifted_prices = prices.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        shifted_prices = prices.shift(self.config.temporal_separation_days)
         
         # Use simple calculation without exponential decay to avoid NaN issues
         exp1 = shifted_prices.ewm(span=self.config.macd_fast, adjust=False).mean()
@@ -209,10 +210,9 @@ class TechnicalFeatureModule(BaseFeatureModule):
     
     def _calculate_atr(self, df: pd.DataFrame) -> pd.Series:
         """Calculate Average True Range."""
-        # ULTIMATE FIX: Use optimal shift for full feature set
-        high = df['High'].shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
-        low = df['Low'].shift(10)
-        close = df['Close'].shift(10)
+        high = df['High'].shift(self.config.temporal_separation_days)
+        low = df['Low'].shift(self.config.temporal_separation_days)
+        close = df['Close'].shift(self.config.temporal_separation_days)
         
         # Use simple calculation without exponential decay to avoid NaN issues
         tr1 = high - low
@@ -224,8 +224,7 @@ class TechnicalFeatureModule(BaseFeatureModule):
     
     def _calculate_bollinger(self, prices: pd.Series) -> Tuple[pd.Series, pd.Series]:
         """Calculate Bollinger Bands."""
-        # ULTIMATE FIX: Use optimal shift for full feature set
-        shifted_prices = prices.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
+        shifted_prices = prices.shift(self.config.temporal_separation_days)
         
         # Use simple calculation without exponential decay to avoid NaN issues
         ma = shifted_prices.rolling(window=self.config.bollinger_period, min_periods=1).mean()
@@ -261,10 +260,9 @@ class StatisticalFeatureModule(BaseFeatureModule):
         price_col = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
         returns = np.log(data[price_col] / data[price_col].shift(1))
         
-        # ROLLBACK: Create features for each window using reasonable temporal separation
+        # Create features for each window using configured temporal separation
         for window in self.config.volatility_windows:
-            # ROLLBACK: Reduced shift from window+95 to window+30 for reasonable separation
-            shifted_returns = returns.shift(window + 30)  # ROLLBACK: Reduced from window+95 to window+30
+            shifted_returns = returns.shift(window + self.config.temporal_separation_days)
             
             # Use simple calculation without exponential decay to avoid NaN issues
             features[f'Volatility{window}D'] = self._calculate_volatility(shifted_returns, window)
@@ -315,7 +313,7 @@ class LagFeatureModule(BaseFeatureModule):
     
     def __init__(self, config: FeatureConfig, lags: List[int] = None):
         super().__init__(config)
-        self.lags = lags or [1, 2, 3, 5, 10]
+        self.lags = lags or self.config.price_lag_days
     
     def get_required_columns(self) -> List[str]:
         return ['Close']
@@ -334,8 +332,8 @@ class LagFeatureModule(BaseFeatureModule):
         price_col = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
         returns = np.log(data[price_col] / data[price_col].shift(1))
         
-        # Add lagged returns - ROLLBACK: Reduced shift from 95 to 30 days for reasonable temporal separation
-        shifted_returns = returns.shift(30)  # ROLLBACK: Reduced from 95 to 30 days
+        # Add lagged returns with configured temporal separation
+        shifted_returns = returns.shift(self.config.temporal_separation_days)
         
         # Use simple calculation without exponential decay to avoid NaN issues
         for lag in self.lags:
@@ -363,7 +361,7 @@ class NonlinearReturnsModule(BaseFeatureModule):
         price_col = 'Adj Close' if 'Adj Close' in data.columns else 'Close'
         returns = np.log(data[price_col] / data[price_col].shift(1))
         # Temporal separation
-        shifted = returns.shift(30)
+        shifted = returns.shift(self.config.temporal_separation_days)
         ret_abs = shifted.abs()
         ret_sq = shifted.pow(2)
         features['Ret_abs'] = ret_abs
@@ -375,12 +373,20 @@ class NonlinearReturnsModule(BaseFeatureModule):
 
 class CorrelationFeatureModule(BaseFeatureModule):
     """Correlation feature module."""
+    def __init__(self, config: FeatureConfig, correlation_pairs: Optional[List[List[str]]] = None):
+        super().__init__(config)
+        self.correlation_pairs = correlation_pairs or []
     
     def get_required_columns(self) -> List[str]:
         return ['Close']  # Will be applied to each asset
     
     def get_feature_names(self) -> List[str]:
-        return ['AAPL_GSPC_corr', 'IOZ_CBA_corr', 'BHP_IOZ_corr']
+        names: List[str] = []
+        for a, b in self.correlation_pairs:
+            a_s = a.replace('^', '').replace('.', '').replace('-', '')
+            b_s = b.replace('^', '').replace('.', '').replace('-', '')
+            names.append(f"{a_s}_{b_s}_corr")
+        return names
     
     def create_features(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """Calculate inter-asset correlations."""
@@ -409,21 +415,15 @@ class CorrelationFeatureModule(BaseFeatureModule):
         
         returns_df = pd.DataFrame(returns)
         
-        # Calculate rolling correlations
-        if 'AAPL' in returns_df.columns and '^GSPC' in returns_df.columns:
-            correlations['AAPL_GSPC_corr'] = returns_df['AAPL'].rolling(
-                window=self.config.correlation_window
-            ).corr(returns_df['^GSPC'])
-        
-        if 'IOZ.AX' in returns_df.columns and 'CBA.AX' in returns_df.columns:
-            correlations['IOZ_CBA_corr'] = returns_df['IOZ.AX'].rolling(
-                window=self.config.correlation_window
-            ).corr(returns_df['CBA.AX'])
-        
-        if 'BHP.AX' in returns_df.columns and 'IOZ.AX' in returns_df.columns:
-            correlations['BHP_IOZ_corr'] = returns_df['BHP.AX'].rolling(
-                window=self.config.correlation_window
-            ).corr(returns_df['IOZ.AX'])
+        # Calculate rolling correlations dynamically from configured pairs
+        for a, b in self.correlation_pairs:
+            if a in returns_df.columns and b in returns_df.columns:
+                a_s = a.replace('^', '').replace('.', '').replace('-', '')
+                b_s = b.replace('^', '').replace('.', '').replace('-', '')
+                col_name = f"{a_s}_{b_s}_corr"
+                correlations[col_name] = returns_df[a].rolling(
+                    window=self.config.correlation_window
+                ).corr(returns_df[b])
         
         self.logger.info(f"Created correlation features: {correlations.columns.tolist()}")
         return correlations
@@ -444,18 +444,30 @@ class FeatureEngineer:
         self.feature_config = FeatureConfig(
             ma_short=self.config.features.ma_short,
             ma_long=self.config.features.ma_long,
-            correlation_window=self.config.features.correlation_window
+            correlation_window=self.config.features.correlation_window,
+            rsi_period=self.config.features.rsi_period,
+            macd_fast=self.config.features.macd_fast,
+            macd_slow=self.config.features.macd_slow,
+            macd_signal=self.config.features.macd_signal,
+            atr_period=self.config.features.atr_period,
+            bollinger_period=self.config.features.bollinger_period,
+            bollinger_std=int(self.config.features.bollinger_std) if isinstance(self.config.features.bollinger_std, float) else self.config.features.bollinger_std,
+            volatility_windows=getattr(self.config.features, 'volatility_windows', [5, 10, 20]),
+            temporal_separation_days=getattr(self.config.features, 'temporal_separation_days', 30),
+            price_lag_days=getattr(self.config.features, 'price_lag_days', [1, 2, 3, 5, 10]),
         )
         
         # Initialize feature modules
-        self.modules = {
-            'technical': TechnicalFeatureModule(self.feature_config),
-            'statistical': StatisticalFeatureModule(self.feature_config),
-            'time': TimeFeatureModule(self.feature_config),
-            'lag': LagFeatureModule(self.feature_config),
-            'nonlinear': NonlinearReturnsModule(self.feature_config),
-            'correlation': CorrelationFeatureModule(self.feature_config)
-        }
+        # Build modules honoring toggles from config if present
+        self.modules = {}
+        if getattr(self.config, 'feature_engineering', None) is None or self.config.feature_engineering.enable_technical_indicators:
+            self.modules['technical'] = TechnicalFeatureModule(self.feature_config)
+        self.modules['statistical'] = StatisticalFeatureModule(self.feature_config)
+        self.modules['time'] = TimeFeatureModule(self.feature_config)
+        self.modules['lag'] = LagFeatureModule(self.feature_config)
+        self.modules['nonlinear'] = NonlinearReturnsModule(self.feature_config)
+        if getattr(self.config, 'feature_engineering', None) is None or self.config.feature_engineering.enable_correlation_features:
+            self.modules['correlation'] = CorrelationFeatureModule(self.feature_config, correlation_pairs=getattr(self.config.feature_engineering, 'correlation_pairs', []))
         
         self.logger = logging.getLogger(__name__)
         self.logger.info("FeatureEngineer initialized with modular architecture")
@@ -543,6 +555,18 @@ class FeatureEngineer:
             for asset in all_features.keys():
                 vix_features = self.add_vix_features(all_features[asset], data['VIX'])
                 all_features[asset] = vix_features
+
+        # Add AXVI proxy for AU assets if possible
+        try:
+            au_symbols = [s for s in data.keys() if s.endswith('.AX')]
+            if au_symbols:
+                proxy_symbol = 'IOZ.AX' if 'IOZ.AX' in au_symbols else au_symbols[0]
+                au_df = data.get(proxy_symbol, pd.DataFrame())
+                for asset in list(all_features.keys()):
+                    if asset.endswith('.AX'):
+                        all_features[asset] = self.add_axvi_proxy(all_features[asset], au_df)
+        except Exception:
+            pass
         
         return all_features
 
@@ -756,6 +780,28 @@ class FeatureEngineer:
                     final_features = pd.concat([final_features, feat_df_final[features_to_restore]], axis=1)
                     self.logger.info(f"Restored {len(features_to_restore)} features to reach {len(final_features.columns)} total features")
 
+            # Optional advanced feature selection (mutual information / f-test)
+            try:
+                adv_cfg = getattr(self.config, 'advanced_features', None)
+                if adv_cfg and getattr(adv_cfg, 'enable_feature_selection', False):
+                    method = getattr(adv_cfg, 'feature_selection_method', 'mutual_info')
+                    k = int(getattr(adv_cfg, 'feature_selection_k', 50))
+                    k = max(5, min(k, len(final_features.columns)))
+                    from sklearn.feature_selection import SelectKBest, mutual_info_regression, f_regression
+                    X_clean = final_features.replace([np.inf, -np.inf], np.nan).fillna(method='ffill').fillna(method='bfill')
+                    y_sel = volatility_target_final
+                    if method == 'mutual_info':
+                        selector = SelectKBest(mutual_info_regression, k=k)
+                    else:
+                        selector = SelectKBest(f_regression, k=k)
+                    selector.fit(X_clean, y_sel)
+                    selected_cols = X_clean.columns[selector.get_support()].tolist()
+                    if selected_cols:
+                        final_features = final_features[selected_cols]
+                        self.logger.info(f"Advanced feature selection applied: kept {len(selected_cols)} features")
+            except Exception as _fe_sel_err:
+                self.logger.warning(f"Advanced feature selection skipped: {_fe_sel_err}")
+
             structured[asset] = {
                 'features': final_features,
                 'volatility_target': volatility_target_final,
@@ -962,12 +1008,36 @@ class FeatureEngineer:
             features['VIX_change'] = (vix_change - vix_change.mean()) / vix_change.std()
         
         return features
+
+    def add_axvi_proxy(self, features: pd.DataFrame, au_data: pd.DataFrame) -> pd.DataFrame:
+        """Add AXVI proxy features for AU market using IOZ.AX or ^AXJO as proxy."""
+        try:
+            if features.empty or au_data.empty:
+                return features
+            proxy_series = None
+            if '^AXJO' in au_data.columns and not au_data['^AXJO'].dropna().empty:
+                proxy_series = au_data['^AXJO'].astype(float)
+            elif 'Adj Close' in au_data.columns and not au_data['Adj Close'].dropna().empty:
+                proxy_series = au_data['Adj Close'].astype(float)
+            elif 'Close' in au_data.columns and not au_data['Close'].dropna().empty:
+                proxy_series = au_data['Close'].astype(float)
+            if proxy_series is None:
+                return features
+            ret = np.log(proxy_series / proxy_series.shift(1))
+            axvi = ret.rolling(window=20, min_periods=10).std() * np.sqrt(252)
+            axvi_aligned = axvi.reindex(features.index, method='ffill')
+            features['AXVI_proxy'] = axvi_aligned
+            features['AXVI_proxy_chg'] = axvi_aligned.pct_change()
+            return features
+        except Exception:
+            return features
     
     def create_regime_labels(self, returns: pd.Series, window: int = None) -> pd.Series:
-        """Create market regime labels using MarketRegimeDetector (HMM/GARCH/threshold)."""
+        """Create market regime labels using MarketRegimeDetector (slope/HMM/GARCH/threshold)."""
         try:
             if getattr(self, 'regime_detector', None) is not None:
-                regimes = self.regime_detector.detect(returns, method='auto')
+                # Prefer slope-based regimes for directionality per thesis
+                regimes = self.regime_detector.detect(returns, method='slope')
                 # Align index to original returns
                 return regimes.reindex(returns.index, method='ffill')
         except Exception as _e:

@@ -28,12 +28,12 @@ class DataConfig:
 @dataclass
 class FeatureConfig:
     """Configuration for feature engineering."""
-    volatility_window: int = 20  # Increased from 10 to 20 for more stable volatility
-    ma_short: int = 50  # Increased from 20 to 50 for better trend detection
-    ma_long: int = 200  # Increased from 100 to 200 for longer-term trends
-    correlation_window: int = 120  # Increased from 60 to 120 for more stable correlations
-    sequence_length: int = 30  # Increased from 15 to 30 for better temporal patterns
-    # New advanced features for high-performance systems
+    volatility_window: int = 20
+    ma_short: int = 50
+    ma_long: int = 200
+    correlation_window: int = 120
+    sequence_length: int = 30
+    # Advanced indicators
     rsi_period: int = 14
     macd_fast: int = 12
     macd_slow: int = 26
@@ -43,6 +43,11 @@ class FeatureConfig:
     atr_period: int = 14
     stochastic_k: int = 14
     stochastic_d: int = 3
+    # Extended controls from JSON
+    use_only_price_lags: bool = False
+    price_lag_days: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 10])
+    volatility_windows: List[int] = field(default_factory=lambda: [5, 10, 20])
+    temporal_separation_days: int = 30
 
 
 @dataclass
@@ -670,16 +675,25 @@ class PipelineConfig:
             }
         elif model_type == 'arima':
             return {
-                # Sensible ARIMA defaults for equities
-                'order': (1, 1, 1),
-                'seasonal_order': (0, 0, 0, 0),  # Disable seasonality by default
-                'seasonal': False,
-                # Auto-order search (configurable)
-                'auto_order': True,
-                'max_p': 5,
-                'max_d': 2,
-                'max_q': 5,
-                'n_jobs': self.training.joblib_n_jobs  # Use parallel processing
+                'order': tuple(getattr(self.models, 'arima_order', [1, 1, 1])),
+                'seasonal_order': tuple(getattr(self.models, 'arima_seasonal_order', [0, 0, 0, 0])),
+                'seasonal': any(getattr(self.models, 'arima_seasonal_order', [0, 0, 0, 0])),
+                'auto_order': getattr(self.models, 'arima_auto_order', True),
+                'max_p': getattr(self.models, 'arima_max_p', 5),
+                'max_d': getattr(self.models, 'arima_max_d', 2),
+                'max_q': getattr(self.models, 'arima_max_q', 5),
+                'n_jobs': self.training.joblib_n_jobs
+            }
+        elif model_type == 'garch':
+            return {
+                'p': getattr(self.models, 'garch_p', 1),
+                'q': getattr(self.models, 'garch_q', 1),
+                'auto_order': getattr(self.models, 'garch_auto_order', True),
+                'max_p': getattr(self.models, 'garch_max_p', 3),
+                'max_q': getattr(self.models, 'garch_max_q', 3),
+                'vol': getattr(self.models, 'garch_vol', 'Garch'),
+                'mean': getattr(self.models, 'garch_mean', 'Zero'),
+                'dist': getattr(self.models, 'garch_dist', 'Normal'),
             }
         else:
             raise ValueError(f"Unknown model type: {model_type}")

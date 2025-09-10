@@ -45,7 +45,7 @@ class GlobalConfig:
     compute_shap: bool = False
 
     # Which models to run
-    models_to_run: List[str] = field(default_factory=lambda: ["arima", "xgb", "lstm", "stockmixer"])
+    models_to_run: List[str] = field(default_factory=lambda: ["arima", "garch", "xgb", "lstm", "stockmixer"])
 
     # Persistence
     artifacts_dir: str = "artifacts/compare_run"

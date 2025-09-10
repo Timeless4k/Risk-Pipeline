@@ -64,6 +64,7 @@ class ValidationConfig:
     min_test_size: int = 20
     gap: int = 0  # Gap between train and test sets
     expanding_window: bool = True  # True for expanding, False for sliding
+    embargo: int = 0  # Additional embargo periods to purge around split boundaries
     
     def validate(self) -> bool:
         """Validate configuration parameters."""
@@ -151,10 +152,13 @@ class WalkForwardValidator:
         splits = []
         total = len(X)
         gap = max(0, self.config.gap)
+        embargo = max(0, getattr(self.config, 'embargo', 0))
         start_test = max(adaptive_test_size, self.config.min_train_size)
         for s in range(1, max_splits + 1):
             end_test = min(total, start_test + adaptive_test_size)
             train_end = start_test - gap
+            # Apply embargo by removing the last 'embargo' observations from the training window
+            train_end = max(0, train_end - embargo)
             if train_end <= 0:
                 break
             train_idx = X.index[:train_end]
@@ -178,7 +182,8 @@ class WalkForwardValidator:
                        y: pd.Series,
                        splits: List[Tuple[pd.Index, pd.Index]],
                        asset: str,
-                       model_type: str) -> Dict[str, Any]:
+                       model_type: str,
+                       regimes: Optional[pd.Series] = None) -> Dict[str, Any]:
         """
         Evaluate a model using walk-forward cross-validation.
         
@@ -741,6 +746,37 @@ class WalkForwardValidator:
         self.logger.info(f"  Current cleaned dataset size: {metrics.get('total_samples', len(X))}")
         self.logger.info(f"{'='*80}\n")
         
+        # Optional regime-aware breakdown (for regression tasks only)
+        regime_metrics: Dict[str, Any] = {}
+        try:
+            if regimes is not None and isinstance(regimes, pd.Series) and getattr(model, 'task', None) != 'classification':
+                # Align regimes to dataset used
+                regimes_aligned = regimes.reindex(X.index, method='ffill')
+                # Build concatenated y_true/y_pred over splits
+                y_true_all = []
+                y_pred_all = []
+                reg_all = []
+                for i, (train_idx, test_idx) in enumerate(splits):
+                    if i < len(valid_results) and valid_results[i] is not None and isinstance(valid_results[i], dict):
+                        r = valid_results[i]
+                        if 'y_true' in r and 'y_pred' in r:
+                            y_true_all.extend(r['y_true'])
+                            y_pred_all.extend(r['y_pred'])
+                            reg_all.extend(regimes_aligned.loc[test_idx].tolist())
+                if y_true_all and y_pred_all and reg_all and len(y_true_all) == len(y_pred_all) == len(reg_all):
+                    df_rm = pd.DataFrame({'y': y_true_all, 'yhat': y_pred_all, 'reg': reg_all})
+                    for label, grp in df_rm.groupby('reg'):
+                        if len(grp) >= 10:
+                            err = grp['y'] - grp['yhat']
+                            mse = float(np.mean(err**2))
+                            rmse = float(np.sqrt(max(mse, 0.0)))
+                            mae = float(np.mean(np.abs(err)))
+                            den = np.clip(np.abs(grp['y'].values), 1e-8, None)
+                            mape = float(np.mean(np.abs(err.values) / den))
+                            regime_metrics[str(label)] = {'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'MAPE': mape, 'N': int(len(grp))}
+        except Exception:
+            regime_metrics = {}
+
         # Return comprehensive results for thesis analysis
         return {
             'metrics': metrics,
@@ -751,7 +787,8 @@ class WalkForwardValidator:
             'all_fold_indices': all_fold_indices,
             'n_splits': len(valid_results),
             'successful_splits': len(valid_results),
-            'total_splits': len(splits)
+            'total_splits': len(splits),
+            'regime_metrics': regime_metrics
         }
     
     def _generate_expanding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int) -> List[Tuple[pd.Index, pd.Index]]:

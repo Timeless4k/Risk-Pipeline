@@ -25,6 +25,11 @@
         "price_lag_days": [30, 60, 90]
     },
     "models": {
+        "garch_p": 1,
+        "garch_q": 1,
+        "garch_auto_order": true,
+        "garch_max_p": 3,
+        "garch_max_q": 3,
         "lstm_units": [128, 64, 32],
         "lstm_dropout": 0.2,
         "lstm_recurrent_dropout": 0.1,

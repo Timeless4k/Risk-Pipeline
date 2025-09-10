@@ -43,6 +43,7 @@ class ThesisReporter:
         self._generate_performance_analysis_report(output_dir, data_dir)
         self._generate_feature_importance_report(output_dir, data_dir)
         self._generate_statistical_significance_report(output_dir, data_dir)
+        self._generate_causality_caveats(output_dir)
         self._generate_visualization_guide(output_dir, data_dir)
         self._generate_executive_summary(output_dir, data_dir)
         
@@ -206,6 +207,32 @@ class ThesisReporter:
                 
         except Exception as e:
             logger.warning(f"Failed to generate performance analysis report: {e}")
+
+    def _generate_causality_caveats(self, report_dir: str):
+        """Add causal interpretability caveats and best-practice notes."""
+        try:
+            notes = {
+                'timestamp': datetime.now().isoformat(),
+                'title': 'Causality vs. Correlation: Interpretability Caveats',
+                'key_points': [
+                    'SHAP explains model predictions given the features; it does not establish causal relationships.',
+                    'Feature importance can be confounded by collinearity, proxy variables, and data leakage.',
+                    'For causal claims, consider instrumental variables, difference-in-differences, or causal DAGs.',
+                    'Use out-of-sample tests and regime-conditional stability checks to mitigate spurious relations.',
+                    'When possible, validate with natural experiments or exogenous shocks.'
+                ],
+                'recommended_methods': [
+                    'Causal graphs (DAGs) to encode assumptions',
+                    'Invariant Risk Minimization (IRM) across regimes/markets',
+                    'Granger causality for temporal predictiveness (not true causality)',
+                    'Sensitivity analyses to distribution shifts'
+                ]
+            }
+            path = os.path.join(report_dir, 'causal_interpretability_notes.json')
+            with open(path, 'w') as f:
+                json.dump(notes, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"Failed to generate causal interpretability notes: {e}")
     
     def _generate_feature_importance_report(self, report_dir: str, data_dir: str):
         """Generate feature importance analysis."""

@@ -303,7 +303,10 @@ class RiskPipeline:
             
             # Use configured models if none provided
             if models is None:
-                models = ['arima', 'lstm', 'stockmixer', 'xgboost']
+                try:
+                    models = list(getattr(self.config, 'models_to_run', [])) or ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
+                except Exception:
+                    models = ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
             
             logger.info(f"Processing assets: {assets}")
             logger.info(f"Running models: {models}")
@@ -339,23 +342,25 @@ class RiskPipeline:
                 # Persist features for downstream analysis (e.g., SHAP)
                 self.results_manager.store_features(asset_features, asset)
 
-                # Run regression models
-                regression_results = self._run_models(
-                    features=asset_features,
-                    asset=asset,
-                    task='regression',
-                    models=models,
-                    save_models=save_models
-                )
+                regression_results = {}
+                if getattr(self.config, 'tasks', None) is None or getattr(self.config.tasks, 'regression_enabled', True):
+                    regression_results = self._run_models(
+                        features=asset_features,
+                        asset=asset,
+                        task='regression',
+                        models=models,
+                        save_models=save_models
+                    )
                 
-                # Run classification models
-                classification_results = self._run_models(
-                    features=asset_features,
-                    asset=asset,
-                    task='classification',
-                    models=[m for m in models if m != 'arima'],  # ARIMA doesn't support classification
-                    save_models=save_models
-                )
+                classification_results = {}
+                if getattr(self.config, 'tasks', None) is None or getattr(self.config.tasks, 'classification_enabled', True):
+                    classification_results = self._run_models(
+                        features=asset_features,
+                        asset=asset,
+                        task='classification',
+                        models=[m for m in models if m != 'arima'],  # ARIMA doesn't support classification
+                        save_models=save_models
+                    )
                 
                 results[asset] = {
                     'regression': regression_results,
@@ -453,6 +458,81 @@ class RiskPipeline:
             # Restore original config
             self.config.training.walk_forward_splits = original_splits
             self.config.training.test_size = original_test_size
+
+    def run_cross_market_transfer(self,
+                                  source_assets: Optional[List[str]] = None,
+                                  target_assets: Optional[List[str]] = None,
+                                  models: Optional[List[str]] = None,
+                                  task: str = 'regression') -> Dict[str, Any]:
+        """Train on source (e.g., US) assets and evaluate on target (e.g., AU) assets."""
+        logger.info("Running cross-market transfer experiment")
+        if models is None:
+            models = ['xgboost', 'lstm']
+        if source_assets is None:
+            source_assets = self.config.data.us_assets
+        if target_assets is None:
+            target_assets = self.config.data.au_assets
+        # Load data
+        data = self.data_loader.download_data(
+            symbols=list(set(source_assets + target_assets)),
+            start_date=self.config.data.start_date,
+            end_date=self.config.data.end_date
+        )
+        # Create features
+        feats = self.feature_engineer.create_features(data=data)
+        # Aggregate source training data by concatenation
+        X_src_list, y_src_list = [], []
+        for a in source_assets:
+            if a in feats and not feats[a]['features'].empty:
+                X_src_list.append(feats[a]['features'])
+                y_src_list.append(feats[a]['volatility_target'] if task == 'regression' else feats[a]['regime_target'])
+        if not X_src_list:
+            return {'error': 'No source features'}
+        X_src = pd.concat(X_src_list, axis=0).fillna(method='ffill').fillna(method='bfill')
+        y_src = pd.concat(y_src_list, axis=0).reindex(X_src.index, method='ffill')
+        # Results dict
+        transfer_results: Dict[str, Any] = {}
+        # For each model, train on source, evaluate per target asset
+        for m in models:
+            try:
+                params = self.config.get_model_config(m)
+            except Exception:
+                params = {}
+            model = ModelFactory.create_model(
+                model_type=m,
+                task=task,
+                input_shape=X_src.shape,
+                n_classes=(len(pd.Series(y_src).unique()) if task == 'classification' else None),
+                **params
+            )
+            # Build if needed
+            if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):
+                try:
+                    model.build_model(X_src.shape)
+                except Exception:
+                    pass
+            # Fit on source
+            model.fit(X_src, y_src)
+            # Evaluate on each target asset using the validator splits of that asset
+            per_target: Dict[str, Any] = {}
+            for tgt in target_assets:
+                if tgt not in feats:
+                    continue
+                X_t = feats[tgt]['features']
+                y_t = feats[tgt]['volatility_target'] if task == 'regression' else feats[tgt]['regime_target']
+                X_t_clean, y_t_clean = self.validator.clean_data_for_training(X_t, y_t)
+                splits = self.validator.split(X_t_clean)
+                per_target[tgt] = self.validator.evaluate_model(
+                    model=model,
+                    X=X_t_clean,
+                    y=y_t_clean,
+                    splits=splits,
+                    asset=tgt,
+                    model_type=m,
+                    regimes=feats[tgt].get('regime_target') if task == 'regression' else None
+                )
+            transfer_results[m] = per_target
+        return transfer_results
     
     def train_models_only(self, assets: List[str], models: List[str], save: bool = True) -> Dict[str, Any]:
         """
@@ -706,13 +786,22 @@ class RiskPipeline:
                     results[model_type] = {'error': 'Model not built properly'}
                     continue
                 
+                # Optional: pass regimes for regime-aware reporting in regression task
+                regime_series = None
+                try:
+                    if task == 'regression' and isinstance(features.get('regime_target'), (pd.Series, pd.DataFrame)):
+                        regime_series = features.get('regime_target') if isinstance(features.get('regime_target'), pd.Series) else None
+                except Exception:
+                    regime_series = None
+
                 model_results = self.validator.evaluate_model(
                     model=model,
                     X=X_clean,
                     y=y_clean,
                     splits=splits,
                     asset=asset,
-                    model_type=model_type
+                    model_type=model_type,
+                    regimes=regime_series
                 )
                 
                 results[model_type] = model_results
@@ -743,6 +832,92 @@ class RiskPipeline:
                 logger.error(f"Error running {model_type} for {asset} {task}: {str(e)}")
                 results[model_type] = {'error': str(e)}
         
+        # Ensemble integration (voting/blending) using available base-model predictions
+        try:
+            ens_cfg = getattr(self.config, 'ensemble', None)
+            if ens_cfg and getattr(ens_cfg, 'enable_ensemble', False):
+                voting_models = [m for m in models if m in getattr(ens_cfg, 'voting_estimators', []) and m in results and isinstance(results[m], dict)]
+                if len(voting_models) >= 2:
+                    # Align per-fold predictions across models by index
+                    per_model_preds = {}
+                    per_model_true = {}
+                    folds = None
+                    for m in voting_models:
+                        r = results[m]
+                        if not isinstance(r, dict):
+                            continue
+                        preds = r.get('all_predictions')
+                        trues = r.get('all_actuals')
+                        folds = r.get('all_fold_indices', folds)
+                        if preds and trues and len(preds) == len(trues):
+                            per_model_preds[m] = np.asarray(preds, dtype=float)
+                            per_model_true[m] = np.asarray(trues, dtype=float)
+                    if per_model_preds:
+                        # Use the first model's y_true as reference
+                        ref_model = next(iter(per_model_true))
+                        y_true_all = per_model_true[ref_model]
+                        # Weighted average for regression; majority vote for classification
+                        if task == 'regression':
+                            weights = np.array(ens_cfg.ensemble_weights[:len(per_model_preds)], dtype=float)
+                            if weights.sum() <= 0 or len(weights) != len(per_model_preds):
+                                weights = np.ones(len(per_model_preds), dtype=float)
+                            weights = weights / weights.sum()
+                            pred_stack = np.column_stack([per_model_preds[m] for m in per_model_preds])
+                            y_ens = (pred_stack @ weights)
+                            # Compute metrics similar to validator
+                            err = y_true_all - y_ens
+                            mse = float(np.mean(err**2))
+                            rmse = float(np.sqrt(max(mse, 0.0)))
+                            mae = float(np.mean(np.abs(err)))
+                            den = np.clip(np.abs(y_true_all), 1e-8, None)
+                            mape = float(np.mean(np.abs(err) / den))
+                            # R2
+                            ss_res = float(np.sum((y_true_all - y_ens)**2))
+                            ss_tot = float(np.sum((y_true_all - np.mean(y_true_all))**2)) + 1e-12
+                            r2 = 1.0 - ss_res/ss_tot
+                            results['ensemble_voting'] = {
+                                'metrics': {
+                                    'MSE': mse, 'RMSE': rmse, 'MAE': mae, 'R2': r2, 'MAPE': mape,
+                                },
+                                'all_predictions': y_ens.tolist(),
+                                'all_actuals': y_true_all.tolist(),
+                                'all_fold_indices': folds or [],
+                                'n_splits': results[ref_model].get('n_splits', 0),
+                                'successful_splits': results[ref_model].get('successful_splits', 0),
+                                'total_splits': results[ref_model].get('total_splits', 0)
+                            }
+                        else:
+                            # Classification majority vote from hard labels
+                            pred_stack = np.column_stack([per_model_preds[m] for m in per_model_preds]).astype(int)
+                            # Handle possible non-integer labels gracefully
+                            try:
+                                from scipy import stats as _stats
+                                mode_res = _stats.mode(pred_stack, axis=1, keepdims=False)
+                                y_ens = mode_res.mode
+                            except Exception:
+                                # Fallback: round mean
+                                y_ens = np.rint(np.mean(pred_stack, axis=1)).astype(int)
+                            y_true_all = np.rint(next(iter(per_model_true.values()))).astype(int)
+                            from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, balanced_accuracy_score
+                            results['ensemble_voting'] = {
+                                'metrics': {
+                                    'Accuracy': float(accuracy_score(y_true_all, y_ens)),
+                                    'F1': float(f1_score(y_true_all, y_ens, average='weighted', zero_division=0)),
+                                    'Precision': float(precision_score(y_true_all, y_ens, average='weighted', zero_division=0)),
+                                    'Recall': float(recall_score(y_true_all, y_ens, average='weighted', zero_division=0)),
+                                    'Balanced_Accuracy': float(balanced_accuracy_score(y_true_all, y_ens)),
+                                },
+                                'all_predictions': y_ens.tolist(),
+                                'all_actuals': y_true_all.tolist(),
+                                'all_fold_indices': folds or [],
+                                'n_splits': results[ref_model].get('n_splits', 0),
+                                'successful_splits': results[ref_model].get('successful_splits', 0),
+                                'total_splits': results[ref_model].get('total_splits', 0)
+                            }
+            
+        except Exception as ens_err:
+            logger.warning(f"Ensemble integration skipped due to error: {ens_err}")
+
         return results
     
     def _generate_comprehensive_visualizations(self, results: Dict[str, Any], shap_results: Dict[str, Any]):

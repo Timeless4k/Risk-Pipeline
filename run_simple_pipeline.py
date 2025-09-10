@@ -30,15 +30,16 @@ def main():
     start_time = time.time()
     
     try:
-        # Initialize pipeline
+        # Initialize pipeline with config file
         print("📊 Initializing RiskPipeline...")
         experiment_name = f"simple_run_{int(time.time())}"
-        pipeline = RiskPipeline(experiment_name=experiment_name)
+        config_path = str(project_root / 'configs' / 'pipeline_config.json')
+        pipeline = RiskPipeline(config_path=config_path, experiment_name=experiment_name)
         print("✅ Pipeline initialized successfully!")
         
-        # Define assets and models to run
-        assets = ['AAPL', 'MSFT', '^GSPC', 'IOZ.AX', 'CBA.AX', 'BHP.AX']
-        models = ['arima', 'enhanced_arima', 'lstm', 'stockmixer', 'xgboost']  # Added enhanced_arima
+        # Define assets and models from config
+        assets = pipeline.config.data.all_assets
+        models = list(getattr(pipeline.config, 'models_to_run', [])) or ['arima', 'garch', 'enhanced_arima', 'xgboost', 'lstm', 'stockmixer']
         
         # Minimal, concise output
         print(f"Assets: {', '.join(assets)}")

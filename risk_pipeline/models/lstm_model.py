@@ -164,13 +164,14 @@ class LSTMModel(BaseModel):
             raise ImportError("TensorFlow is not available. Install TensorFlow or disable LSTM model.")
         self.input_shape = input_shape
         
-        # FIXED: Properly handle 2D input for tabular data
+        # Always use LSTM processing. Normalize shapes:
+        # - If input is [N, F], treat as single-timestep sequence: [N, 1, F]
+        # - If input is [N, T, F], use as-is
         if len(input_shape) == 2:
-            # [N, F] - use as is for tabular data (no time dimension)
-            self.input_shape = input_shape
-            self.logger.info(f"Using 2D input shape for tabular data: {self.input_shape}")
+            # Convert to pseudo-3D shape metadata for consistent handling downstream
+            self.input_shape = (input_shape[0], 1, input_shape[1])
+            self.logger.info(f"Using 2D input reshaped to sequence [T=1]: {self.input_shape}")
         elif len(input_shape) == 3:
-            # [N, T, F] - use as is for sequence data
             self.input_shape = input_shape
             self.logger.info(f"Using 3D input shape for sequence data: {self.input_shape}")
         else:
@@ -182,51 +183,51 @@ class LSTMModel(BaseModel):
         
         try:
             with tf.device(device):
-                # Enhanced architecture
-                if len(self.input_shape) == 2:
-                    inputs = tf.keras.Input(shape=(self.input_shape[1],))
-                    x = tf.keras.layers.BatchNormalization()(inputs)
-                    x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
-                    for i, u in enumerate([max(self.units[0], 64), max(self.units[1] if len(self.units) > 1 else self.units[0]//2, 32), 32]):
-                        x = tf.keras.layers.Dense(u, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(1e-4), name=f'dense_tab_{i}')(x)
-                        x = tf.keras.layers.BatchNormalization()(x)
-                        x = tf.keras.layers.Dropout(self.dropout)(x)
+                # Inputs are always sequences now (T may be 1)
+                inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))
+                x = tf.keras.layers.BatchNormalization()(inputs)
+                x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
+
+                time_steps = self.input_shape[1]
+                enable_multi_scale = bool(self.use_multi_scale and time_steps is not None and time_steps > 1)
+
+                # Optional multi-scale residual features (only meaningful for T>1)
+                if enable_multi_scale:
+                    ms_block = MultiScaleLSTMBlock(self.multi_scale_units, self.scales, self.dropout, self.recurrent_dropout, name='multi_scale')
+                    ms_feat = ms_block(x)
+                    ms_feat = tf.keras.layers.Dense(self.input_shape[2], activation='tanh', name='ms_dense')(ms_feat)
+                    ms_feat = tf.keras.layers.Reshape((1, self.input_shape[2]))(ms_feat)
+                    ms_feat = tf.keras.layers.Lambda(lambda t: tf.tile(t, [1, tf.shape(x)[1], 1]))(ms_feat)
+                    x = tf.keras.layers.Add()([x, ms_feat])
+
+                # Stacked (bi)LSTMs with BN+Dropout
+                for i, u in enumerate(self.units):
+                    # Base rule: return_sequences=True for all but last. If attention=True, force True for last as well.
+                    is_last = (i == len(self.units) - 1)
+                    return_sequences = (not is_last) or bool(self.use_attention)
+                    lstm = tf.keras.layers.LSTM(
+                        u,
+                        return_sequences=return_sequences,
+                        dropout=self.dropout,
+                        recurrent_dropout=self.recurrent_dropout,
+                        kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+                        name=f'lstm_{i}'
+                    )
+                    if self.use_bidirectional:
+                        x = tf.keras.layers.Bidirectional(lstm, name=f'bilstm_{i}')(x)
+                    else:
+                        x = lstm(x)
+                    x = tf.keras.layers.BatchNormalization(name=f'bn_lstm_{i}')(x)
+                    x = tf.keras.layers.Dropout(self.dropout, name=f'dp_lstm_{i}')(x)
+
+                # Attention or last timestep pooling
+                if self.use_attention:
+                    last_dim = self.units[-1] * (2 if self.use_bidirectional else 1)
+                    attn = AttentionLayer(last_dim, name='attention')
+                    x, _ = attn(x)
                 else:
-                    inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))
-                    x = tf.keras.layers.BatchNormalization()(inputs)
-                    x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
-                    # Multi-scale residual features
-                    if self.use_multi_scale:
-                        ms_block = MultiScaleLSTMBlock(self.multi_scale_units, self.scales, self.dropout, self.recurrent_dropout, name='multi_scale')
-                        ms_feat = ms_block(x)
-                        ms_feat = tf.keras.layers.Dense(self.input_shape[2], activation='tanh', name='ms_dense')(ms_feat)
-                        ms_feat = tf.keras.layers.Reshape((1, self.input_shape[2]))(ms_feat)
-                        ms_feat = tf.keras.layers.Lambda(lambda t: tf.tile(t, [1, tf.shape(x)[1], 1]))(ms_feat)
-                        x = tf.keras.layers.Add()([x, ms_feat])
-                    # Stacked (bi)LSTMs with BN+Dropout
-                    for i, u in enumerate(self.units):
-                        return_sequences = (i < len(self.units) - 1) or self.use_attention
-                        lstm = tf.keras.layers.LSTM(
-                            u,
-                            return_sequences=return_sequences,
-                            dropout=self.dropout,
-                            recurrent_dropout=self.recurrent_dropout,
-                            kernel_regularizer=tf.keras.regularizers.l2(1e-4),
-                            name=f'lstm_{i}'
-                        )
-                        if self.use_bidirectional:
-                            x = tf.keras.layers.Bidirectional(lstm, name=f'bilstm_{i}')(x)
-                        else:
-                            x = lstm(x)
-                        x = tf.keras.layers.BatchNormalization(name=f'bn_lstm_{i}')(x)
-                        x = tf.keras.layers.Dropout(self.dropout, name=f'dp_lstm_{i}')(x)
-                    # Attention or last timestep
-                    if self.use_attention and len(self.units) > 0:
-                        last_dim = self.units[-1] * (2 if self.use_bidirectional else 1)
-                        attn = AttentionLayer(last_dim, name='attention')
-                        x, _ = attn(x)
-                    elif len(x.shape) == 3:
-                        x = x[:, -1, :]
+                    # If last LSTM returned sequences=False, x is already [B, D]; otherwise take last timestep
+                    x = x if len(x.shape) == 2 else x[:, -1, :]
                 
                 # Output layer
                 if self.task == 'classification':
@@ -298,7 +299,12 @@ class LSTMModel(BaseModel):
             y_arr = y.values if isinstance(y, pd.Series) else y
             if len(self.input_shape) == 3:
                 if X_arr.ndim == 2:
-                    X_seq, y_seq = self._prepare_sequences(X_arr, y_arr)
+                    # If model expects T=1, simply expand dims; otherwise prepare overlapping sequences
+                    if self.input_shape[1] == 1:
+                        X_seq = np.expand_dims(X_arr, axis=1)
+                        y_seq = y_arr
+                    else:
+                        X_seq, y_seq = self._prepare_sequences(X_arr, y_arr)
                 else:
                     X_seq, y_seq = X_arr, y_arr
             else:
@@ -432,7 +438,10 @@ class LSTMModel(BaseModel):
             X_arr = X.values if isinstance(X, pd.DataFrame) else X
             if len(self.input_shape) == 3:
                 if X_arr.ndim == 2:
-                    X_reshaped, _ = self._prepare_sequences(X_arr)
+                    if self.input_shape[1] == 1:
+                        X_reshaped = np.expand_dims(X_arr, axis=1)
+                    else:
+                        X_reshaped, _ = self._prepare_sequences(X_arr)
                 else:
                     X_reshaped = X_arr
             else:

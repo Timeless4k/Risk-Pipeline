@@ -14,6 +14,7 @@ tensorflow[and-cuda]==2.10.1
 xgboost==1.7.6
 shap==0.41.0
 statsmodels==0.13.5
+arch==6.3.0
 matplotlib==3.6.3
 seaborn==0.12.2
 tqdm==4.66.4

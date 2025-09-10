@@ -60,7 +60,7 @@ class MarketRegimeDetector:
         self.config = config or RegimeDetectorConfig()
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-    def detect(self, returns: pd.Series, method: Literal['auto', 'hmm', 'threshold', 'garch'] = 'auto') -> pd.Series:
+    def detect(self, returns: pd.Series, method: Literal['auto', 'hmm', 'threshold', 'garch', 'slope'] = 'auto') -> pd.Series:
         """Detect regimes using the specified method.
 
         - auto: prefer HMM, then GARCH, then threshold
@@ -80,11 +80,18 @@ class MarketRegimeDetector:
                     return self._detect_garch(returns)
                 except Exception as e:
                     self.logger.warning(f"GARCH detection failed, falling back. Reason: {e}")
-            return self._detect_threshold(returns)
+            # Prefer slope-based over simple threshold when advanced methods are unavailable
+            try:
+                return self._detect_slope(returns)
+            except Exception as e:
+                self.logger.warning(f"Slope detection failed, falling back to threshold. Reason: {e}")
+                return self._detect_threshold(returns)
         elif method == 'hmm':
             return self._detect_hmm(returns)
         elif method == 'garch':
             return self._detect_garch(returns)
+        elif method == 'slope':
+            return self._detect_slope(returns)
         else:
             return self._detect_threshold(returns)
 
@@ -144,4 +151,41 @@ class MarketRegimeDetector:
         regimes[(cond_vol > q_low) & (cond_vol < q_high)] = 'Sideways'
         return regimes.reindex(returns.index, method='ffill')
 
+
+    def _detect_slope(self, returns: pd.Series) -> pd.Series:
+        """Slope-based classification using rolling OLS slope of cumulative returns.
+
+        We compute the rolling slope of cumulative log-returns over a window. This is
+        approximately the average return per step. We compare the slope against mean
+        thresholds derived from bull/bear cumulative thresholds.
+        """
+        win = max(5, int(self.config.window))
+        # Cumulative sum of returns (log-price up to a constant)
+        cum = returns.cumsum()
+
+        # Precompute centered time index for OLS slope per window
+        t = np.arange(win, dtype=float)
+        t_mean = t.mean()
+        t_var = ((t - t_mean) ** 2).sum()
+        if t_var == 0:
+            # Fallback to threshold if something goes wrong
+            return self._detect_threshold(returns)
+
+        def slope_window(y: np.ndarray) -> float:
+            # OLS slope: cov(t, y)/var(t)
+            y_mean = float(np.mean(y))
+            cov_ty = float(((t - t_mean) * (y - y_mean)).sum())
+            return cov_ty / t_var
+
+        slopes = cum.rolling(window=win, min_periods=max(5, win // 2)).apply(slope_window, raw=True)
+
+        # Convert cumulative thresholds to mean-per-step thresholds
+        bull_mean_thr = float(self.config.bull_threshold) / win
+        bear_mean_thr = float(self.config.bear_threshold) / win
+
+        regimes = pd.Series(index=returns.index, dtype='object')
+        regimes[slopes > bull_mean_thr] = 'Bull'
+        regimes[slopes < bear_mean_thr] = 'Bear'
+        regimes[regimes.isna()] = 'Sideways'
+        return regimes
 

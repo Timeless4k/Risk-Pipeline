@@ -20,7 +20,18 @@ try:
 except ImportError:
     STOCKMIXER_AVAILABLE = False
 
+# Check GARCH availability
+try:
+    from .garch_model import GARCHModel
+    GARCH_AVAILABLE = True
+except Exception:
+    GARCH_AVAILABLE = False
+    GARCHModel = None
+
 __all__ = ['BaseModel', 'ARIMAModel', 'XGBoostModel']
+
+if GARCH_AVAILABLE:
+    __all__.append('GARCHModel')
 
 if STOCKMIXER_AVAILABLE:
     __all__.append('StockMixerModel')

@@ -28,6 +28,13 @@ except Exception:
     StockMixerModel = None
 
 try:
+    from risk_pipeline.models.garch_model import GARCHModel
+    GARCH_AVAILABLE = True
+except Exception:
+    GARCH_AVAILABLE = False
+    GARCHModel = None
+
+try:
     from risk_pipeline.models.xgboost_model import XGBoostModel
     XGBOOST_AVAILABLE = True
 except ImportError:
@@ -45,7 +52,7 @@ from risk_pipeline.core.io_utils import write_atomic
 
 
 SEQ_MODELS = {"lstm", "stockmixer"}
-FLAT_MODELS = {"xgb", "arima", "linear"}
+FLAT_MODELS = {"xgb", "arima", "linear", "garch"}
 
 
 @dataclass
@@ -128,6 +135,9 @@ def build_models(cfg: GlobalConfig) -> Dict[str, any]:
     if "arima" in cfg.models_to_run and ARIMA_AVAILABLE:
         models["arima"] = FlatAdapterModel(ARIMAModel(model_type='arima', task='regression'), "arima")
         available.append("arima")
+    if "garch" in cfg.models_to_run and GARCH_AVAILABLE:
+        models["garch"] = FlatAdapterModel(GARCHModel(), "garch")
+        available.append("garch")
 
     # Ensure cfg.models_to_run reflects actual availability so downstream assertions pass
     cfg.models_to_run = available
