@@ -85,6 +85,10 @@ class ModelConfig:
     arima_max_p: int = 5
     arima_max_d: int = 2
     arima_max_q: int = 5
+    # ARIMA feature selection controls
+    arima_max_features: int = 10
+    arima_feature_selection_method: str = 'mutual_info'
+    arima_use_exog: bool = True
 
     garch_p: int = 1
     garch_q: int = 1
@@ -108,6 +112,8 @@ class TrainingConfig:
     """Configuration for training parameters."""
     walk_forward_splits: int = 12  # Increased from 8 to 12 for extended data
     test_size: int = 252  # Increased from 126 to 252 (1 year instead of 6 months)
+    # Optional cap on maximum number of training periods used per fold
+    max_train_size: Optional[int] = None
     batch_size: int = 128  # Increased from 64 to 128 for better GPU utilization
     epochs: int = 200  # Increased from 100 to 200 as requested
     early_stopping_patience: int = 30  # Increased from 20 to 30
@@ -372,6 +378,9 @@ class PipelineConfig:
             arima_max_p=model_config.get('arima_max_p', 5),
             arima_max_d=model_config.get('arima_max_d', 2),
             arima_max_q=model_config.get('arima_max_q', 5),
+            arima_max_features=model_config.get('arima_max_features', 10),
+            arima_feature_selection_method=model_config.get('arima_feature_selection_method', 'mutual_info'),
+            arima_use_exog=model_config.get('arima_use_exog', True),
             garch_p=model_config.get('garch_p', 1),
             garch_q=model_config.get('garch_q', 1),
             garch_auto_order=model_config.get('garch_auto_order', True),
@@ -387,6 +396,7 @@ class PipelineConfig:
         self.training = TrainingConfig(
             walk_forward_splits=training_config.get('walk_forward_splits', 8),
             test_size=training_config.get('test_size', 252),
+            max_train_size=training_config.get('max_train_size', None),
             batch_size=training_config.get('batch_size', 64),
             epochs=training_config.get('epochs', 100),
             early_stopping_patience=training_config.get('early_stopping_patience', 20),
@@ -511,6 +521,12 @@ class PipelineConfig:
             risk_metrics=advanced_config.get('risk_metrics', ['var', 'cvar', 'sharpe', 'sortino', 'calmar']),
             confidence_level=advanced_config.get('confidence_level', 0.95)
         )
+
+        # Optional: list of models to run (override defaults)
+        try:
+            self.models_to_run = list(config_dict.get('models_to_run', [])) if isinstance(config_dict.get('models_to_run', []), list) else []
+        except Exception:
+            self.models_to_run = []
     
     @classmethod
     def from_file(cls, config_path: str) -> 'PipelineConfig':
@@ -761,10 +777,14 @@ class PipelineConfig:
                 'order': tuple(getattr(self.models, 'arima_order', [1, 1, 1])),
                 'seasonal_order': tuple(getattr(self.models, 'arima_seasonal_order', [0, 0, 0, 0])),
                 'seasonal': any(getattr(self.models, 'arima_seasonal_order', [0, 0, 0, 0])),
-                'auto_order': getattr(self.models, 'arima_auto_order', True),
+                # Align naming with ARIMAModel("auto_order_selection") while keeping backward compat
+                'auto_order_selection': getattr(self.models, 'arima_auto_order', True),
                 'max_p': getattr(self.models, 'arima_max_p', 5),
                 'max_d': getattr(self.models, 'arima_max_d', 2),
                 'max_q': getattr(self.models, 'arima_max_q', 5),
+                'max_features': getattr(self.models, 'arima_max_features', 10),
+                'feature_selection_method': getattr(self.models, 'arima_feature_selection_method', 'mutual_info'),
+                'use_exog': getattr(self.models, 'arima_use_exog', True),
                 'n_jobs': self.training.joblib_n_jobs
             }
         elif model_type == 'garch':

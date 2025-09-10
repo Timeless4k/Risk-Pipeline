@@ -298,10 +298,11 @@ class RiskPipeline:
             if assets is None:
                 assets = self.config.data.all_assets
             
-            # Use configured models if none provided
+            # Use configured models if none provided (honor models_to_run in config if present)
             if models is None:
                 try:
-                    models = list(getattr(self.config, 'models_to_run', [])) or ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
+                    cfg_models = list(getattr(self.config, 'models_to_run', []))
+                    models = cfg_models if cfg_models else ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
                 except Exception:
                     models = ['arima', 'garch', 'xgboost', 'lstm', 'stockmixer']
             

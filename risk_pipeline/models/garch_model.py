@@ -35,7 +35,8 @@ class GARCHModel(BaseModel):
         self.classification_threshold = threshold  # used if task == 'classification'
 
         # Exogenous feature support (mean model ARX)
-        self.use_exog_mean = bool(kwargs.get('use_exog_mean', True))
+        # Default to False to avoid exogenous forecasting shape issues unless explicitly enabled
+        self.use_exog_mean = bool(kwargs.get('use_exog_mean', False))
         self.max_exog_features = int(kwargs.get('max_exog_features', 64))
         self.exog_scaler: Optional[StandardScaler] = StandardScaler()
         self.exog_feature_names: Optional[list] = None
@@ -118,7 +119,11 @@ class GARCHModel(BaseModel):
                     exog_train = None
 
             if exog_train is not None:
-                model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
+                try:
+                    model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
+                except Exception as e:
+                    self.logger.warning(f"Falling back to no exogenous mean model due to: {e}")
+                    model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
             else:
                 model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
 
@@ -191,7 +196,11 @@ class GARCHModel(BaseModel):
                     exog_forecast = None
 
             if exog_forecast is not None:
-                forecast = self.fitted_model.forecast(horizon=horizon, x=exog_forecast)
+                try:
+                    forecast = self.fitted_model.forecast(horizon=horizon, x=exog_forecast)
+                except Exception as e:
+                    self.logger.warning(f"Forecast exog failed, using no-exog forecast: {e}")
+                    forecast = self.fitted_model.forecast(horizon=horizon)
             else:
                 forecast = self.fitted_model.forecast(horizon=horizon)
             volatility_forecast = np.sqrt(forecast.variance.values[-1, :])

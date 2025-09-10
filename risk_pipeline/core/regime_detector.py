@@ -163,16 +163,16 @@ class MarketRegimeDetector:
         # Cumulative sum of returns (log-price up to a constant)
         cum = returns.cumsum()
 
-        # Precompute centered time index for OLS slope per window
-        t = np.arange(win, dtype=float)
-        t_mean = t.mean()
-        t_var = ((t - t_mean) ** 2).sum()
-        if t_var == 0:
-            # Fallback to threshold if something goes wrong
-            return self._detect_threshold(returns)
-
         def slope_window(y: np.ndarray) -> float:
-            # OLS slope: cov(t, y)/var(t)
+            # OLS slope with dynamic window length: cov(t, y)/var(t)
+            n = int(len(y))
+            if n < 2:
+                return 0.0
+            t = np.arange(n, dtype=float)
+            t_mean = t.mean()
+            t_var = float(((t - t_mean) ** 2).sum())
+            if t_var == 0.0:
+                return 0.0
             y_mean = float(np.mean(y))
             cov_ty = float(((t - t_mean) * (y - y_mean)).sum())
             return cov_ty / t_var

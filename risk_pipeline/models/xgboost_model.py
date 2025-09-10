@@ -64,6 +64,12 @@ class XGBoostModel(BaseModel):
         self.params['predictor'] = 'cpu_predictor'
         # Remove any GPU-specific parameters that may have been passed in
         self.params.pop('gpu_id', None)
+        self.params.pop('gpu_id', None)
+        # Also guard against any booster device hints
+        if 'device' in self.params and self.params['device'] != 'cpu':
+            self.params['device'] = 'cpu'
+        if 'tree_method' in self.params and str(self.params['tree_method']).startswith('gpu'):
+            self.params['tree_method'] = 'hist'
 
         # Create model
         if task == 'classification':

@@ -49,7 +49,8 @@ def train_once(model, X_train, y_train, X_val, y_val, cfg: GlobalConfig) -> Tupl
     start_fit = time.time()
     # Fit model
     if hasattr(model, 'fit'):
-        model.fit(X_train, y_train, cfg)
+        # Pass cfg as keyword to support signatures like fit(self, X, y, **kwargs)
+        model.fit(X_train, y_train, cfg=cfg)
     else:
         # legacy fallback
         model.train(X_train, y_train)
