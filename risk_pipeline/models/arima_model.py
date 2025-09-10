@@ -132,7 +132,9 @@ class FinancialTimeSeriesAnalyzer:
 class AdvancedOrderSelection:
     def __init__(self, max_p: int = 5, max_d: int = 2, max_q: int = 5,
                  seasonal_max_P: int = 2, seasonal_max_D: int = 1, seasonal_max_Q: int = 2,
-                 m: int = 0, information_criterion: str = 'aic'):
+                 m: int = 0, information_criterion: str = 'aic',
+                 selection_metric: str = 'aic', candidate_orders: Optional[List[Tuple[int, int, int]]] = None,
+                 val_fraction: float = 0.2, selection_maxiter: int = 100):
         self.max_p = max_p
         self.max_d = max_d
         self.max_q = max_q
@@ -141,57 +143,100 @@ class AdvancedOrderSelection:
         self.seasonal_max_Q = seasonal_max_Q
         self.m = m
         self.ic = information_criterion.lower()
+        self.selection_metric = selection_metric.lower()
+        self.candidate_orders = candidate_orders
+        self.val_fraction = max(0.05, min(0.5, float(val_fraction)))
+        self.selection_maxiter = max(50, int(selection_maxiter))
 
     def select_order(self, endog: pd.Series, exog: pd.DataFrame = None,
                      use_seasonal: bool = False) -> Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]:
-        logger.info(f"Starting advanced order selection with {CPU_COUNT} cores")
-        best_ic = np.inf
+        logger.info(f"Starting advanced order selection with {CPU_COUNT} cores (metric={self.selection_metric})")
+        best_score = np.inf
         best_order = (1, 1, 1)
         best_seasonal_order = (0, 0, 0, 0)
         optimal_d, _ = FinancialTimeSeriesAnalyzer.detect_optimal_differencing(endog, self.max_d)
-        p_range = range(self.max_p + 1)
-        d_range = [optimal_d]
-        q_range = range(self.max_q + 1)
-        if use_seasonal and self.m > 1:
-            P_range = range(self.seasonal_max_P + 1)
-            D_range = range(self.seasonal_max_D + 1)
-            Q_range = range(self.seasonal_max_Q + 1)
+
+        # Build candidate orders
+        if self.candidate_orders:
+            candidate_orders = [(p, optimal_d, q) for (p, _, q) in self.candidate_orders]
         else:
-            P_range = [0]
-            D_range = [0]
-            Q_range = [0]
-        for p in p_range:
-            for d in d_range:
-                for q in q_range:
-                    for P in P_range:
-                        for D in D_range:
-                            for Q in Q_range:
-                                order = (p, d, q)
-                                seasonal_order = (P, D, Q, self.m) if use_seasonal else (0, 0, 0, 0)
-                                try:
-                                    if exog is not None:
-                                        model = SARIMAX(endog, exog=exog, order=order, seasonal_order=seasonal_order,
-                                                        enforce_stationarity=False, enforce_invertibility=False,
-                                                        trend=None)
-                                    else:
-                                        model = SARIMAX(endog, order=order, seasonal_order=seasonal_order,
-                                                        enforce_stationarity=False, enforce_invertibility=False)
-                                    fitted = model.fit(disp=False, maxiter=200, method='lbfgs')
-                                    if self.ic == 'aic':
-                                        ic_value = fitted.aic
-                                    elif self.ic == 'bic':
-                                        ic_value = fitted.bic
-                                    elif self.ic == 'hqic':
-                                        ic_value = fitted.hqic
-                                    else:
-                                        ic_value = fitted.aic
-                                    if ic_value < best_ic:
-                                        best_ic = ic_value
-                                        best_order = order
-                                        best_seasonal_order = seasonal_order
-                                except Exception:
-                                    continue
-        logger.info(f"Order selection complete: ARIMA{best_order} x {best_seasonal_order} ({self.ic.upper()}={best_ic:.2f})")
+            # Focused small set first, bounded by max_p/max_q
+            base_candidates = [(0, optimal_d, 1), (1, optimal_d, 0), (1, optimal_d, 1),
+                               (2, optimal_d, 1), (1, optimal_d, 2), (2, optimal_d, 2), (3, optimal_d, 1)]
+            candidate_orders = [(p, d, q) for (p, d, q) in base_candidates if p <= self.max_p and q <= self.max_q]
+            # Fallback to small grid if too few
+            if len(candidate_orders) < 3:
+                candidate_orders = []
+                for p in range(min(3, self.max_p) + 1):
+                    for q in range(min(3, self.max_q) + 1):
+                        candidate_orders.append((p, optimal_d, q))
+
+        if use_seasonal and self.m > 1:
+            seasonal_orders = [(P, D, Q, self.m) for P in range(min(1, self.seasonal_max_P) + 1)
+                               for D in range(min(1, self.seasonal_max_D) + 1)
+                               for Q in range(min(1, self.seasonal_max_Q) + 1)]
+        else:
+            seasonal_orders = [(0, 0, 0, 0)]
+
+        # Validation split for RMSE selection
+        n = len(endog)
+        n_val = max(50, int(self.val_fraction * n)) if self.selection_metric == 'rmse' else 0
+        if self.selection_metric == 'rmse' and n_val < n // 2:
+            y_train = endog.iloc[:-n_val]
+            y_val = endog.iloc[-n_val:]
+            if exog is not None:
+                X_train = exog.iloc[:-n_val]
+                X_val = exog.iloc[-n_val:]
+            else:
+                X_train = None
+                X_val = None
+        else:
+            y_train = endog
+            y_val = None
+            X_train = exog
+            X_val = None
+
+        for order in candidate_orders:
+            for seasonal_order in seasonal_orders:
+                try:
+                    if X_train is not None:
+                        model = SARIMAX(y_train, exog=X_train, order=order, seasonal_order=seasonal_order,
+                                        enforce_stationarity=False, enforce_invertibility=False, trend=None)
+                    else:
+                        model = SARIMAX(y_train, order=order, seasonal_order=seasonal_order,
+                                        enforce_stationarity=False, enforce_invertibility=False)
+                    fitted = model.fit(disp=False, maxiter=self.selection_maxiter, method='lbfgs')
+
+                    if self.selection_metric == 'rmse' and y_val is not None and len(y_val) > 0:
+                        if X_val is not None:
+                            fc = fitted.get_forecast(steps=len(y_val), exog=X_val)
+                        else:
+                            fc = fitted.get_forecast(steps=len(y_val))
+                        preds = fc.predicted_mean.values
+                        rmse = float(np.sqrt(np.mean((y_val.values - preds) ** 2)))
+                        score = rmse
+                    else:
+                        if self.ic == 'aic':
+                            score = float(fitted.aic)
+                        elif self.ic == 'bic':
+                            score = float(fitted.bic)
+                        elif self.ic == 'hqic':
+                            score = float(getattr(fitted, 'hqic', fitted.aic))
+                        else:
+                            score = float(fitted.aic)
+
+                    if score < best_score:
+                        best_score = score
+                        best_order = order
+                        best_seasonal_order = seasonal_order
+                except Exception:
+                    continue
+
+        metric_name = 'RMSE' if self.selection_metric == 'rmse' else self.ic.upper()
+        try:
+            logger.info(f"Order selection complete: ARIMA{best_order} x {best_seasonal_order} ({metric_name}={best_score:.2f})")
+        except Exception:
+            logger.info(f"Order selection complete: ARIMA{best_order} x {best_seasonal_order}")
         return best_order, best_seasonal_order
 
 
@@ -251,6 +296,10 @@ class ARIMAModel(BaseModel):
         self.max_d = kwargs.get('max_d', 2)
         self.max_q = kwargs.get('max_q', 5)
         self.information_criterion = kwargs.get('information_criterion', 'aic')
+        self.selection_metric = kwargs.get('selection_metric', 'rmse')
+        self.selection_val_fraction = kwargs.get('selection_val_fraction', 0.2)
+        self.selection_maxiter = kwargs.get('selection_maxiter', 100)
+        self.candidate_orders = kwargs.get('candidate_orders', None)
         self.max_features = kwargs.get('max_features', 10)
         self.feature_selection_method = kwargs.get('feature_selection_method', 'mutual_info')
         self.use_exog = kwargs.get('use_exog', True)
@@ -314,8 +363,15 @@ class ARIMAModel(BaseModel):
                 max_p=self.max_p,
                 max_d=self.max_d,
                 max_q=self.max_q,
+                seasonal_max_P=2,
+                seasonal_max_D=1,
+                seasonal_max_Q=2,
                 m=self.seasonal_period,
-                information_criterion=self.information_criterion
+                information_criterion=self.information_criterion,
+                selection_metric=self.selection_metric,
+                candidate_orders=self.candidate_orders,
+                val_fraction=self.selection_val_fraction,
+                selection_maxiter=self.selection_maxiter
             )
             self.order_, self.seasonal_order_ = order_selector.select_order(
                 endog=y,
