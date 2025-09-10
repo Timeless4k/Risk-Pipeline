@@ -36,6 +36,7 @@ env/
 # Project specific
 data_cache/
 logs/
+experiments/
 # Ignore saved model files but not source code
 *.pkl
 *.joblib

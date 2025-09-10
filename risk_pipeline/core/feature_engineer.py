@@ -163,7 +163,7 @@ class TechnicalFeatureModule(BaseFeatureModule):
         # CRITICAL: Use 10-day window and shift by 10 days to ensure no overlap but keep all features
         shifted_returns = returns.shift(10)  # ULTIMATE FIX: Use 10 days for optimal separation
         
-        # FIXED: Changed from RollingStd5 to RollingStd30 to prevent overlap with 20-day target volatility
+        # FIXED: Changed from RollingStd5 to RollingStd30 to prevent overlap with 5-day target volatility
         features['RollingStd30'] = shifted_returns.rolling(window=30, min_periods=15).std()
         
         # Correlation with Moving Averages - ULTIMATE FIX: Use optimal shifts for full feature set
@@ -575,13 +575,10 @@ class FeatureEngineer:
             prices = raw_data[price_col].astype(float)
             returns = np.log(prices / prices.shift(1))
             
-            # FIXED: Create volatility target from raw returns with proper temporal separation
-            # Use 20-day rolling volatility as the target, but predict NEXT period
-            volatility_target = returns.rolling(window=20, min_periods=10).std() * np.sqrt(252)
-            
-            # ROLLBACK: Reduced shift from -90 to -30 periods for reasonable temporal separation
-            # This prevents the model from using current volatility to predict current volatility
-            volatility_target = volatility_target.shift(-30)  # ROLLBACK: Reduced from -90 to -30
+            # THESIS COMPLIANT: 5-day realized volatility prediction
+            # Use 5-day rolling volatility as the target (Volatility5D), predict 5 days ahead
+            volatility_target = returns.rolling(window=5, min_periods=3).std() * np.sqrt(252)
+            volatility_target = volatility_target.shift(-5)
 
             # Optional: log-transform the target to stabilize variance
             try:
@@ -592,35 +589,32 @@ class FeatureEngineer:
             except Exception as _e:
                 self.logger.warning(f"Log-target option failed, using raw target: {_e}")
             
-            # ULTIMATE FIX: Create balanced regime target for classification
-            # Use 30-day rolling return as regime indicator, but predict NEXT period
-            regime_indicator = returns.rolling(window=30, min_periods=15).mean() * 252  # Annualized
-            regime_indicator = regime_indicator.shift(-10)  # ULTIMATE FIX: Use 10 days for optimal separation
-            
-            # Binary regime classification (bull/bear) - now predicting future regime
-            # ULTIMATE FIX: Use median-based threshold for balanced classes
-            regime_threshold = regime_indicator.median()
-            regime_target = (regime_indicator > regime_threshold).astype(int)
-            
-            # ULTIMATE FIX: Ensure balanced classes by adjusting threshold if needed
-            class_counts = regime_target.value_counts()
-            if len(class_counts) == 2:
-                min_class_ratio = min(class_counts) / max(class_counts)
-                if min_class_ratio < 0.3:  # If one class is less than 30% of the other
-                    self.logger.warning(f"Unbalanced regime target for {asset}: {class_counts.to_dict()}")
-                    # Adjust threshold to get more balanced classes
-                    regime_target = (regime_indicator > regime_indicator.quantile(0.4)).astype(int)
-                    class_counts = regime_target.value_counts()
-                    self.logger.info(f"Adjusted regime target: {class_counts.to_dict()}")
+            # THESIS COMPLIANT: Regime based on 5-day volatility patterns (3 classes: 0=Low,1=Med,2=High)
+            vol_5d = returns.rolling(window=5, min_periods=3).std() * np.sqrt(252)
+            vol_5d_future = vol_5d.shift(-5)
+            vol_quantiles = vol_5d.quantile([0.33, 0.67])
+            regime_target = pd.cut(
+                vol_5d_future,
+                bins=[-np.inf, vol_quantiles.iloc[0], vol_quantiles.iloc[1], np.inf],
+                labels=[0, 1, 2]
+            ).astype(int)
             
             # ULTIMATE FIX: Validate classification target quality
             if regime_target.nunique() < 2:
                 self.logger.warning(f"Regime target has only {regime_target.nunique()} unique values for {asset}, using alternative method")
-                # Alternative: use volatility regime instead
-                vol_regime = (volatility_target > volatility_target.median()).astype(int)
-                if vol_regime.nunique() >= 2:
-                    regime_target = vol_regime
-                    self.logger.info(f"Using volatility-based regime target for {asset}")
+                # Alternative: use volatility-based three-quantile regime on target itself
+                try:
+                    q = volatility_target.quantile([0.33, 0.67])
+                    regime_target = pd.cut(
+                        volatility_target,
+                        bins=[-np.inf, q.iloc[0], q.iloc[1], np.inf],
+                        labels=[0, 1, 2]
+                    ).astype(int)
+                    self.logger.info(f"Using fallback volatility-based regime target for {asset}")
+                except Exception as _e:
+                    # Last resort: binary up/down of 5-day ahead returns
+                    regime_target = (returns.shift(-5) > 0).astype(int)
+                    self.logger.info(f"Using simple up/down regime target for {asset} due to: {_e}")
                 else:
                     # Last resort: use simple up/down based on returns
                     regime_target = (returns.shift(-10) > 0).astype(int)
