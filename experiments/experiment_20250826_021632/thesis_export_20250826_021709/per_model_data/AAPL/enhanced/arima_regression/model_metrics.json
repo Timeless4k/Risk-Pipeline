@@ -1,7 +1,0 @@
-{
-  "metrics": {},
-  "asset": "AAPL",
-  "model_type": "enhanced_arima",
-  "task": "regression",
-  "stored_at": "2025-08-26T02:17:07.470674"
-}

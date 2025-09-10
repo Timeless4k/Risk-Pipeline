@@ -196,23 +196,122 @@ def summarize(candidates: Iterable[DeletionCandidate]) -> Tuple[int, int]:
     return total_count, total_bytes
 
 
+def _collect_root_glob(root: Path, patterns: List[str], reason: str) -> List[DeletionCandidate]:
+    candidates: List[DeletionCandidate] = []
+    for pattern in patterns:
+        for p in root.glob(pattern):
+            if not p.exists():
+                continue
+            # Skip directories that we intentionally do not remove here
+            candidates.append(
+                DeletionCandidate(path=p, is_dir=p.is_dir(), bytes_size=get_size(p), reason=reason)
+            )
+    return candidates
+
+
+def collect_production_prune(root: Path) -> List[DeletionCandidate]:
+    """Aggressively remove non-runtime artifacts for a slim production workspace.
+
+    Conservatively preserves core package, configs, data_cache CSVs, and scripts/cleanup.
+    """
+    candidates: List[DeletionCandidate] = []
+
+    # Entire directories safe to remove for production runs (except experiments: keep latest)
+    for dir_name in [
+        "thesis_reports",
+        "visualizations",
+    ]:
+        p = root / dir_name
+        if p.exists():
+            candidates.append(
+                DeletionCandidate(path=p, is_dir=True, bytes_size=get_size(p), reason="production: remove_dir")
+            )
+
+    # Experiments: keep only the most recent experiment directory
+    candidates += collect_experiment_deletions(root / "experiments", keep=1)
+
+    # Logs: keep only last 2
+    candidates += collect_log_deletions(root / "logs", keep=2)
+
+    # SHAP plots: remove entirely (reproducible) except keep 'quick' optional; here remove all
+    shap_root = root / "shap_plots"
+    if shap_root.exists():
+        candidates.append(
+            DeletionCandidate(path=shap_root, is_dir=True, bytes_size=get_size(shap_root), reason="production: shap_plots")
+        )
+
+    # Test artifacts and test directories/files
+    for name in ["test_shap_dir", "test_shap_plots", "tests"]:
+        p = root / name
+        if p.exists():
+            candidates.append(
+                DeletionCandidate(path=p, is_dir=True, bytes_size=get_size(p), reason="production: tests")
+            )
+
+    candidates += _collect_root_glob(
+        root,
+        patterns=[
+            "test_*.py",
+            "*_test.py",
+            "*tests*.py",
+            "*_test_*.py",
+        ],
+        reason="production: test_files",
+    )
+
+    # Development/helper scripts that are not needed in production runs
+    for rel in [
+        "scripts/viz_fix_test.py",
+        "debug_pipeline.py",
+        "fix_negative_r2_solution.py",
+        "quick_hyperparameter_test.py",
+        "simple_hyperparameter_test.py",
+        "run_simple_pipeline.py",
+        "ultimate_pipeline_test.log",
+    ]:
+        p = root / rel
+        if p.exists():
+            candidates.append(
+                DeletionCandidate(path=p, is_dir=p.is_dir(), bytes_size=get_size(p), reason="production: dev_artifact")
+            )
+
+    # Result/benchmark JSON and CSV artifacts in root
+    candidates += _collect_root_glob(
+        root,
+        patterns=[
+            "quick_hyperparameter_test_results_*.json",
+            "simple_hyperparameter_results_*.json",
+            "r2_fixing_results_*.json",
+        ],
+        reason="production: result_artifact",
+    )
+
+    # Data cache: keep CSVs, remove joblib tmp and malformed '^' files (handled already)
+    candidates += collect_data_cache_deletions(root / "data_cache")
+
+    return candidates
+
+
 def plan_cleanup(args: argparse.Namespace) -> List[DeletionCandidate]:
     candidates: List[DeletionCandidate] = []
 
-    # Experiments
-    candidates += collect_experiment_deletions(REPO_ROOT / "experiments", keep=args.keep_experiments)
+    if getattr(args, "production", False):
+        candidates += collect_production_prune(REPO_ROOT)
+    else:
+        # Experiments
+        candidates += collect_experiment_deletions(REPO_ROOT / "experiments", keep=args.keep_experiments)
 
-    # Logs
-    candidates += collect_log_deletions(REPO_ROOT / "logs", keep=args.keep_logs)
+        # Logs
+        candidates += collect_log_deletions(REPO_ROOT / "logs", keep=args.keep_logs)
 
-    # Data cache
-    candidates += collect_data_cache_deletions(REPO_ROOT / "data_cache")
+        # Data cache
+        candidates += collect_data_cache_deletions(REPO_ROOT / "data_cache")
 
-    # SHAP plots retention
-    candidates += collect_shap_plot_deletions(REPO_ROOT / "shap_plots", retention_days=args.shap_retention_days)
+        # SHAP plots retention
+        candidates += collect_shap_plot_deletions(REPO_ROOT / "shap_plots", retention_days=args.shap_retention_days)
 
-    # Test artifacts
-    candidates += collect_test_artifact_deletions(REPO_ROOT)
+        # Test artifacts
+        candidates += collect_test_artifact_deletions(REPO_ROOT)
 
     # De-duplicate by path (in case of overlap)
     unique: dict[Path, DeletionCandidate] = {c.path: c for c in candidates}
@@ -222,6 +321,7 @@ def plan_cleanup(args: argparse.Namespace) -> List[DeletionCandidate]:
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safe workspace cleanup with dry-run")
     parser.add_argument("--execute", action="store_true", help="Actually delete files (default is dry-run)")
+    parser.add_argument("--production", action="store_true", help="Aggressively remove non-runtime artifacts for production")
     parser.add_argument("--keep-experiments", type=int, default=5, help="How many experiment runs to keep")
     parser.add_argument("--keep-logs", type=int, default=10, help="How many recent logs to keep")
     parser.add_argument(

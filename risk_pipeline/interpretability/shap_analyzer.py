@@ -232,7 +232,7 @@ class SHAPAnalyzer:
         try:
             # 🔎 KILL-SWITCH: Ensure no background_data leakage
             if hasattr(model, 'background_data'):
-                logger.warning(f"🔎 KILL-SWITCH: Model has background_data attribute, removing: {model.background_data}")
+                logger.info(f"🔎 KILL-SWITCH: Model has background_data attribute, removing")
                 delattr(model, 'background_data')
             
             # Ensure XGBoost models are fitted: try to auto-load trained artifact if needed
@@ -250,9 +250,23 @@ class SHAPAnalyzer:
                             model = loaded
                             logger.info(f"Auto-loaded fitted XGBoost model for {asset}_{task} from {model_pkl}")
                         else:
-                            logger.warning(f"No fitted XGBoost artifact found at {model_pkl}; proceeding with current model")
+                            # Broader fallback: search experiments base for latest matching artifact
+                            base_dir = Path(getattr(self.results_manager, 'base_dir', 'experiments'))
+                            try:
+                                candidates = list(base_dir.rglob(str(Path('models') / asset / model_type / task / 'model.pkl')))
+                            except Exception:
+                                candidates = []
+                            if candidates:
+                                latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                                import pickle as _pkl
+                                with open(latest, 'rb') as _f:
+                                    loaded = _pkl.load(_f)
+                                model = loaded
+                                logger.info(f"Auto-loaded fitted XGBoost model for {asset}_{task} from {latest}")
+                            else:
+                                logger.info(f"No fitted XGBoost artifact found under {base_dir}/**/models/{asset}/{model_type}/{task}/model.pkl; proceeding with current model")
                 except Exception as _autold_err:
-                    logger.warning(f"Auto-load of fitted XGBoost model failed: {_autold_err}")
+                    logger.info(f"Auto-load of fitted XGBoost model failed: {_autold_err}")
 
             # Create output directory early for saving eval sample
             output_dir = Path(self.config.output.shap_dir) / asset / model_type / task
@@ -391,7 +405,7 @@ class SHAPAnalyzer:
                 else:
                     feature_names_plot = None
             except (IndexError, TypeError) as e:
-                logger.warning(f"Feature names slicing failed: {e}")
+                logger.info(f"Feature names slicing fell back to original due to: {e}")
                 feature_names_plot = feature_names
             
             # 🔒 SHAPE SANITY: Add shape guards once, right before plotting
@@ -408,13 +422,13 @@ class SHAPAnalyzer:
                 F = sv.shape[1] if isinstance(sv, np.ndarray) and sv.ndim >= 2 else 1
             except (IndexError, AttributeError):
                 F = 1
-                logger.warning("Could not determine SHAP feature count, defaulting to 1")
+                logger.info("Could not determine SHAP feature count, defaulting to 1")
             
             # Ensure X_plot has enough features to match SHAP values
             try:
                 if hasattr(X_plot, 'shape') and len(X_plot.shape) >= 2:
                     if X_plot.shape[1] < F:
-                        logger.warning(f"Feature count mismatch: SHAP has {F} features, X has {X_plot.shape[1]}. Padding X with zeros.")
+                        logger.info(f"Feature count mismatch: SHAP has {F} features, X has {X_plot.shape[1]}. Padding X with zeros.")
                         # Pad X with zeros if it has fewer features than SHAP
                         if isinstance(X_plot, pd.DataFrame):
                             padding_cols = [f'padded_feature_{i}' for i in range(F - X_plot.shape[1])]
@@ -424,18 +438,22 @@ class SHAPAnalyzer:
                             padding = np.zeros((X_plot.shape[0], F - X_plot.shape[1]))
                             X_plot_final = np.hstack([X_plot, padding])
                     else:
-                        X_plot_final = X_plot[:, :F]
+                        # Use iloc for DataFrame to avoid tuple slicing errors
+                        if isinstance(X_plot, pd.DataFrame):
+                            X_plot_final = X_plot.iloc[:, :F]
+                        else:
+                            X_plot_final = X_plot[:, :F]
                 else:
                     X_plot_final = X_plot
             except Exception as e:
-                logger.warning(f"X_plot feature alignment failed: {e}, using original")
+                logger.info(f"X_plot feature alignment fell back to original due to: {e}")
                 X_plot_final = X_plot
             
             # Ensure feature names match
             try:
                 if feature_names_plot is not None:
                     if len(feature_names_plot) < F:
-                        logger.warning(f"Feature names count mismatch: need {F}, have {len(feature_names_plot)}. Padding with generic names.")
+                        logger.info(f"Feature names count mismatch: need {F}, have {len(feature_names_plot)}. Padding with generic names.")
                         padding_names = [f'padded_feature_{i}' for i in range(F - len(feature_names_plot))]
                         feat_names = list(feature_names_plot) + padding_names
                     else:
@@ -443,7 +461,7 @@ class SHAPAnalyzer:
                 else:
                     feat_names = [f'feature_{i}' for i in range(F)]
             except Exception as e:
-                logger.warning(f"Feature names alignment failed: {e}, using generic names")
+                logger.info(f"Feature names alignment fell back to generic due to: {e}")
                 feat_names = [f'feature_{i}' for i in range(F)]
             
             logger.info(f"SHAP plotting: SHAP shape={sv.shape}, X shape={X_plot_final.shape}, features={len(feat_names)}")

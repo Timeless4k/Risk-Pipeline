@@ -557,8 +557,23 @@ class SHAPVisualizer:
         plots = {}
         
         try:
+            # Normalize inputs to numpy for consistent indexing
+            X_arr = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+            sv_arr = np.asarray(shap_values)
+            if sv_arr.ndim > 2:
+                sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
+            if X_arr.ndim > 2:
+                X_arr = X_arr.reshape(X_arr.shape[0], -1)
+
+            # Align feature names length
+            num_features = X_arr.shape[1] if X_arr.ndim == 2 else sv_arr.shape[1]
+            if len(feature_names) != num_features:
+                feature_names = feature_names[:num_features]
+                if len(feature_names) < num_features:
+                    feature_names += [f'feature_{i}' for i in range(len(feature_names), num_features)]
+
             # Dependence plots for top features
-            top_features = self._get_top_features(shap_values, feature_names, top_k=5)
+            top_features = self._get_top_features(sv_arr, feature_names, top_k=5)
             
             plt.figure(figsize=(15, 10))
             
@@ -566,15 +581,25 @@ class SHAPVisualizer:
                 plt.subplot(2, 3, i + 1)
                 
                 # Get feature index
-                feature_idx = feature_names.index(feature)
+                if feature in feature_names:
+                    feature_idx = feature_names.index(feature)
+                else:
+                    continue
                 
                 # Create dependence plot
-                plt.scatter(
-                    X[:, feature_idx] if hasattr(X, 'shape') else X.iloc[:, feature_idx],
-                    shap_values[:, feature_idx],
-                    alpha=0.6,
-                    s=20
-                )
+                try:
+                    plt.scatter(
+                        X_arr[:, feature_idx],
+                        sv_arr[:, feature_idx],
+                        alpha=0.6,
+                        s=20
+                    )
+                except Exception as dep_err:
+                    logger.warning(f"Dependence plot fallback for feature {feature}: {dep_err}")
+                    try:
+                        plt.plot(sv_arr[:, feature_idx])
+                    except Exception:
+                        pass
                 plt.xlabel(feature)
                 plt.ylabel('SHAP Value')
                 plt.title(f'Dependence: {feature}')
@@ -591,7 +616,11 @@ class SHAPVisualizer:
             plt.figure(figsize=(12, 8))
             
             # Calculate feature interaction matrix
-            interaction_matrix = np.corrcoef(np.abs(shap_values).T)
+            sv_for_corr = sv_arr if sv_arr.ndim == 2 else sv_arr.reshape(sv_arr.shape[0], -1)
+            if sv_for_corr.shape[1] >= 2:
+                interaction_matrix = np.corrcoef(np.abs(sv_for_corr).T)
+            else:
+                interaction_matrix = np.array([[1.0]])
             
             sns.heatmap(
                 interaction_matrix,

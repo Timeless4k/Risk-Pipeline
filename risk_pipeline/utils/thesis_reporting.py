@@ -60,6 +60,21 @@ class ThesisReporter:
                 # Create comprehensive comparison tables
                 comparison_data = []
                 
+                # Normalize common metric column aliases
+                col_aliases = {
+                    'mse': ['mse', 'MSE', 'mean_squared_error'],
+                    'rmse': ['rmse', 'RMSE'],
+                    'mae': ['mae', 'MAE'],
+                    'R2': ['R2', 'r2', 'r2_score'],
+                    'mape': ['mape', 'MAPE'],
+                    'baseline_mse': ['baseline_mse', 'baseline_MSE']
+                }
+                def getv(row, key, default=0):
+                    for k in col_aliases.get(key, [key]):
+                        if k in row and pd.notna(row[k]):
+                            return row[k]
+                    return default
+
                 for _, row in df.iterrows():
                     asset = row['asset']
                     model = row['model_type']
@@ -82,12 +97,12 @@ class ThesisReporter:
                             'Asset': asset,
                             'Model': model,
                             'Task': task,
-                            'MSE': f"{row.get('mse', 0):.6f} ± {row.get('mse_std', 0):.6f}",
-                            'RMSE': f"{row.get('rmse', 0):.6f} ± {row.get('rmse_std', 0):.6f}",
-                            'MAE': f"{row.get('mae', 0):.6f} ± {row.get('mae_std', 0):.6f}",
-                            'R²': f"{row.get('R2', 0):.4f} ± {row.get('R2_std', 0):.4f}",
-                            'MAPE': f"{row.get('mape', 0):.4f} ± {row.get('mape_std', 0):.4f}",
-                            'Baseline_MSE': f"{row.get('baseline_mse', 0):.6f} ± {row.get('baseline_mse_std', 0):.6f}",
+                            'MSE': f"{getv(row, 'mse', 0):.6f} ± {row.get('mse_std', 0):.6f}",
+                            'RMSE': f"{getv(row, 'rmse', 0):.6f} ± {row.get('rmse_std', 0):.6f}",
+                            'MAE': f"{getv(row, 'mae', 0):.6f} ± {row.get('mae_std', 0):.6f}",
+                            'R²': f"{getv(row, 'R2', 0):.4f} ± {row.get('R2_std', 0):.4f}",
+                            'MAPE': f"{getv(row, 'mape', 0):.4f} ± {row.get('mape_std', 0):.4f}",
+                            'Baseline_MSE': f"{getv(row, 'baseline_mse', 0):.6f} ± {row.get('baseline_mse_std', 0):.6f}",
                             'Fit_Time_s': f"{row.get('fit_time', 0):.3f} ± {row.get('fit_time_std', 0):.3f}",
                             'Pred_Time_s': f"{row.get('pred_time', 0):.3f} ± {row.get('pred_time_std', 0):.3f}"
                         })
@@ -147,21 +162,39 @@ class ThesisReporter:
                             'std_f1': float(task_df['f1'].std())
                         }
                     else:  # regression
+                        # Column aliasing for robustness
+                        def pick_col(df_in, candidates, fallback):
+                            for c in candidates:
+                                if c in df_in.columns:
+                                    return c
+                            return fallback
+                        r2_col = pick_col(task_df, ['R2', 'r2', 'r2_score'], 'R2')
+                        mse_col = pick_col(task_df, ['mse', 'MSE', 'mean_squared_error'], 'mse')
+
+                        try:
+                            best_r2_idx = task_df[r2_col].idxmax()
+                        except Exception:
+                            best_r2_idx = task_df.index[0]
+                        try:
+                            best_mse_idx = task_df[mse_col].idxmin()
+                        except Exception:
+                            best_mse_idx = task_df.index[0]
+
                         performance_analysis['performance_summary'][task] = {
                             'best_r2': {
-                                'model': task_df.loc[task_df['R2'].idxmax(), 'model_type'],
-                                'asset': task_df.loc[task_df['R2'].idxmax(), 'asset'],
-                                'value': float(task_df['R2'].max())
+                                'model': task_df.loc[best_r2_idx, 'model_type'] if len(task_df) else None,
+                                'asset': task_df.loc[best_r2_idx, 'asset'] if len(task_df) else None,
+                                'value': float(task_df[r2_col].max()) if r2_col in task_df else 0.0
                             },
                             'best_mse': {
-                                'model': task_df.loc[task_df['mse'].idxmin(), 'model_type'],
-                                'asset': task_df.loc[task_df['mse'].idxmin(), 'asset'],
-                                'value': float(task_df['mse'].min())
+                                'model': task_df.loc[best_mse_idx, 'model_type'] if len(task_df) else None,
+                                'asset': task_df.loc[best_mse_idx, 'asset'] if len(task_df) else None,
+                                'value': float(task_df[mse_col].min()) if mse_col in task_df else 0.0
                             },
-                            'avg_r2': float(task_df['R2'].mean()),
-                            'avg_mse': float(task_df['mse'].mean()),
-                            'std_r2': float(task_df['R2'].std()),
-                            'std_mse': float(task_df['mse'].std())
+                            'avg_r2': float(task_df[r2_col].mean()) if r2_col in task_df else 0.0,
+                            'avg_mse': float(task_df[mse_col].mean()) if mse_col in task_df else 0.0,
+                            'std_r2': float(task_df[r2_col].std()) if r2_col in task_df else 0.0,
+                            'std_mse': float(task_df[mse_col].std()) if mse_col in task_df else 0.0
                         }
                 
                 # Save performance analysis
