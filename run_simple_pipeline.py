@@ -36,24 +36,15 @@ def main():
         pipeline = RiskPipeline(experiment_name=experiment_name)
         print("✅ Pipeline initialized successfully!")
         
-        # Configuration for maximum performance
+        # Define assets and models to run
         assets = ['AAPL', 'MSFT', '^GSPC', 'IOZ.AX', 'CBA.AX', 'BHP.AX']
-        models = ['arima', 'lstm', 'stockmixer', 'xgboost']
+        models = ['arima', 'enhanced_arima', 'lstm', 'stockmixer', 'xgboost']  # Added enhanced_arima
         
-        # FIXED: Show actual pipeline defaults, not fake numbers
-        print(f"\n📈 Processing Assets: {', '.join(assets)}")
-        print(f"🤖 Running Models: {', '.join(models)}")
-        print("⚡ SHAP Analysis: Enabled")
-        print("💾 Model Saving: Enabled")
-        print("🔄 Walk-forward splits: 10 (updated config)")
-        print("📊 Test size: 126 days (pipeline default)")
-        print("🎯 Epochs: 200 (updated config)")
+        # Minimal, concise output
+        print(f"Assets: {', '.join(assets)}")
+        print(f"Models: {', '.join(models)}")
         
-        print("\n✅ Config files updated to use 10 splits and 200 epochs!")
-        print("   - risk_pipeline/config/model_config.py: n_splits = 10")
-        print("   - risk_pipeline/core/config.py: epochs = 200")
-        
-        print("\n🚀 Starting pipeline execution...")
+        print("Starting pipeline execution...")
         print("-" * 60)
         
         # Run the complete pipeline

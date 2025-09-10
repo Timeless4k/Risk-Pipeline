@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
 tf.config.set_soft_device_placement(False)
@@ -28,6 +29,12 @@ try:
 except Exception:
     pass
 
+# QUICK CPU OPTIMIZATION: Use all 24 cores for maximum performance
+import psutil
+cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
+tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
+tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
+
 from .base_model import BaseModel
 
 
@@ -44,19 +51,20 @@ class LSTMModel(BaseModel):
         """
         super().__init__(name="LSTM", **kwargs)
         self.task = task
-        self.units = kwargs.get('units', [50, 30])
-        self.dropout = kwargs.get('dropout', 0.2)
+        self.units = kwargs.get('units', [128, 64])
+        self.dropout = kwargs.get('dropout', 0.1)
         self.sequence_length = kwargs.get('sequence_length', 15)
         self.input_shape = None
         self.model = None
+        self.scaler = StandardScaler()
         
         # Training parameters
         self.params = {
-            'batch_size': kwargs.get('batch_size', 16),
-            'epochs': kwargs.get('epochs', 100),
+            'batch_size': kwargs.get('batch_size', 32),
+            'epochs': kwargs.get('epochs', 200),
             'validation_split': kwargs.get('validation_split', 0.2),
-            'early_stopping_patience': kwargs.get('early_stopping_patience', 5),
-            'reduce_lr_patience': kwargs.get('reduce_lr_patience', 5),
+            'early_stopping_patience': kwargs.get('early_stopping_patience', 30),
+            'reduce_lr_patience': kwargs.get('reduce_lr_patience', 10),
             'learning_rate': kwargs.get('learning_rate', 0.001)
         }
         
@@ -90,25 +98,26 @@ class LSTMModel(BaseModel):
                     inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
                     
                     # Dense layers for tabular data
-                    x = tf.keras.layers.Dense(128, activation='relu')(inputs)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                    x = tf.keras.layers.Dense(64, activation='relu')(x)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                    x = tf.keras.layers.Dense(32, activation='relu')(x)
-                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.Dense(self.units[0], activation='relu')(inputs)
+                    x = tf.keras.layers.Dropout(self.dropout)(x)
+                    x = tf.keras.layers.Dense(self.units[1] if len(self.units) > 1 else max(16, self.units[0] // 2), activation='relu')(x)
+                    x = tf.keras.layers.Dropout(self.dropout)(x)
+                    x = tf.keras.layers.Dense(max(16, (self.units[1] if len(self.units) > 1 else self.units[0] // 2) // 2), activation='relu')(x)
+                    x = tf.keras.layers.Dropout(self.dropout)(x)
                 else:
                     # Sequence data - use LSTM layers
                     inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))  # Remove batch dimension
                     
                     # LSTM layers for sequence data
-                    x = tf.keras.layers.LSTM(128, return_sequences=True)(inputs)
-                    x = tf.keras.layers.Dropout(0.2)(x)
-                    x = tf.keras.layers.LSTM(64)(x)
-                    x = tf.keras.layers.Dropout(0.2)(x)
+                    x = tf.keras.layers.LSTM(self.units[0], return_sequences=True)(inputs)
+                    x = tf.keras.layers.Dropout(self.dropout)(x)
+                    x = tf.keras.layers.LSTM(self.units[1] if len(self.units) > 1 else max(16, self.units[0] // 2))(x)
+                    x = tf.keras.layers.Dropout(self.dropout)(x)
                 
                 # Output layer
                 if self.task == 'classification':
-                    outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                    # FIXED: Use 2 classes for binary classification (regime prediction)
+                    outputs = tf.keras.layers.Dense(2, activation='softmax')(x)  # 2 classes for binary classification
                 else:
                     outputs = tf.keras.layers.Dense(1, activation='linear')(x)
                 
@@ -117,13 +126,13 @@ class LSTMModel(BaseModel):
                 # Compile model
                 if self.task == 'classification':
                     self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001)),
                         loss='sparse_categorical_crossentropy',
                         metrics=['accuracy']
                     )
                 else:
                     self.model.compile(
-                        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001)),
                         loss='mse',
                         metrics=['mae']
                     )
@@ -185,16 +194,23 @@ class LSTMModel(BaseModel):
             X_train, X_val, y_train, y_val = train_test_split(
                 X_reshaped, y_reshaped, test_size=0.2, random_state=42
             )
+            # Fit scaler on train only, transform val
+            try:
+                X_train = self.scaler.fit_transform(X_train)
+                X_val = self.scaler.transform(X_val)
+                self.logger.info("Applied StandardScaler (fit on train) to LSTM features")
+            except Exception:
+                pass
             
             # FIXED: Train on CPU to match model device
             with tf.device('/CPU:0'):
                 # Training callbacks
                 callbacks = [
                     tf.keras.callbacks.EarlyStopping(
-                        monitor='val_loss', patience=10, restore_best_weights=True
+                        monitor='val_loss', patience=self.params.get('early_stopping_patience', 30), restore_best_weights=True
                     ),
                     tf.keras.callbacks.ReduceLROnPlateau(
-                        monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6
+                        monitor='val_loss', factor=0.5, patience=self.params.get('reduce_lr_patience', 10), min_lr=1e-6
                     )
                 ]
                 
@@ -202,8 +218,8 @@ class LSTMModel(BaseModel):
                 history = self.model.fit(
                     X_train, y_train,
                     validation_data=(X_val, y_val),
-                    epochs=100,
-                    batch_size=32,
+                    epochs=self.params.get('epochs', 200),
+                    batch_size=self.params.get('batch_size', 32),
                     callbacks=callbacks,
                     verbose=0
                 )
@@ -281,6 +297,12 @@ class LSTMModel(BaseModel):
             else:
                 raise ValueError(f"Input shape {X.shape} incompatible with model input shape {self.input_shape}")
             
+            # Scale features using fitted scaler
+            try:
+                X_reshaped = self.scaler.transform(X_reshaped)
+            except Exception:
+                pass
+
             # FIXED: Force CPU device context during prediction to match training
             with tf.device('/CPU:0'):
                 # Make predictions

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
 tf.config.set_soft_device_placement(False)
@@ -27,6 +28,12 @@ try:
         )
 except Exception:
     pass
+
+# 🚀 24-CORE OPTIMIZATION: Use all cores for TensorFlow operations
+import psutil
+cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
+tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
+tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
 
 from .base_model import BaseModel
 
@@ -51,6 +58,7 @@ class StockMixerModel(BaseModel):
         self.dropout = kwargs.get('dropout', 0.2)
         self.input_shape = None
         self.model = None
+        self.scaler = StandardScaler()
         
         # Training parameters
         self.params = {
@@ -91,17 +99,19 @@ class StockMixerModel(BaseModel):
                 # FIXED: Build model with correct input shape for tabular data
                 inputs = tf.keras.Input(shape=(self.input_shape[1],))  # Remove batch dimension
                 
-                # Tabular data processing layers
-                x = tf.keras.layers.Dense(256, activation='relu')(inputs)
-                x = tf.keras.layers.Dropout(0.3)(x)
-                x = tf.keras.layers.Dense(128, activation='relu')(x)
-                x = tf.keras.layers.Dropout(0.3)(x)
-                x = tf.keras.layers.Dense(64, activation='relu')(x)
+                # Tabular data processing layers with L2 weight decay (kernel_regularizer)
+                reg = tf.keras.regularizers.l2(1e-4)
+                x = tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=reg)(inputs)
+                x = tf.keras.layers.Dropout(0.2)(x)
+                x = tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=reg)(x)
+                x = tf.keras.layers.Dropout(0.2)(x)
+                x = tf.keras.layers.Dense(64, activation='relu', kernel_regularizer=reg)(x)
                 x = tf.keras.layers.Dropout(0.2)(x)
                 
                 # Output layer
                 if self.task == 'classification':
-                    outputs = tf.keras.layers.Dense(3, activation='softmax')(x)  # 3 classes
+                    # FIXED: Use 2 classes for binary classification (regime prediction)
+                    outputs = tf.keras.layers.Dense(2, activation='softmax')(x)  # 2 classes for binary classification
                 else:
                     outputs = tf.keras.layers.Dense(1, activation='linear')(x)
                 
@@ -112,7 +122,7 @@ class StockMixerModel(BaseModel):
                     self.model.compile(
                         optimizer=tf.keras.optimizers.Adam(
                             learning_rate=0.001,
-                            clipnorm=1.0  # Use only clipnorm to avoid Keras constraint error
+                            clipnorm=1.0
                         ),
                         loss='sparse_categorical_crossentropy',
                         metrics=['accuracy']
@@ -121,7 +131,7 @@ class StockMixerModel(BaseModel):
                     self.model.compile(
                         optimizer=tf.keras.optimizers.Adam(
                             learning_rate=0.001,
-                            clipnorm=1.0  # Use only clipnorm to avoid Keras constraint error
+                            clipnorm=1.0
                         ),
                         loss='huber',  # Use Huber loss for robustness
                         metrics=['mae', 'mse']
@@ -204,6 +214,13 @@ class StockMixerModel(BaseModel):
             X_train, X_val, y_train, y_val = train_test_split(
                 X_reshaped, y_reshaped, test_size=0.2, random_state=42
             )
+            # Fit scaler on train only, transform val
+            try:
+                X_train = self.scaler.fit_transform(X_train)
+                X_val = self.scaler.transform(X_val)
+                self.logger.info("Applied StandardScaler (fit on train) to StockMixer features")
+            except Exception:
+                pass
             
             # FIXED: Train on CPU to match model device
             with tf.device('/CPU:0'):
@@ -222,7 +239,7 @@ class StockMixerModel(BaseModel):
                     X_train, y_train,
                     validation_data=(X_val, y_val),
                     epochs=100,
-                    batch_size=32,
+                    batch_size=128,
                     callbacks=callbacks,
                     verbose=0
                 )
@@ -292,6 +309,12 @@ class StockMixerModel(BaseModel):
             else:
                 raise ValueError(f"Unsupported input shape: {X.shape}")
             
+            # Scale features using fitted scaler
+            try:
+                X_reshaped = self.scaler.transform(X_reshaped)
+            except Exception:
+                pass
+
             # FIXED: Force CPU device context during prediction to match training
             with tf.device('/CPU:0'):
                 # Make predictions

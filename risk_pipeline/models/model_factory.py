@@ -1,336 +1,122 @@
 """
-Model factory for RiskPipeline modular architecture.
+Model factory for creating different types of models.
 """
 
 import logging
-from typing import Dict, List, Tuple, Optional, Union, Any
-import numpy as np
-import pandas as pd
-
+from typing import Dict, Any, Type
 from .base_model import BaseModel
+from .arima_model import ARIMAModel
+from .xgboost_model import XGBoostModel
+from .enhanced_arima_model import EnhancedARIMAModel
 
-# Import models conditionally to handle missing dependencies
-try:
-    from .arima_model import ARIMAModel
-    ARIMA_AVAILABLE = True
-except ImportError:
-    ARIMA_AVAILABLE = False
-    ARIMAModel = None
+logger = logging.getLogger(__name__)
 
-try:
-    from .xgboost_model import XGBoostModel
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-    XGBoostModel = None
-
-try:
-    from .stockmixer_model import StockMixerModel
-    STOCKMIXER_AVAILABLE = True
-except ImportError:
-    STOCKMIXER_AVAILABLE = False
-    StockMixerModel = None
-
+# Check TensorFlow availability
 try:
     from .lstm_model import LSTMModel
     LSTM_AVAILABLE = True
 except ImportError:
     LSTM_AVAILABLE = False
-    LSTMModel = None
+
+# Check StockMixer availability
+try:
+    from .stockmixer_model import StockMixerModel
+    STOCKMIXER_AVAILABLE = True
+except ImportError:
+    STOCKMIXER_AVAILABLE = False
 
 
 class ModelFactory:
-    """Factory class for creating model instances."""
+    """Factory for creating different types of models."""
     
-    def __init__(self, config: Optional[Dict] = None):
-        """
-        Initialize model factory.
-        
-        Args:
-            config: Configuration dictionary containing model parameters
-        """
-        self.config = config or {}
-        self.logger = logging.getLogger('risk_pipeline.models.ModelFactory')
-        self.logger.info("ModelFactory initialized")
-        
-        # Available model types - only include models that are available
-        self.available_models = {}
-        
-        if ARIMA_AVAILABLE:
-            self.available_models['arima'] = ARIMAModel
-        if LSTM_AVAILABLE:
-            self.available_models['lstm'] = LSTMModel
-        if XGBOOST_AVAILABLE:
-            self.available_models['xgboost'] = XGBoostModel
-        if STOCKMIXER_AVAILABLE:
-            self.available_models['stockmixer'] = StockMixerModel
-            
-        self.logger.info(f"Available models: {list(self.available_models.keys())}")
+    _models: Dict[str, Type[BaseModel]] = {
+        'arima': ARIMAModel,
+        'enhanced_arima': EnhancedARIMAModel,  # 🚀 NEW: Enhanced ARIMAX model
+        'xgboost': XGBoostModel,
+    }
     
-    def create_model(self, model_type: str, task: str = 'regression', 
-                    **kwargs) -> BaseModel:
-        """
-        Create a model instance.
+    if LSTM_AVAILABLE:
+        _models['lstm'] = LSTMModel
+    
+    if STOCKMIXER_AVAILABLE:
+        _models['stockmixer'] = StockMixerModel
+    
+    @classmethod
+    def create_model(cls, model_type: str, task: str = 'regression', **kwargs) -> BaseModel:
+        """Create a model instance of the specified type."""
+        if model_type not in cls._models:
+            available_models = list(cls._models.keys())
+            raise ValueError(f"Unknown model type '{model_type}'. Available: {available_models}")
         
-        Args:
-            model_type: Type of model ('arima', 'lstm', 'xgboost', 'stockmixer')
-            task: Task type ('regression' or 'classification')
-            **kwargs: Additional model-specific parameters
-            
-        Returns:
-            Model instance
-        """
-        if model_type not in self.available_models:
-            raise ValueError(f"Unknown model type: {model_type}. "
-                           f"Available types: {list(self.available_models.keys())}")
+        model_class = cls._models[model_type]
+        logger.info(f"Creating {model_type} model for {task} task with parameters: {kwargs}")
         
-        # Get model class
-        model_class = self.available_models[model_type]
-        
-        # Get model parameters from config
-        model_params = self._get_model_params(model_type, task)
-        
-        # Update with provided kwargs
-        model_params.update(kwargs)
-        
-        # Create model instance
+        # Handle model-specific parameters
         if model_type == 'arima':
             # ARIMA only supports regression
             if task != 'regression':
-                self.logger.warning("ARIMA only supports regression tasks. Using regression.")
-            model = model_class(**model_params)
+                logger.warning("ARIMA only supports regression tasks. Using regression.")
+            return model_class(**kwargs)
+        elif model_type == 'enhanced_arima':
+            # Enhanced ARIMA only supports regression; skip cleanly for classification
+            if task != 'regression':
+                logger.warning("Enhanced ARIMA does not support classification. Skipping model creation.")
+                return None
+            return model_class(**kwargs)
         elif model_type == 'lstm':
             # LSTM supports both tasks
-            model = model_class(**model_params)
+            return model_class(task=task, **kwargs)
         elif model_type == 'xgboost':
             # XGBoost supports both tasks
-            model = model_class(task=task, **model_params)
+            # Log final params after any caller-side merges
+            try:
+                final_params = kwargs.copy()
+                if task == 'classification':
+                    logger.info(f"Final XGB CLASSIFICATION params: {final_params}")
+                else:
+                    logger.info(f"Final XGB params (after merge): {final_params}")
+            except Exception:
+                pass
+            return model_class(task=task, **kwargs)
         elif model_type == 'stockmixer':
             # StockMixer supports both tasks
-            model = model_class(**model_params)
+            return model_class(task=task, **kwargs)
         else:
-            raise ValueError(f"Unsupported model type: {model_type}")
-        
-        self.logger.info(f"Created {model_type} model for {task} task")
-        return model
+            # Default case
+            return model_class(**kwargs)
     
-    def create_models(self, model_types: List[str], task: str = 'regression',
-                     **kwargs) -> Dict[str, BaseModel]:
-        """
-        Create multiple model instances.
-        
-        Args:
-            model_types: List of model types to create
-            task: Task type ('regression' or 'classification')
-            **kwargs: Additional parameters to pass to all models
-            
-        Returns:
-            Dictionary mapping model types to model instances
-        """
-        models = {}
-        
-        for model_type in model_types:
-            try:
-                models[model_type] = self.create_model(model_type, task, **kwargs)
-            except Exception as e:
-                self.logger.error(f"Failed to create {model_type} model: {e}")
-                continue
-        
-        self.logger.info(f"Created {len(models)} models: {list(models.keys())}")
-        return models
-    
-    def _get_model_params(self, model_type: str, task: str) -> Dict[str, Any]:
-        """
-        Get model parameters from configuration.
-        
-        Args:
-            model_type: Type of model
-            task: Task type
-            
-        Returns:
-            Dictionary of model parameters
-        """
-        params = {}
-        
-        # Get model-specific config section
-        model_config = self.config.get('models', {})
-        
-        if model_type == 'arima':
-            params = {
-                'order': model_config.get('arima_order', (1, 1, 1))
-            }
-        
-        elif model_type == 'lstm':
-            params = {
-                'units': model_config.get('lstm_units', [50, 30]),
-                'dropout': model_config.get('lstm_dropout', 0.2),
-                'sequence_length': model_config.get('sequence_length', 15),
-                'batch_size': model_config.get('batch_size', 16),
-                'epochs': model_config.get('epochs', 100),
-                'early_stopping_patience': model_config.get('early_stopping_patience', 5),
-                'reduce_lr_patience': model_config.get('reduce_lr_patience', 5)
-            }
-        
-        elif model_type == 'xgboost':
-            params = {
-                'n_estimators': model_config.get('xgboost_n_estimators', 100),
-                'max_depth': model_config.get('xgboost_max_depth', 5),
-                'learning_rate': model_config.get('xgboost_learning_rate', 0.1),
-                'random_state': model_config.get('random_state', 42)
-            }
-        
-        elif model_type == 'stockmixer':
-            params = {
-                'temporal_units': model_config.get('stockmixer_temporal_units', 64),
-                'indicator_units': model_config.get('stockmixer_indicator_units', 64),
-                'cross_stock_units': model_config.get('stockmixer_cross_stock_units', 64),
-                'fusion_units': model_config.get('stockmixer_fusion_units', 128),
-                'dropout': model_config.get('stockmixer_dropout', 0.2),
-                'batch_size': model_config.get('batch_size', 16),
-                'epochs': model_config.get('epochs', 100),
-                'early_stopping_patience': model_config.get('early_stopping_patience', 5),
-                'reduce_lr_patience': model_config.get('reduce_lr_patience', 5)
-            }
-        
-        return params
-    
-    def get_available_models(self) -> List[str]:
+    @classmethod
+    def get_available_models(cls) -> list:
         """Get list of available model types."""
-        return list(self.available_models.keys())
+        return list(cls._models.keys())
     
-    def get_model_info(self, model_type: str) -> Dict[str, Any]:
-        """
-        Get information about a model type.
-        
-        Args:
-            model_type: Type of model
-            
-        Returns:
-            Dictionary containing model information
-        """
-        if model_type not in self.available_models:
-            raise ValueError(f"Unknown model type: {model_type}")
-        
-        model_class = self.available_models[model_type]
-        
-        info = {
-            'name': model_class.__name__,
-            'module': model_class.__module__,
-            'docstring': model_class.__doc__,
-            'supports_regression': True,  # All models support regression
-            'supports_classification': model_type != 'arima'  # ARIMA only supports regression
-        }
-        
-        return info
-    
-    def validate_model_config(self, model_type: str, task: str) -> bool:
-        """
-        Validate model configuration.
-        
-        Args:
-            model_type: Type of model
-            task: Task type
-            
-        Returns:
-            True if configuration is valid, False otherwise
-        """
-        try:
-            # Check if model type is supported
-            if model_type not in self.available_models:
-                self.logger.error(f"Unsupported model type: {model_type}")
-                return False
-            
-            # Check task compatibility
-            if model_type == 'arima' and task != 'regression':
-                self.logger.error("ARIMA only supports regression tasks")
-                return False
-            
-            # Check if required parameters are available
-            params = self._get_model_params(model_type, task)
-            if not params:
-                self.logger.warning(f"No parameters found for {model_type} model")
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Configuration validation failed: {e}")
-            return False
-    
-    def create_ensemble(self, model_types: List[str], task: str = 'regression',
-                       weights: Optional[List[float]] = None, **kwargs) -> Dict[str, BaseModel]:
-        """
-        Create an ensemble of models.
-        
-        Args:
-            model_types: List of model types for ensemble
-            task: Task type
-            weights: Optional weights for ensemble (if None, equal weights)
-            **kwargs: Additional parameters
-            
-        Returns:
-            Dictionary containing ensemble models and metadata
-        """
-        # Validate model types
-        for model_type in model_types:
-            if not self.validate_model_config(model_type, task):
-                raise ValueError(f"Invalid configuration for {model_type}")
-        
-        # Create models
-        models = self.create_models(model_types, task, **kwargs)
-        
-        # Set weights
-        if weights is None:
-            weights = [1.0 / len(models)] * len(models)
-        
-        if len(weights) != len(models):
-            raise ValueError("Number of weights must match number of models")
-        
-        ensemble = {
-            'models': models,
-            'weights': weights,
-            'task': task,
-            'model_types': model_types
-        }
-        
-        self.logger.info(f"Created ensemble with {len(models)} models: {list(models.keys())}")
-        return ensemble
-    
-    def get_model_summary(self) -> str:
-        """Get summary of available models."""
-        summary = "Available Models:\n"
-        summary += "=" * 50 + "\n"
-        
-        for model_type in self.available_models:
-            info = self.get_model_info(model_type)
-            summary += f"\n{model_type.upper()}:\n"
-            summary += f"  Class: {info['name']}\n"
-            summary += f"  Regression: {info['supports_regression']}\n"
-            summary += f"  Classification: {info['supports_classification']}\n"
-            if info['docstring']:
-                summary += f"  Description: {info['docstring'].strip()}\n"
-        
-        return summary
-    
-    def list_model_parameters(self, model_type: str) -> Dict[str, Any]:
-        """
-        List parameters for a specific model type.
-        
-        Args:
-            model_type: Type of model
-            
-        Returns:
-            Dictionary of parameter names and default values
-        """
-        if model_type not in self.available_models:
-            raise ValueError(f"Unknown model type: {model_type}")
-        
-        # Get default parameters for each task
-        regression_params = self._get_model_params(model_type, 'regression')
-        classification_params = self._get_model_params(model_type, 'classification')
-        
-        return {
-            'regression': regression_params,
-            'classification': classification_params,
-            'common': {k: v for k, v in regression_params.items() 
-                      if k in classification_params and regression_params[k] == classification_params[k]}
-        } 
+    @classmethod
+    def is_model_available(cls, model_type: str) -> bool:
+        """Check if a model type is available."""
+        return model_type in cls._models
+
+
+# Convenience functions for direct model creation
+def create_arima_model(**kwargs) -> ARIMAModel:
+    """Create an ARIMA model."""
+    return ARIMAModel(**kwargs)
+
+def create_enhanced_arima_model(**kwargs) -> EnhancedARIMAModel:
+    """Create an Enhanced ARIMAX model."""
+    return EnhancedARIMAModel(**kwargs)
+
+def create_xgboost_model(**kwargs) -> XGBoostModel:
+    """Create an XGBoost model."""
+    return XGBoostModel(**kwargs)
+
+def create_lstm_model(**kwargs):
+    """Create an LSTM model if available."""
+    if not LSTM_AVAILABLE:
+        raise ImportError("LSTM model not available. TensorFlow required.")
+    return LSTMModel(**kwargs)
+
+def create_stockmixer_model(**kwargs):
+    """Create a StockMixer model if available."""
+    if not STOCKMIXER_AVAILABLE:
+        raise ImportError("StockMixer model not available. TensorFlow required.")
+    return StockMixerModel(**kwargs) 

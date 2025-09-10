@@ -1,46 +1,28 @@
 """
-Model components for RiskPipeline modular architecture.
+Model implementations for the RiskPipeline.
 """
 
 from .base_model import BaseModel
-from .model_factory import ModelFactory
+from .arima_model import ARIMAModel
+from .xgboost_model import XGBoostModel
+from .enhanced_arima_model import EnhancedARIMAModel
 
-# Import models conditionally to handle missing dependencies
-try:
-    from .arima_model import ARIMAModel
-    ARIMA_AVAILABLE = True
-except ImportError:
-    ARIMA_AVAILABLE = False
-    ARIMAModel = None
-
-try:
-    from .xgboost_model import XGBoostModel
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-    XGBoostModel = None
-
-try:
-    from .stockmixer_model import StockMixerModel
-    STOCKMIXER_AVAILABLE = True
-except ImportError:
-    STOCKMIXER_AVAILABLE = False
-    StockMixerModel = None
-
+# Check TensorFlow availability
 try:
     from .lstm_model import LSTMModel
     LSTM_AVAILABLE = True
 except ImportError:
     LSTM_AVAILABLE = False
-    LSTMModel = None
 
-__all__ = ['BaseModel', 'ModelFactory']
+# Check StockMixer availability
+try:
+    from .stockmixer_model import StockMixerModel
+    STOCKMIXER_AVAILABLE = True
+except ImportError:
+    STOCKMIXER_AVAILABLE = False
 
-# Add available models to exports
-if ARIMA_AVAILABLE:
-    __all__.append('ARIMAModel')
-if XGBOOST_AVAILABLE:
-    __all__.append('XGBoostModel')
+__all__ = ['BaseModel', 'ARIMAModel', 'XGBoostModel', 'EnhancedARIMAModel']
+
 if STOCKMIXER_AVAILABLE:
     __all__.append('StockMixerModel')
 if LSTM_AVAILABLE:

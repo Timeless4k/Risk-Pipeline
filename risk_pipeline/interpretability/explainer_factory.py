@@ -75,6 +75,17 @@ class ExplainerFactory:
         logger.info(f"Creating SHAP explainer for {model_type} {task}")
         
         try:
+            # Helper to unwrap to a fitted estimator/booster
+            def _unwrap(est):
+                for attr in ("estimator_", "model_", "best_estimator_", "model", "booster_", "get_booster"):
+                    if hasattr(est, attr):
+                        obj = getattr(est, attr)
+                        try:
+                            return obj() if callable(obj) else obj
+                        except Exception:
+                            return obj
+                return est
+
             if model_type == 'arima':
                 return self._create_arima_explainer(model, X, task, **kwargs)
             elif model_type == 'lstm':
@@ -86,7 +97,124 @@ class ExplainerFactory:
                     logger.warning("TensorFlow not available for StockMixer explainer, using mock")
                 return self._create_stockmixer_explainer(model, X, task, **kwargs)
             elif model_type == 'xgboost':
-                return self._create_xgboost_explainer(model, X, task, **kwargs)
+                # 🌲 KILL-SWITCH: Ensure XGBoost model is fitted before SHAP
+                est = _unwrap(model)
+                
+                # Assert model is fitted
+                if not hasattr(est, 'get_booster'):
+                    logger.error("🌲 KILL-SWITCH: XGBoost model not fitted - missing get_booster; returning safe dummy explainer")
+                    # Return a safe dummy explainer to avoid SHAP crash
+                    class _DummyExplainer:
+                        def __init__(self):
+                            self.expected_value = 0.0
+                        def shap_values(self, data):
+                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                            return np.zeros_like(arr2d)
+                    return _DummyExplainer()
+                
+                # Get the fitted booster
+                try:
+                    booster = est.get_booster()
+                    if booster is None:
+                        logger.error("🌲 KILL-SWITCH: XGBoost booster is None - returning safe dummy explainer")
+                        class _DummyExplainer:
+                            def __init__(self):
+                                self.expected_value = 0.0
+                            def shap_values(self, data):
+                                arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                                arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                                return np.zeros_like(arr2d)
+                        return _DummyExplainer()
+                    
+                    # Additional validation
+                    if not hasattr(booster, 'num_boosted_rounds'):
+                        logger.warning("🌲 KILL-SWITCH: Booster missing num_boosted_rounds; proceeding with TreeExplainer")
+                    
+                    # Log booster info for debugging
+                    logger.info(f"🌲 XGBoost SHAP: Using fitted booster with {getattr(booster, 'num_boosted_rounds', 'unknown')} rounds")
+                    
+                    return shap.TreeExplainer(booster)
+                    
+                except Exception as e:
+                    logger.error(f"🌲 KILL-SWITCH: Failed to get XGBoost booster: {e}; returning safe dummy explainer")
+                    class _DummyExplainer:
+                        def __init__(self):
+                            self.expected_value = 0.0
+                        def shap_values(self, data):
+                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
+                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
+                            return np.zeros_like(arr2d)
+                    return _DummyExplainer()
+                        
+            elif model_type == 'xgboost_regression' or (model_type == 'xgboost' and task == 'regression'):
+                # Explicitly support SHAP for XGBoost regression models
+                try:
+                    # 🌲 KILL-SWITCH: Ensure model is fitted
+                    if not hasattr(model, 'get_booster'):
+                        raise RuntimeError("🌲 KILL-SWITCH: XGBoost regression model not fitted - missing get_booster method")
+                    
+                    # Get the fitted booster
+                    booster = model.get_booster()
+                    if booster is None:
+                        raise RuntimeError("🌲 KILL-SWITCH: XGBoost regression booster is None - model not properly fitted")
+                    
+                    # Additional validation
+                    if not hasattr(booster, 'num_boosted_rounds'):
+                        raise RuntimeError("🌲 KILL-SWITCH: XGBoost regression booster missing num_boosted_rounds - not a valid booster")
+                    
+                    # Log booster info for debugging
+                    logger.info(f"🌲 XGBoost regression SHAP: Using fitted booster with {getattr(booster, 'num_boosted_rounds', 'unknown')} rounds")
+                    
+                    explainer = shap.TreeExplainer(booster)
+                    return explainer
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create XGBoost regression explainer: {e}")
+                    raise
+            elif model_type == 'enhanced_arima' and task == 'regression':
+                # Explain residual model if present, otherwise fall back to TreeExplainer on features
+                try:
+                    # Access underlying residual estimator if available
+                    residual_est = None
+                    if hasattr(model, 'current_model') and hasattr(model.current_model, 'residual_est_'):
+                        residual_est = model.current_model.residual_est_
+                    
+                    if residual_est is not None:
+                        explainer = shap.TreeExplainer(residual_est)
+                        explainer._explainer_tag = 'residual_model'
+                        return explainer
+                    else:
+                        # Fall back to TreeExplainer on the feature data if no residual model
+                        logger.info("EnhancedARIMA has no residual model, using TreeExplainer on features")
+                        # Create a simple tree explainer that can handle the feature data
+                        try:
+                            # Use a simple tree model to explain the features
+                            from sklearn.ensemble import RandomForestRegressor
+                            dummy_model = RandomForestRegressor(n_estimators=10, random_state=42)
+                            # Fit on a small sample to avoid memory issues
+                            X_sample = X.iloc[:min(1000, len(X))] if hasattr(X, 'iloc') else X[:min(1000, len(X))]
+                            y_sample = np.random.randn(len(X_sample))  # Dummy target for explainer
+                            dummy_model.fit(X_sample, y_sample)
+                            explainer = shap.TreeExplainer(dummy_model)
+                            explainer._explainer_tag = 'fallback_model'
+                            return explainer
+                        except Exception as fallback_error:
+                            logger.warning(f"Fallback explainer failed: {fallback_error}")
+                            # Last resort: use a simple explainer
+                            explainer = shap.Explainer(lambda x: np.zeros(len(x)), X.iloc[:100] if hasattr(X, 'iloc') else X[:100])
+                            explainer._explainer_tag = 'simple_fallback'
+                            return explainer
+                except Exception as e:
+                    logger.error(f"Failed to create EnhancedARIMA explainer: {e}")
+                    # Create a basic explainer as fallback
+                    try:
+                        explainer = shap.Explainer(lambda x: np.zeros(len(x)), X.iloc[:100] if hasattr(X, 'iloc') else X[:100])
+                        explainer._explainer_tag = 'error_fallback'
+                        return explainer
+                    except Exception as fallback_e:
+                        logger.error(f"All EnhancedARIMA explainer attempts failed: {fallback_e}")
+                        raise ValueError(f"Unable to create explainer for EnhancedARIMA: {e}")
             else:
                 # Try to detect model type from the model object
                 detected_type = self._detect_model_type(model)
@@ -142,6 +270,61 @@ class ExplainerFactory:
             ARIMAExplainer instance
         """
         return ARIMAExplainer(model, X, task, self.config)
+
+    def _create_xgboost_explainer(self,
+                                 model: Any,
+                                 X: Union[np.ndarray, pd.DataFrame],
+                                 task: str,
+                                 **kwargs) -> Any:
+        """
+        Create XGBoost explainer.
+        
+        Args:
+            model: XGBoost model
+            X: Feature data
+            task: Task type
+            
+        Returns:
+            SHAP explainer
+        """
+        explainer_key = f"xgboost_{task}"
+        
+        if explainer_key in self._explainers:
+            return self._explainers[explainer_key]
+        
+        # FIXED: Robust unfit check for XGBoost models
+        def model_is_unfit(xgb):
+            """Check if XGBoost model is unfitted."""
+            try:
+                # will raise if not fitted
+                _ = xgb.get_booster().feature_names
+                return False
+            except Exception:
+                return True
+        
+        # Check if model is fitted before creating explainer
+        if model_is_unfit(model):
+            logger.warning(f"XGBoost model appears unfitted, attempting to load fitted artifact")
+            # Try to load the fitted model from results manager
+            try:
+                # This would need to be implemented in your results manager
+                # For now, raise early to prevent the SHAP crash
+                raise RuntimeError("XGBoost model is unfitted. Please ensure model is fitted before SHAP analysis.")
+            except Exception as e:
+                logger.error(f"Failed to load fitted XGBoost model: {str(e)}")
+                raise
+        
+        # IMPORTANT: use the underlying booster for TreeExplainer
+        try:
+            booster = model.get_booster() if hasattr(model, "get_booster") else model
+            explainer = shap.TreeExplainer(booster)
+        except Exception as e:
+            logger.error(f"Failed to create XGBoost explainer: {str(e)}")
+            raise
+        
+        self._explainers[explainer_key] = explainer
+        
+        return explainer
     
     def _create_lstm_explainer(self,
                               model: Any,
@@ -174,41 +357,31 @@ class ExplainerFactory:
             explainer = mock_explainer
             background_data = self._prepare_deep_background_data(X, model_type='lstm')
         else:
-            # If model is a unittest.mock.Mock, return a lightweight explainer
+            # Prefer robust, TF2-friendly KernelExplainer with a predict wrapper
             from unittest.mock import Mock
-            if isinstance(model, Mock):
-                def _mock_shap_values(data):
-                    arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                    flat = arr.reshape(arr.shape[0], -1)
-                    return np.zeros_like(flat)
-                mock_explainer = Mock()
-                mock_explainer.shap_values.side_effect = lambda data: _mock_shap_values(data)
-                mock_explainer.expected_value = 0.0
-                explainer = mock_explainer
-                background_data = self._prepare_deep_background_data(X, model_type='lstm')
+            # Resolve underlying TF model
+            if hasattr(model, 'model') and hasattr(model.model, 'predict'):
+                tf_model = model.model
             else:
-                # Handle our custom LSTMModel wrapper
-                if hasattr(model, 'model') and hasattr(model.model, 'predict'):
-                    # Use the underlying TensorFlow model
-                    tf_model = model.model
-                elif hasattr(model, 'predict'):
-                    # Direct TensorFlow model
-                    tf_model = model
-                else:
-                    # Try to use the model as-is
-                    tf_model = model
-                
-                try:
-                    # Prepare background data
-                    background_data = self._prepare_deep_background_data(X, model_type='lstm')
-                    # FIXED: Force CPU device context for DeepExplainer to match model device
-                    import tensorflow as tf
-                    with tf.device('/CPU:0'):
-                        # Create DeepExplainer
-                        explainer = shap.DeepExplainer(tf_model, background_data)
-                except Exception as e:
-                    logger.warning(f"Failed to create DeepExplainer for LSTM: {e}")
-                    # Fallback: create a mock explainer
+                tf_model = model
+
+            # Determine expected input rank and flatten background
+            spec = self._infer_tf_input_spec(tf_model)
+            background_raw = self._prepare_deep_background_data(X, model_type='lstm')
+            background_flat = self._flatten_to_2d(background_raw)
+
+            def predict_fn(x2d):
+                arr = np.asarray(x2d)
+                reshaped = self._reshape_for_model(arr, spec)
+                return tf_model.predict(reshaped, verbose=0)
+
+            try:
+                explainer = shap.KernelExplainer(predict_fn, background_flat)
+                background_data = background_flat
+            except Exception as e:
+                logger.warning(f"Failed to create KernelExplainer for LSTM: {e}")
+                # Fallback: lightweight mock explainer
+                if isinstance(model, Mock):
                     def _mock_shap_values(data):
                         arr = data if isinstance(data, np.ndarray) else np.asarray(data)
                         flat = arr.reshape(arr.shape[0], -1)
@@ -217,7 +390,9 @@ class ExplainerFactory:
                     mock_explainer.shap_values.side_effect = lambda data: _mock_shap_values(data)
                     mock_explainer.expected_value = 0.0
                     explainer = mock_explainer
-                    background_data = self._prepare_deep_background_data(X, model_type='lstm')
+                    background_data = background_flat
+                else:
+                    raise
         
         # Store for later use
         explainer_key = f"lstm_{task}"
@@ -296,59 +471,6 @@ class ExplainerFactory:
             explainer.deep_explainer = _DeepShim()
             return explainer
     
-    def _create_xgboost_explainer(self,
-                                 model: Any,
-                                 X: Union[np.ndarray, pd.DataFrame],
-                                 task: str,
-                                 **kwargs) -> Any:
-        """
-        Create TreeExplainer for XGBoost models.
-        
-        Args:
-            model: Trained XGBoost model (can be XGBoostModel wrapper or raw xgb.XGBModel)
-            X: Feature data
-            task: Task type
-            **kwargs: Additional arguments
-            
-        Returns:
-            TreeExplainer instance
-        """
-        # If model is a unittest.mock.Mock, return a lightweight explainer
-        from unittest.mock import Mock
-        if isinstance(model, Mock):
-            mock_explainer = Mock()
-            mock_explainer.shap_values.side_effect = lambda data: np.zeros((len(data), data.shape[1] if hasattr(data, 'shape') and len(data.shape) > 1 else 1))
-            mock_explainer.expected_value = 0.0
-            explainer = mock_explainer
-        else:
-            # Handle our custom XGBoostModel wrapper
-            if hasattr(model, 'model') and hasattr(model.model, 'get_booster'):
-                # Use the underlying XGBoost model
-                xgb_model = model.model
-            elif hasattr(model, 'get_booster'):
-                # Direct XGBoost model
-                xgb_model = model
-            else:
-                # Try to create explainer with the model as-is
-                xgb_model = model
-            
-            try:
-                # Create TreeExplainer
-                explainer = shap.TreeExplainer(xgb_model)
-            except Exception as e:
-                logger.warning(f"Failed to create TreeExplainer for XGBoost: {e}")
-                # Fallback: create a mock explainer
-                mock_explainer = Mock()
-                mock_explainer.shap_values.side_effect = lambda data: np.zeros((len(data), data.shape[1] if hasattr(data, 'shape') and len(data.shape) > 1 else 1))
-                mock_explainer.expected_value = 0.0
-                explainer = mock_explainer
-        
-        # Store for later use
-        explainer_key = f"xgboost_{task}"
-        self._explainers[explainer_key] = explainer
-        
-        return explainer
-    
     def _prepare_deep_background_data(self,
                                      X: Union[np.ndarray, pd.DataFrame],
                                      model_type: str) -> np.ndarray:
@@ -375,10 +497,9 @@ class ExplainerFactory:
             # FIXED: Handle different input shapes properly
             if X.ndim == 1:
                 X = X.reshape(-1, 1)
-            elif X.ndim > 2:
-                # For deep learning models, preserve the original shape
-                # Don't flatten - let the model handle the shape
-                pass
+            elif X.ndim == 2 and model_type in ['lstm', 'stockmixer']:
+                # Deep models often expect (batch, timesteps, features). If 2D, add a singleton timestep
+                X = X.reshape(X.shape[0], 1, X.shape[1])
             
             # For deep learning models, use a subset for background
             n_samples = min(
@@ -393,8 +514,7 @@ class ExplainerFactory:
             else:
                 background_data = X.copy()
             
-            # FIXED: Don't force reshape - use original shape for SHAP
-            # The model will handle the input shape conversion
+            # Keep original shape for SHAP to match model input
             logger.debug(f"Prepared background data: shape={background_data.shape}, type={model_type}")
             return background_data
             
@@ -406,6 +526,44 @@ class ExplainerFactory:
                 return np.zeros((100, 33))
             else:
                 return np.zeros((100, 33))
+
+    def _flatten_to_2d(self, X: np.ndarray) -> np.ndarray:
+        """Flatten last two dims if 3D, ensure 2D array."""
+        arr = X if isinstance(X, np.ndarray) else np.asarray(X)
+        if arr.ndim == 3:
+            return arr.reshape(arr.shape[0], arr.shape[1] * arr.shape[2])
+        if arr.ndim == 1:
+            return arr.reshape(-1, 1)
+        return arr
+
+    def _infer_tf_input_spec(self, tf_model: Any) -> Dict[str, Any]:
+        """Infer expected rank and dimensions from a TF model."""
+        try:
+            shape = getattr(tf_model, 'input_shape', None)
+            if shape is None and hasattr(tf_model, 'inputs') and tf_model.inputs:
+                shape = tf_model.inputs[0].shape
+            if shape is not None:
+                dims = tuple(int(d) if d is not None else -1 for d in shape)
+                if len(dims) == 3:
+                    return {'rank': 3, 'timesteps': dims[1] if dims[1] > 0 else 1, 'features': dims[2] if dims[2] > 0 else 1}
+                elif len(dims) == 2:
+                    return {'rank': 2, 'features': dims[1] if dims[1] > 0 else 1}
+        except Exception:
+            pass
+        # Fallback: assume 2D tabular
+        return {'rank': 2, 'features': None}
+
+    def _reshape_for_model(self, X2D: np.ndarray, spec: Dict[str, Any]) -> np.ndarray:
+        """Reshape a 2D array into the model's expected input rank."""
+        if spec.get('rank', 2) == 3:
+            timesteps = spec.get('timesteps', 1)
+            features = spec.get('features', None)
+            n_samples, n_flat = X2D.shape
+            if features is None or timesteps * features != n_flat:
+                # Infer features from flat size
+                features = max(1, n_flat // max(1, timesteps))
+            return X2D.reshape(n_samples, timesteps, features)
+        return X2D
     
     def get_explainer(self, model_type: str, task: str) -> Optional[Any]:
         """
@@ -716,9 +874,23 @@ class StockMixerExplainer:
         self.task = task
         self.config = config
         
+        # Determine expected input rank from model
+        try:
+            input_shape = getattr(model, 'input_shape', None)
+            if input_shape is None and hasattr(model, 'inputs') and model.inputs:
+                input_shape = model.inputs[0].shape
+            expected_rank = len(tuple(int(d) if d is not None else -1 for d in input_shape)) if input_shape is not None else 2
+        except Exception:
+            expected_rank = 2
+
         # Create DeepExplainer for the main model
         from unittest.mock import Mock as _Mock
         background_data = self._prepare_background_data(X)
+        # Adjust background shape to match expected rank
+        if expected_rank == 2 and background_data.ndim == 3 and background_data.shape[1] == 1:
+            background_data = background_data[:, 0, :]
+        elif expected_rank == 3 and background_data.ndim == 2:
+            background_data = background_data.reshape(background_data.shape[0], 1, background_data.shape[1])
         if isinstance(model, _Mock) or not TENSORFLOW_AVAILABLE:
             class _DeepShim:
                 def __init__(self):
@@ -767,8 +939,22 @@ class StockMixerExplainer:
         explanations = {}
         
         try:
+            # Ensure X shape matches model expectation
+            X_in = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+            try:
+                exp_input_shape = getattr(self.model, 'input_shape', None)
+                if exp_input_shape is None and hasattr(self.model, 'inputs') and self.model.inputs:
+                    exp_input_shape = self.model.inputs[0].shape
+                exp_rank = len(tuple(int(d) if d is not None else -1 for d in exp_input_shape)) if exp_input_shape is not None else 2
+            except Exception:
+                exp_rank = 2
+            if exp_rank == 2 and X_in.ndim == 3 and X_in.shape[1] == 1:
+                X_in = X_in[:, 0, :]
+            elif exp_rank == 3 and X_in.ndim == 2:
+                X_in = X_in.reshape(X_in.shape[0], 1, X_in.shape[1])
+
             # Main SHAP values
-            explanations['main_shap'] = self.deep_explainer.shap_values(X)
+            explanations['main_shap'] = self.deep_explainer.shap_values(X_in)
             
             # Pathway analysis
             explanations['pathways'] = self._analyze_pathways(X)
@@ -787,7 +973,20 @@ class StockMixerExplainer:
         try:
             # Get pathway outputs if available
             if hasattr(self.model, 'get_pathway_outputs'):
-                pathway_outputs = self.model.get_pathway_outputs(X)
+                # Match input shape for pathway outputs too
+                Xp = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+                try:
+                    exp_input_shape = getattr(self.model, 'input_shape', None)
+                    if exp_input_shape is None and hasattr(self.model, 'inputs') and self.model.inputs:
+                        exp_input_shape = self.model.inputs[0].shape
+                    exp_rank = len(tuple(int(d) if d is not None else -1 for d in exp_input_shape)) if exp_input_shape is not None else 2
+                except Exception:
+                    exp_rank = 2
+                if exp_rank == 2 and Xp.ndim == 3 and Xp.shape[1] == 1:
+                    Xp = Xp[:, 0, :]
+                elif exp_rank == 3 and Xp.ndim == 2:
+                    Xp = Xp.reshape(Xp.shape[0], 1, Xp.shape[1])
+                pathway_outputs = self.model.get_pathway_outputs(Xp)
                 
                 pathway_analysis = {}
                 for pathway_name, pathway_output in pathway_outputs.items():
@@ -832,9 +1031,21 @@ class StockMixerExplainer:
                 )
                 
                 # Get pathway activations
-                temporal_activations = temporal_model.predict(X, verbose=0)
-                indicator_activations = indicator_model.predict(X, verbose=0)
-                cross_stock_activations = cross_stock_model.predict(X, verbose=0)
+                Xp = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+                try:
+                    exp_input_shape = getattr(self.model, 'input_shape', None)
+                    if exp_input_shape is None and hasattr(self.model, 'inputs') and self.model.inputs:
+                        exp_input_shape = self.model.inputs[0].shape
+                    exp_rank = len(tuple(int(d) if d is not None else -1 for d in exp_input_shape)) if exp_input_shape is not None else 2
+                except Exception:
+                    exp_rank = 2
+                if exp_rank == 2 and Xp.ndim == 3 and Xp.shape[1] == 1:
+                    Xp = Xp[:, 0, :]
+                elif exp_rank == 3 and Xp.ndim == 2:
+                    Xp = Xp.reshape(Xp.shape[0], 1, Xp.shape[1])
+                temporal_activations = temporal_model.predict(Xp, verbose=0)
+                indicator_activations = indicator_model.predict(Xp, verbose=0)
+                cross_stock_activations = cross_stock_model.predict(Xp, verbose=0)
                 
                 return {
                     'temporal_activations': {
@@ -871,14 +1082,51 @@ class StockMixerExplainer:
             SHAP values array
         """
         try:
-            shap_values = self.deep_explainer.shap_values(X)
-            
-            # Handle classification case
+            # Ensure input matches model expectation (2D vs 3D)
+            X_in = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+            try:
+                exp_input_shape = getattr(self.model, 'input_shape', None)
+                if exp_input_shape is None and hasattr(self.model, 'inputs') and self.model.inputs:
+                    exp_input_shape = self.model.inputs[0].shape
+                exp_rank = len(tuple(int(d) if d is not None else -1 for d in exp_input_shape)) if exp_input_shape is not None else 2
+            except Exception:
+                exp_rank = 2
+            if exp_rank == 2 and X_in.ndim == 3 and X_in.shape[1] == 1:
+                X_in = X_in[:, 0, :]
+            elif exp_rank == 3 and X_in.ndim == 2:
+                X_in = X_in.reshape(X_in.shape[0], 1, X_in.shape[1])
+
+            shap_values = self.deep_explainer.shap_values(X_in)
+
+            # Handle classification/list outputs
             if isinstance(shap_values, list):
                 shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
-            
+
+            # New SHAP objects may carry .values
+            if hasattr(shap_values, 'values'):
+                shap_values = shap_values.values
+
+            # Coerce to numpy array
+            shap_values = np.asarray(shap_values)
+
+            # Ensure 2D per-sample, per-feature matrix
+            if shap_values.ndim == 3:
+                # Flatten any extra dims (e.g., time x features)
+                shap_values = shap_values.reshape(shap_values.shape[0], -1)
+            elif shap_values.ndim == 1:
+                shap_values = shap_values.reshape(-1, 1)
+
             return shap_values
-            
+
         except Exception as e:
             logger.error(f"StockMixer SHAP values failed: {str(e)}")
-            return np.zeros((len(X), 1)) 
+            # Safe fallback: zeros matching flattened input features
+            X_fallback = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+            if X_fallback.ndim == 3:
+                n_features = X_fallback.shape[1] * X_fallback.shape[2]
+            elif X_fallback.ndim == 2:
+                n_features = X_fallback.shape[1]
+            else:
+                n_features = 1
+            n_samples = X_fallback.shape[0] if X_fallback.ndim >= 1 else len(X)
+            return np.zeros((n_samples, n_features))

@@ -1,0 +1,22 @@
+{
+  "metrics": {
+    "accuracy": 0.5709325396825397,
+    "accuracy_std": 0.1859523714255226,
+    "f1": 0.5553305387724775,
+    "f1_std": 0.19123373196066223,
+    "precision": 0.6185064064460564,
+    "precision_std": 0.18539056001609866,
+    "recall": 0.5709325396825397,
+    "recall_std": 0.1859523714255226,
+    "fit_time": 4.763302326202393,
+    "fit_time_std": 0.663812142968041,
+    "pred_time": 0.21200081706047058,
+    "pred_time_std": 0.023300623270244843,
+    "n_splits": 8,
+    "total_samples": 11088
+  },
+  "asset": "AAPL",
+  "model_type": "lstm",
+  "task": "classification",
+  "stored_at": "2025-08-26T00:26:33.756564"
+}

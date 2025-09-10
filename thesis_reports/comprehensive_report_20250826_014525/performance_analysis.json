@@ -1,0 +1,50 @@
+{
+  "timestamp": "2025-08-26T01:45:28.642111",
+  "total_models": 48,
+  "assets_analyzed": 6,
+  "model_types": [
+    "arima",
+    "enhanced_arima",
+    "lstm",
+    "stockmixer",
+    "xgboost"
+  ],
+  "tasks": [
+    "regression",
+    "classification"
+  ],
+  "performance_summary": {
+    "regression": {
+      "best_r2": {
+        "model": "arima",
+        "asset": "CBA.AX",
+        "value": -0.0759773639118316
+      },
+      "best_mse": {
+        "model": "arima",
+        "asset": "IOZ.AX",
+        "value": 0.0032089269764421
+      },
+      "avg_r2": -1.3808795749538674,
+      "avg_mse": 0.0177060465913059,
+      "std_r2": 1.2931410974239317,
+      "std_mse": 0.016239859149489385
+    },
+    "classification": {
+      "best_accuracy": {
+        "model": "stockmixer",
+        "asset": "CBA.AX",
+        "value": 0.6205357142857142
+      },
+      "best_f1": {
+        "model": "stockmixer",
+        "asset": "CBA.AX",
+        "value": 0.5973472580026502
+      },
+      "avg_accuracy": 0.5316697191697192,
+      "avg_f1": 0.5034568141508614,
+      "std_accuracy": 0.05682896329612932,
+      "std_f1": 0.05875365321989119
+    }
+  }
+}

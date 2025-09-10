@@ -1,0 +1,22 @@
+{
+  "Accuracy": 0.6155753968253969,
+  "Accuracy_std": 0.06057044675041059,
+  "F1": 0.6153651139229268,
+  "F1_std": 0.06609819107770752,
+  "Precision": 0.6335568290072614,
+  "Precision_std": 0.07317912009797631,
+  "Recall": 0.6155753968253969,
+  "Recall_std": 0.06057044675041059,
+  "Baseline Accuracy": 0.5694444444444444,
+  "Baseline Accuracy_std": 0.10618323936714008,
+  "Baseline F1": 0.4183488152377287,
+  "Baseline F1_std": 0.12592188979690466,
+  "LogLoss": NaN,
+  "LogLoss_std": NaN,
+  "Fit Time": 4.677757151500003,
+  "Fit Time_std": 0.6557036164252242,
+  "Prediction Time": 0.2197282991249807,
+  "Prediction Time_std": 0.0200151616784618,
+  "total_samples": 8921,
+  "n_splits": 8
+}

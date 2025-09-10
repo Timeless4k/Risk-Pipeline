@@ -1,0 +1,32 @@
+{
+  "asset": "IOZ.AX",
+  "model_type": "xgboost",
+  "task": "classification",
+  "timestamp": "2025-09-10T17:21:01.561923",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.5525793650793651,
+    "Accuracy_std": 0.0856825232995492,
+    "F1": 0.5121528362690104,
+    "F1_std": 0.10422960228802715,
+    "Precision": 0.6417578867119398,
+    "Precision_std": 0.09257551522098598,
+    "Recall": 0.5525793650793651,
+    "Recall_std": 0.0856825232995492,
+    "Baseline Accuracy": 0.4935515873015873,
+    "Baseline Accuracy_std": 0.13649438147908885,
+    "Baseline F1": 0.3366582220292409,
+    "Baseline F1_std": 0.14268652008985672,
+    "LogLoss": 0.8938364882575176,
+    "LogLoss_std": 0.19879232301564576,
+    "Fit Time": 0.2823522972500996,
+    "Fit Time_std": 0.04583730177985622,
+    "Prediction Time": 0.0017489703750470653,
+    "Prediction Time_std": 0.0002833254111340263,
+    "total_samples": 3662,
+    "n_splits": 8
+  }
+}

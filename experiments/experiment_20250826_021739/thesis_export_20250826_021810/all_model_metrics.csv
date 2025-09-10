@@ -1,0 +1,3 @@
+asset,model_type,task,stored_at
+AAPL,arima,regression,2025-08-26T02:17:59.978153
+AAPL,enhanced_arima,regression,2025-08-26T02:18:08.871966

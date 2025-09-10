@@ -1,0 +1,42 @@
+{
+  "Basic_Optimized": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "argument of type 'ARIMAExplainer' is not iterable"
+  },
+  "Conservative_XGBoost": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "argument of type 'ARIMAExplainer' is not iterable"
+  },
+  "Enhanced_ARIMA_Focus": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "argument of type 'ARIMAExplainer' is not iterable"
+  },
+  "Minimal_Features": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "argument of type 'ARIMAExplainer' is not iterable"
+  },
+  "Aggressive_Regularization": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "argument of type 'ARIMAExplainer' is not iterable"
+  }
+}

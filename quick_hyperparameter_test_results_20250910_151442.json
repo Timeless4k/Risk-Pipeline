@@ -1,0 +1,58 @@
+{
+  "XGBoost_Conservative": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "XGBoost_Aggressive": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "LSTM_Conservative": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "LSTM_Complex": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "StockMixer_Conservative": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "StockMixer_Complex": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  },
+  "Balanced_Config": {
+    "R2": -999,
+    "RMSE": 999,
+    "MAE": 999,
+    "MSE": 999,
+    "n_models": 0,
+    "error": "expected str, bytes or os.PathLike object, not dict"
+  }
+}

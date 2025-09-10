@@ -29,47 +29,35 @@ class XGBoostModel(BaseModel):
         super().__init__(name="XGBoost", **kwargs)
         self.task = task
         self.scaler = StandardScaler()
+        # Optional log-target support for regression stability
+        self.use_log_vol_target = bool(kwargs.get('use_log_vol_target', False)) if task == 'regression' else False
+        self.log_target_epsilon = float(kwargs.get('log_target_epsilon', 1e-6)) if task == 'regression' else 1e-6
         
-        # Default parameters with regularization to prevent overfitting
+        # Tuned default parameters (apply unless explicitly overridden)
         self.params = {
-            'n_estimators': kwargs.get('n_estimators', 100),
-            'max_depth': kwargs.get('max_depth', 3),  # Reduced from 5 to prevent overfitting
-            'learning_rate': kwargs.get('learning_rate', 0.05),  # Reduced from 0.1 for better generalization
+            'n_estimators': kwargs.get('n_estimators', 800),
+            'max_depth': kwargs.get('max_depth', 6),
+            'learning_rate': kwargs.get('learning_rate', 0.05),
             'random_state': kwargs.get('random_state', 42),
             'use_label_encoder': False,
-            'eval_metric': 'mlogloss' if task == 'classification' else 'rmse',
+            'eval_metric': 'logloss' if task == 'classification' else 'rmse',
             
             # Regularization parameters
-            'reg_alpha': kwargs.get('reg_alpha', 0.1),  # L1 regularization
-            'reg_lambda': kwargs.get('reg_lambda', 1.0),  # L2 regularization
-            'subsample': kwargs.get('subsample', 0.8),  # Row sampling
-            'colsample_bytree': kwargs.get('colsample_bytree', 0.8),  # Column sampling
-            'min_child_weight': kwargs.get('min_child_weight', 3),  # Minimum sum of instance weight
-            'gamma': kwargs.get('gamma', 0.1),  # Minimum loss reduction for split
+            'reg_alpha': kwargs.get('reg_alpha', 0.1),
+            'reg_lambda': kwargs.get('reg_lambda', 1.0),
+            'subsample': kwargs.get('subsample', 0.8),
+            'colsample_bytree': kwargs.get('colsample_bytree', 0.8),
+            'min_child_weight': kwargs.get('min_child_weight', 5),
+            'gamma': kwargs.get('gamma', 0.2),
         }
         
         # Update with any additional parameters
         self.params.update(kwargs)
         
-        # Prefer GPU if available for XGBoost
-        try:
-            import subprocess
-            gpu_available = False
-            try:
-                # Simple CUDA presence check
-                subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                gpu_available = True
-            except Exception:
-                gpu_available = False
-            if gpu_available:
-                self.params.setdefault('tree_method', 'gpu_hist')
-                self.params.setdefault('predictor', 'gpu_predictor')
-                self.params.setdefault('gpu_id', 0)
-                self.logger.info("Using GPU for XGBoost (gpu_hist)")
-            else:
-                self.params.setdefault('tree_method', 'hist')
-        except Exception as _e:
-            self.logger.debug(f"GPU check for XGBoost skipped: {_e}")
+        # Force reliable CPU defaults; avoid flaky GPU selection in mixed environments
+        self.params.setdefault('tree_method', 'hist')
+        self.params.pop('predictor', None)
+        self.params.pop('gpu_id', None)
 
         # Create model
         if task == 'classification':
@@ -79,8 +67,56 @@ class XGBoostModel(BaseModel):
         
         self.logger.info(f"XGBoost model initialized for {task} task with params: {self.params}")
     
-    # For unit tests compatibility
-    def build_model(self, input_shape: Tuple[int, ...]):
+    def build_model(self, input_shape: Tuple[int, ...]) -> 'XGBoostModel':
+        """Build XGBoost model with optimized parameters."""
+        self.input_shape = input_shape
+        
+        # QUICK CPU OPTIMIZATION: Use parallel cores for maximum performance
+        cpu_count =  max(1, __import__('psutil').cpu_count(logical=False) or 4)
+        
+        # Tuned defaults for stability and generalization
+        xgb_params = {
+            'n_jobs': cpu_count,
+            'tree_method': 'hist',
+            'n_estimators': self.params.get('n_estimators', 800),
+            'max_depth': self.params.get('max_depth', 6),
+            'learning_rate': self.params.get('learning_rate', 0.05),
+            'subsample': self.params.get('subsample', 0.8),
+            'colsample_bytree': self.params.get('colsample_bytree', 0.8),
+            'min_child_weight': self.params.get('min_child_weight', 5),
+            'gamma': self.params.get('gamma', 0.2),
+            'reg_alpha': self.params.get('reg_alpha', 0.1),
+            'reg_lambda': self.params.get('reg_lambda', 1.0),
+            'random_state': self.params.get('random_state', 42),
+            'verbosity': 0
+        }
+        
+        if self.task == 'classification':
+            self.model = xgb.XGBClassifier(**xgb_params)
+        else:
+            self.model = xgb.XGBRegressor(**xgb_params)
+        
+        self.logger.info(f"🚀 XGBoost model built with {cpu_count}-core optimization!")
+        self.logger.info(f"⚡ Using tree_method='hist' for maximum speed")
+        self.logger.info(f"💪 Parallel processing: {cpu_count} cores")
+        self.logger.info(f"Final XGB params: {xgb_params}")
+        
+        return self
+    
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], 
+            y: Union[pd.Series, np.ndarray], **kwargs) -> 'XGBoostModel':
+        """
+        Fit XGBoost model (compatibility method for sklearn interface).
+        
+        Args:
+            X: Training features
+            y: Training targets
+            **kwargs: Additional training parameters
+            
+        Returns:
+            Self for method chaining
+        """
+        self.train(X, y, **kwargs)
         return self
     
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
@@ -107,32 +143,24 @@ class XGBoostModel(BaseModel):
         try:
             # Scale features
             X_scaled = self.scaler.fit_transform(X)
+            # Optional log-target transform (regression only)
+            if self.task == 'regression' and (kwargs.get('use_log_vol_target', self.use_log_vol_target)):
+                eps = kwargs.get('log_target_epsilon', self.log_target_epsilon)
+                try:
+                    y = np.log(np.asarray(y).ravel() + eps)
+                except Exception:
+                    pass
             
-            # Apply SMOTE+Tomek for classification if specified
-            apply_smote = kwargs.get('apply_smote', True) if self.task == 'classification' else False
-            
-            if apply_smote:
-                X_scaled, y = self._apply_smote_tomek(X_scaled, y)
-            
-            # Train model
+            # Simple fit without early stopping (early_stopping_rounds not supported in current XGBoost version)
             self.model.fit(X_scaled, y)
+            
             self.is_trained = True
-            
-            # Calculate training metrics
-            y_pred = self.model.predict(X_scaled)
-            if self.task == 'classification':
-                metrics = self._calculate_classification_metrics(y, y_pred)
-            else:
-                metrics = self._calculate_regression_metrics(y, y_pred)
-            
-            self.logger.info(f"XGBoost training completed")
+            self.logger.info("XGBoost training completed")
             
             return {
-                'metrics': metrics,
-                'feature_importance': self.get_feature_importance(),
-                'task': self.task
+                'status': 'success',
+                'n_estimators': getattr(self.model, 'n_estimators', None)
             }
-            
         except Exception as e:
             self.logger.error(f"XGBoost training failed: {e}")
             raise

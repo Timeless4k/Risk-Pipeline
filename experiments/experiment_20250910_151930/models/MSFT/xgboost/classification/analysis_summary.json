@@ -1,0 +1,32 @@
+{
+  "asset": "MSFT",
+  "model_type": "xgboost",
+  "task": "classification",
+  "timestamp": "2025-09-10T15:19:38.976295",
+  "n_splits": 3,
+  "successful_splits": 3,
+  "total_splits": 3,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.6507936507936508,
+    "Accuracy_std": 0.027492869961410784,
+    "F1": 0.5971358405915063,
+    "F1_std": 0.09852430780550112,
+    "Precision": 0.608882568056745,
+    "Precision_std": 0.17881313751362893,
+    "Recall": 0.6507936507936508,
+    "Recall_std": 0.027492869961410784,
+    "Baseline Accuracy": 0.6455026455026455,
+    "Baseline Accuracy_std": 0.11148839950108717,
+    "Baseline F1": 0.510140350396581,
+    "Baseline F1_std": 0.14107539125387203,
+    "LogLoss": 0.7705683641710602,
+    "LogLoss_std": 0.17278599606353945,
+    "Fit Time": 0.11153516666187595,
+    "Fit Time_std": 0.028425023201548546,
+    "Prediction Time": 0.0010654666693881154,
+    "Prediction Time_std": 8.327359818541654e-05,
+    "total_samples": 957,
+    "n_splits": 3
+  }
+}

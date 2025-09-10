@@ -1,0 +1,26 @@
+{
+  "asset": "CBA.AX",
+  "model_type": "xgboost",
+  "task": "classification",
+  "timestamp": "2025-08-26T01:24:58.724181",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": NaN,
+    "accuracy_std": NaN,
+    "f1": NaN,
+    "f1_std": NaN,
+    "precision": NaN,
+    "precision_std": NaN,
+    "recall": NaN,
+    "recall_std": NaN,
+    "fit_time": 0.0,
+    "fit_time_std": 0.0,
+    "pred_time": 0.0,
+    "pred_time_std": 0.0,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

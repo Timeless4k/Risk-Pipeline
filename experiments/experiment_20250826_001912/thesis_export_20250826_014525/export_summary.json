@@ -1,0 +1,102 @@
+{
+  "export_timestamp": "2025-08-26T01:45:28.611948",
+  "total_models": 48,
+  "total_assets": 6,
+  "model_types": [
+    "stockmixer",
+    "arima",
+    "enhanced_arima",
+    "lstm",
+    "xgboost"
+  ],
+  "tasks": [
+    "regression",
+    "classification"
+  ],
+  "export_summary": {
+    "CBA.AX": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    },
+    "MSFT": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    },
+    "^GSPC": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    },
+    "BHP.AX": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    },
+    "AAPL": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    },
+    "IOZ.AX": {
+      "models": 8,
+      "model_types": [
+        "stockmixer",
+        "arima",
+        "enhanced_arima",
+        "lstm",
+        "xgboost"
+      ],
+      "tasks": [
+        "regression",
+        "classification"
+      ]
+    }
+  }
+}

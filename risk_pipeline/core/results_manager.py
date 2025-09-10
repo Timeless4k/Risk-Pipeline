@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 import pandas as pd
 import numpy as np
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,17 @@ class ResultsManager:
         self._metadata['version'] = '2.0.0'  # Modular version
         
         logger.info("ResultsManager initialized")
+    
+    def _get_experiment_dir(self):
+        """Get the current experiment directory."""
+        if self.current_experiment_path:
+            return str(self.current_experiment_path)
+        else:
+            return str(self.base_dir / 'temp')
+    
+    def get_experiment_dir(self):
+        """Get the current experiment directory (public method)."""
+        return self._get_experiment_dir()
 
     # Experiment lifecycle
     def start_experiment(self, name: str, config: Dict[str, Any], description: str = "") -> str:
@@ -317,14 +329,16 @@ class ResultsManager:
             Best model information or None if no models found
         """
         best_model = None
-        best_score = float('inf')
+        maximize = metric.lower() in {'r2', 'accuracy', 'f1', 'precision', 'recall'}
+        best_score = -float('inf') if maximize else float('inf')
         
         for key, data in self._metrics.items():
             if data['asset'] == asset and data['task'] == task:
                 metrics = data['metrics']
                 if metric in metrics:
                     score = metrics[metric]
-                    if score < best_score:
+                    better = score > best_score if maximize else score < best_score
+                    if better:
                         best_score = score
                         best_model = {
                             'model_type': data['model_type'],
@@ -582,33 +596,246 @@ class ResultsManager:
             out['summary'] = self.get_all_metrics()
         return out
 
-    def save_model_results(
-        self,
-        asset: str,
-        model_name: str,
-        task: str,
-        metrics: Dict[str, Any],
-        predictions: Dict[str, Any],
-        model: Any,
-        scaler: Optional[Any],
-        feature_names: Optional[List[str]],
-        config: Dict[str, Any],
-    ) -> None:
-        """Persist model artifacts and register in-memory structures."""
-        self.store_metrics(metrics, asset, model_name, task)
-        self.store_predictions(np.array(predictions.get('predicted', [])), asset, model_name, task)
-        self.store_model(model, asset, model_name, task)
-        base = self.current_experiment_path or (self.base_dir / 'temp')
-        model_dir = base / 'models' / asset / model_name / task
-        from risk_pipeline.utils.model_persistence import ModelPersistence
-        ModelPersistence.save_complete_model(
-            model=model,
-            scaler=scaler,
-            feature_names=feature_names or [],
-            config=config,
-            metrics=metrics,
-            filepath=model_dir,
-        )
+    def save_model_results(self, asset: str, model_type: Optional[str] = None, task: str = 'regression', model: Any = None, 
+                          metrics: Optional[Dict[str, Any]] = None, features: Optional[List[str]] = None,
+                          shap_results: Optional[Dict[str, Any]] = None,
+                          predictions: Optional[Dict[str, List]] = None, **kwargs) -> None:
+        """
+        Save comprehensive model results for thesis analysis.
+        
+        Args:
+            asset: Asset name
+            model_type: Type of model
+            task: Task type
+            model: Trained model
+            metrics: Model metrics
+            features: Feature names
+            shap_results: SHAP analysis results
+            predictions: Dictionary containing 'actual' and 'predicted' lists
+        """
+        # Support alias: model_name (backward compatibility)
+        if (model_type is None or model_type == '') and 'model_name' in kwargs:
+            model_type = kwargs.get('model_name')
+
+        # Basic validations / fallbacks
+        if metrics is None:
+            metrics = {}
+        if model_type is None:
+            model_type = str(getattr(model, 'name', 'unknown') or 'unknown')
+
+        # Create experiment directory structure
+        experiment_dir = self._get_experiment_dir()
+        model_dir = os.path.join(experiment_dir, 'models', asset, model_type, task)
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # Save model
+        model_path = os.path.join(model_dir, 'model.pkl')
+        try:
+            with open(model_path, 'wb') as f:
+                pickle.dump(model, f)
+            logger.info(f"Model saved to {model_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save model: {e}")
+        
+        # Save metrics
+        metrics_path = os.path.join(model_dir, 'metrics.json')
+        try:
+            with open(metrics_path, 'w') as f:
+                json.dump(metrics, f, indent=2, default=str)
+            logger.info(f"Metrics saved to {metrics_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save metrics: {e}")
+        
+        # Save features
+        if features:
+            features_path = os.path.join(model_dir, 'features.json')
+            try:
+                with open(features_path, 'w') as f:
+                    json.dump(features, f, indent=2)
+                logger.info(f"Features saved to {features_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save features: {e}")
+        
+        # Save SHAP results
+        if shap_results:
+            shap_path = os.path.join(model_dir, 'shap_results.json')
+            try:
+                # Convert numpy arrays to lists for JSON serialization
+                shap_serializable = {}
+                for key, value in shap_results.items():
+                    if isinstance(value, np.ndarray):
+                        shap_serializable[key] = value.tolist()
+                    else:
+                        shap_serializable[key] = value
+                
+                with open(shap_path, 'w') as f:
+                    json.dump(shap_serializable, f, indent=2, default=str)
+                logger.info(f"SHAP results saved to {shap_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save SHAP results: {e}")
+        
+        # Save per-fold predictions and comprehensive data
+        if predictions:
+            try:
+                # Save per-fold predictions CSV
+                predictions_path = os.path.join(model_dir, 'per_fold_predictions.csv')
+                if 'actual' in predictions and 'predicted' in predictions:
+                    df_predictions = pd.DataFrame({
+                        'actual': predictions['actual'],
+                        'predicted': predictions['predicted']
+                    })
+                    df_predictions.to_csv(predictions_path, index=False)
+                    logger.info(f"Per-fold predictions saved to {predictions_path}")
+                
+                # Save comprehensive fold-level metrics if available
+                if 'all_fold_metrics' in predictions and predictions['all_fold_metrics']:
+                    fold_metrics_path = os.path.join(model_dir, 'fold_level_metrics.csv')
+                    df_fold_metrics = pd.DataFrame(predictions['all_fold_metrics'])
+                    df_fold_metrics.to_csv(fold_metrics_path, index=False)
+                    logger.info(f"Fold-level metrics saved to {fold_metrics_path}")
+                
+                # Save fold indices for reproducibility
+                if 'all_fold_indices' in predictions and predictions['all_fold_indices']:
+                    fold_indices_path = os.path.join(model_dir, 'fold_indices.json')
+                    with open(fold_indices_path, 'w') as f:
+                        json.dump(predictions['all_fold_indices'], f, indent=2)
+                    logger.info(f"Fold indices saved to {fold_indices_path}")
+                
+                # Save comprehensive analysis summary
+                analysis_summary = {
+                    'asset': asset,
+                    'model_type': model_type,
+                    'task': task,
+                    'timestamp': datetime.now().isoformat(),
+                    'n_splits': predictions.get('n_splits', 0),
+                    'successful_splits': predictions.get('successful_splits', 0),
+                    'total_splits': predictions.get('total_splits', 0),
+                    'total_samples': len(predictions.get('actual', [])),
+                    'metrics_summary': metrics
+                }
+                
+                summary_path = os.path.join(model_dir, 'analysis_summary.json')
+                with open(summary_path, 'w') as f:
+                    json.dump(analysis_summary, f, indent=2, default=str)
+                logger.info(f"Analysis summary saved to {summary_path}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to save comprehensive data: {e}")
+        
+        # Store in memory for quick access
+        key = f"{asset}_{model_type}_{task}"
+        # Standardize model storage to match get_model expectations
+        self._models[key] = {
+            'model': model,
+            'asset': asset,
+            'model_type': model_type,
+            'task': task,
+            'stored_at': datetime.now().isoformat()
+        }
+        self._metrics[key] = {
+            'metrics': metrics,
+            'asset': asset,
+            'model_type': model_type,
+            'task': task,
+            'stored_at': datetime.now().isoformat()
+        }
+        
+        if features:
+            # Backward-compat: keep key-based, but standardize asset-based as primary
+            self._features[key] = features
+            self._features[asset] = {
+                'features': features,
+                'stored_at': datetime.now().isoformat()
+            }
+        
+        if shap_results:
+            self._shap_results[key] = shap_results
+        
+        if predictions:
+            self._predictions[key] = predictions
+        
+        logger.info(f"✅ Comprehensive results saved for {asset}_{model_type}_{task}")
+    
+    def export_thesis_data(self, output_dir: str = None) -> str:
+        """
+        Export comprehensive thesis-ready data for all experiments.
+        
+        Args:
+            output_dir: Output directory (defaults to experiments/thesis_export_<timestamp>)
+            
+        Returns:
+            Path to exported data directory
+        """
+        if output_dir is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = os.path.join(self._get_experiment_dir(), f"thesis_export_{timestamp}")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Export aggregated metrics
+        all_metrics_df = self.get_all_metrics()
+        if not all_metrics_df.empty:
+            metrics_path = os.path.join(output_dir, 'all_model_metrics.csv')
+            all_metrics_df.to_csv(metrics_path, index=False)
+            logger.info(f"All model metrics exported to {metrics_path}")
+        
+        # Export per-fold data for each model
+        for key, pred_data in self._predictions.items():
+            try:
+                asset, model_type, task = key.split('_', 2)
+                model_dir = os.path.join(output_dir, 'per_model_data', asset, model_type, task)
+                os.makedirs(model_dir, exist_ok=True)
+                
+                # Export predictions
+                if 'actual' in pred_data and 'predicted' in pred_data:
+                    df_pred = pd.DataFrame({
+                        'actual': pred_data['actual'],
+                        'predicted': pred_data['predicted']
+                    })
+                    df_pred.to_csv(os.path.join(model_dir, 'predictions.csv'), index=False)
+                
+                # Export fold metrics
+                if 'all_fold_metrics' in pred_data and pred_data['all_fold_metrics']:
+                    df_fold = pd.DataFrame(pred_data['all_fold_metrics'])
+                    df_fold.to_csv(os.path.join(model_dir, 'fold_metrics.csv'), index=False)
+                
+                # Export fold indices
+                if 'all_fold_indices' in pred_data and pred_data['all_fold_indices']:
+                    with open(os.path.join(model_dir, 'fold_indices.json'), 'w') as f:
+                        json.dump(pred_data['all_fold_indices'], f, indent=2)
+                
+                # Export model metrics
+                if key in self._metrics:
+                    with open(os.path.join(model_dir, 'model_metrics.json'), 'w') as f:
+                        json.dump(self._metrics[key], f, indent=2, default=str)
+                
+            except Exception as e:
+                logger.warning(f"Failed to export data for {key}: {e}")
+        
+        # Create comprehensive summary report
+        summary_report = {
+            'export_timestamp': datetime.now().isoformat(),
+            'total_models': len(self._models),
+            'total_assets': len(set(data['asset'] for data in self._metrics.values())),
+            'model_types': list(set(data['model_type'] for data in self._metrics.values())),
+            'tasks': list(set(data['task'] for data in self._metrics.values())),
+            'export_summary': {}
+        }
+        
+        # Add per-asset summary
+        for asset in set(data['asset'] for data in self._metrics.values()):
+            asset_models = [k for k in self._metrics.keys() if k.startswith(f"{asset}_")]
+            summary_report['export_summary'][asset] = {
+                'models': len(asset_models),
+                'model_types': list(set(self._metrics[k]['model_type'] for k in asset_models)),
+                'tasks': list(set(self._metrics[k]['task'] for k in asset_models))
+            }
+        
+        with open(os.path.join(output_dir, 'export_summary.json'), 'w') as f:
+            json.dump(summary_report, f, indent=2, default=str)
+        
+        logger.info(f"🎓 Thesis data export completed: {output_dir}")
+        return output_dir
 
 
 # Global results manager instance for dependency injection

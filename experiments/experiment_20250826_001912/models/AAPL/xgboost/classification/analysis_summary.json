@@ -1,0 +1,28 @@
+{
+  "asset": "AAPL",
+  "model_type": "xgboost",
+  "task": "classification",
+  "timestamp": "2025-08-26T00:29:29.704221",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": 0.5034722222222222,
+    "accuracy_std": 0.1849014472894968,
+    "f1": 0.47607028441744903,
+    "f1_std": 0.2069091680304308,
+    "precision": 0.5825413675229343,
+    "precision_std": 0.18981792727800406,
+    "recall": 0.5034722222222222,
+    "recall_std": 0.1849014472894968,
+    "logloss": 1.0452229284327108,
+    "logloss_std": 0.46882002943846346,
+    "fit_time": 0.21816468238830566,
+    "fit_time_std": 0.041503473519666566,
+    "pred_time": 0.0017596185207366943,
+    "pred_time_std": 0.0007443349470353376,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "asset": "MSFT",
+  "model_type": "stockmixer",
+  "task": "classification",
+  "timestamp": "2025-08-26T00:41:38.371199",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": 0.5163690476190476,
+    "accuracy_std": 0.22691541358516076,
+    "f1": 0.48338531077682234,
+    "f1_std": 0.24197710762036476,
+    "precision": 0.6707013956079872,
+    "precision_std": 0.18442121264447017,
+    "recall": 0.5163690476190476,
+    "recall_std": 0.22691541358516076,
+    "fit_time": 5.019917696714401,
+    "fit_time_std": 0.6549361670981262,
+    "pred_time": 0.22809919714927673,
+    "pred_time_std": 0.02640024360411248,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

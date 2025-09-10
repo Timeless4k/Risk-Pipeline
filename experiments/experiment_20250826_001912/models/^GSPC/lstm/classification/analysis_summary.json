@@ -1,0 +1,26 @@
+{
+  "asset": "^GSPC",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-08-26T00:53:47.716452",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": 0.5178571428571429,
+    "accuracy_std": 0.22439941118906823,
+    "f1": 0.4645047958564781,
+    "f1_std": 0.218400516975186,
+    "precision": 0.66925786758284,
+    "precision_std": 0.188091777514152,
+    "recall": 0.5178571428571429,
+    "recall_std": 0.22439941118906823,
+    "fit_time": 7.686143159866333,
+    "fit_time_std": 1.4426408150202137,
+    "pred_time": 0.2564171552658081,
+    "pred_time_std": 0.039527512081374755,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

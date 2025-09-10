@@ -1,0 +1,32 @@
+{
+  "asset": "AAPL",
+  "model_type": "stockmixer",
+  "task": "classification",
+  "timestamp": "2025-09-10T16:34:03.399077",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "Accuracy": 0.6205357142857143,
+    "Accuracy_std": 0.07381188582766315,
+    "F1": 0.616478375320491,
+    "F1_std": 0.0819261977239231,
+    "Precision": 0.6401191813363145,
+    "Precision_std": 0.09215683738631222,
+    "Recall": 0.6205357142857143,
+    "Recall_std": 0.07381188582766315,
+    "Baseline Accuracy": 0.5694444444444444,
+    "Baseline Accuracy_std": 0.10618323936714008,
+    "Baseline F1": 0.4183488152377287,
+    "Baseline F1_std": 0.12592188979690466,
+    "LogLoss": NaN,
+    "LogLoss_std": NaN,
+    "Fit Time": 4.421552546374926,
+    "Fit Time_std": 0.8456203108805219,
+    "Prediction Time": 0.22850016387502592,
+    "Prediction Time_std": 0.048027030367636774,
+    "total_samples": 8921,
+    "n_splits": 8
+  }
+}

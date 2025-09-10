@@ -92,6 +92,10 @@ class TrainingConfig:
     reduce_lr_patience: int = 15  # Increased from 10 to 15
     random_state: int = 42
     
+    # Target transformation options
+    use_log_vol_target: bool = True
+    log_target_epsilon: float = 1e-6
+    
     # New advanced training parameters for high-performance systems
     validation_split: float = 0.2
     class_weight_balance: bool = True  # Enable class weight balancing
@@ -101,12 +105,22 @@ class TrainingConfig:
     mixed_precision: bool = True  # Enable mixed precision training
     data_augmentation: bool = True  # Enable data augmentation
     
-    # Parallel processing for 36-core system
-    num_workers: int = 24  # Use 24 cores for data loading (leave some for system)
+    # DYNAMIC CPU UTILIZATION for 24-core i9-14900HX system
+    # Use 23 cores for maximum performance, leave 1 core for system stability
+    num_workers: int = 23  # Use 23 cores for data loading (leave 1 for system)
     parallel_backend: str = 'multiprocessing'  # 'multiprocessing', 'threading', 'joblib'
-    joblib_n_jobs: int = 24  # Use 24 cores for scikit-learn operations
-    ray_num_cpus: int = 24  # Use 24 cores for Ray operations
-    dask_n_workers: int = 24  # Use 24 workers for Dask operations
+    joblib_n_jobs: int = 23  # Use 23 cores for scikit-learn operations
+    ray_num_cpus: int = 23  # Use 23 cores for Ray operations
+    dask_n_workers: int = 23  # Use 23 workers for Dask operations
+    
+    # NEW: Dynamic core detection and utilization
+    auto_detect_cores: bool = True  # Automatically detect available cores
+    max_core_usage: float = 0.95  # Use up to 95% of available cores
+    adaptive_batch_sizing: bool = True  # Adjust batch size based on core count
+
+    # Feature scaling/stabilization toggles
+    use_robust_scaler: bool = False  # If True, use RobustScaler instead of StandardScaler
+    feature_clip_q: float | None = None  # e.g., 0.01 to clip to [q, 1-q] per feature on train
 
 
 @dataclass
@@ -298,13 +312,16 @@ class PipelineConfig:
         training_config = config_dict.get('training', {})
         self.training = TrainingConfig(
             walk_forward_splits=training_config.get('walk_forward_splits', 8),
-            test_size=training_config.get('test_size', 126),
+            test_size=training_config.get('test_size', 252),
             batch_size=training_config.get('batch_size', 64),
             epochs=training_config.get('epochs', 100),
             early_stopping_patience=training_config.get('early_stopping_patience', 20),
             reduce_lr_patience=training_config.get('reduce_lr_patience', 10),
             random_state=training_config.get('random_state', 42)
         )
+        
+        # NOTE: Optimization calls moved after SHAP config initialization to avoid
+        # referencing self.shap before it exists
         
         # Output configuration
         output_config = config_dict.get('output', {})
@@ -332,6 +349,12 @@ class PipelineConfig:
             plot_type=shap_config.get('plot_type', 'bar'),
             save_plots=shap_config.get('save_plots', True)
         )
+        
+        # DYNAMIC CPU OPTIMIZATION: Auto-detect and configure cores
+        # ALWAYS run this to ensure maximum performance
+        self._optimize_for_cpu()
+        # DYNAMIC MEMORY OPTIMIZATION: Tune batch sizes/threads and SHAP background
+        self._optimize_for_memory()
         
         # Hyperparameter tuning configuration
         tuning_config = config_dict.get('hyperparameter_tuning', {})
@@ -647,8 +670,15 @@ class PipelineConfig:
             }
         elif model_type == 'arima':
             return {
-                'order': (1, 1, 1),  # Default ARIMA order
-                'seasonal_order': (1, 1, 1, 12),  # Seasonal ARIMA
+                # Sensible ARIMA defaults for equities
+                'order': (1, 1, 1),
+                'seasonal_order': (0, 0, 0, 0),  # Disable seasonality by default
+                'seasonal': False,
+                # Auto-order search (configurable)
+                'auto_order': True,
+                'max_p': 5,
+                'max_d': 2,
+                'max_q': 5,
                 'n_jobs': self.training.joblib_n_jobs  # Use parallel processing
             }
         else:
@@ -732,6 +762,70 @@ class PipelineConfig:
             'risk_metrics': self.advanced_features.risk_metrics,
             'confidence_level': self.advanced_features.confidence_level
         }
+
+    def _optimize_for_cpu(self):
+        """Dynamically optimize CPU usage based on available cores."""
+        import psutil
+        import os
+        
+        # Get actual CPU info - use PHYSICAL cores for maximum performance
+        cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
+        cpu_count_logical = psutil.cpu_count(logical=True)  # Logical cores (32 for your i9-14900HX)
+        
+        # Calculate optimal core usage (use 95% of physical cores for maximum performance)
+        optimal_workers = max(1, int(cpu_count * 0.95))  # Use 23 out of 24 cores
+        
+        # Update training config with detected values
+        self.training.num_workers = optimal_workers
+        self.training.joblib_n_jobs = optimal_workers
+        self.training.ray_num_cpus = optimal_workers
+        self.training.dask_n_workers = optimal_workers
+        
+        # Set environment variables for external libraries
+        os.environ['OMP_NUM_THREADS'] = str(optimal_workers)
+        os.environ['MKL_NUM_THREADS'] = str(optimal_workers)
+        os.environ['OPENBLAS_NUM_THREADS'] = str(optimal_workers)
+        os.environ['VECLIB_MAXIMUM_THREADS'] = str(optimal_workers)
+        os.environ['NUMEXPR_NUM_THREADS'] = str(optimal_workers)
+        
+        # Log the optimization
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"🚀 CPU OPTIMIZATION: Detected {cpu_count} physical cores, {cpu_count_logical} logical cores")
+        logger.info(f"⚡ Using {optimal_workers} cores for pipeline ({(optimal_workers/cpu_count)*100:.1f}% utilization)")
+        logger.info(f"💡 Environment variables set for optimal threading")
+
+    def _optimize_for_memory(self):
+        """Dynamically optimize memory-related settings based on available RAM."""
+        import psutil
+        import os
+        from pathlib import Path
+        vm = psutil.virtual_memory()
+        total_gb = max(1, int(vm.total / (1024**3)))
+        avail_ratio = vm.available / vm.total
+        
+        # Adjust batch size heuristically
+        if avail_ratio < 0.25:
+            self.training.batch_size = max(8, int(self.training.batch_size * 0.5))
+            # Reduce joblib workers slightly to relieve pressure
+            self.training.joblib_n_jobs = max(1, int(self.training.joblib_n_jobs * 0.75))
+            # Reduce SHAP background to save RAM
+            self.shap.background_samples = min(self.shap.background_samples, 50)
+        elif avail_ratio > 0.5:
+            # Safely scale up a bit
+            self.training.batch_size = min(256, max(self.training.batch_size, 64))
+            self.shap.background_samples = min(self.shap.background_samples, 200)
+        
+        # Prefer float32 math in downstream code (advisory; actual casting done in feature engineering)
+        os.environ.setdefault('RP_FLOAT_DTYPE', 'float32')
+        
+        # Ensure a fast temp directory for joblib to spill to disk instead of RAM
+        joblib_tmp = Path(self.data.cache_dir) / 'joblib_tmp'
+        joblib_tmp.mkdir(parents=True, exist_ok=True)
+        os.environ['JOBLIB_TEMP_FOLDER'] = str(joblib_tmp)
+        
+        # Set a cap for OpenMP thread stack to avoid overhead
+        os.environ.setdefault('OMP_STACKSIZE', '16M')
 
 
 # Global configuration instance for dependency injection

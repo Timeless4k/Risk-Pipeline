@@ -1,0 +1,37 @@
+{
+  "export_timestamp": "2025-09-10T15:23:01.794064",
+  "total_models": 6,
+  "total_assets": 2,
+  "model_types": [
+    "xgboost",
+    "arima"
+  ],
+  "tasks": [
+    "classification",
+    "regression"
+  ],
+  "export_summary": {
+    "AAPL": {
+      "models": 3,
+      "model_types": [
+        "xgboost",
+        "arima"
+      ],
+      "tasks": [
+        "classification",
+        "regression"
+      ]
+    },
+    "MSFT": {
+      "models": 3,
+      "model_types": [
+        "xgboost",
+        "arima"
+      ],
+      "tasks": [
+        "classification",
+        "regression"
+      ]
+    }
+  }
+}

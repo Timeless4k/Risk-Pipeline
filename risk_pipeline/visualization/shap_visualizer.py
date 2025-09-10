@@ -50,6 +50,92 @@ class SHAPVisualizer:
         
         logger.info("SHAPVisualizer initialized")
     
+    def summary_plot(self,
+                    shap_values: Union[np.ndarray, Any],
+                    X: Union[np.ndarray, pd.DataFrame],
+                    feature_names: Optional[List[str]] = None) -> None:
+        """Create and save a SHAP summary plot.
+        This lightweight helper matches calls from SHAPAnalyzer.
+        """
+        try:
+            # Normalize SHAP values object/array
+            sv = shap_values.values if hasattr(shap_values, 'values') else shap_values
+            if isinstance(sv, list):
+                sv = sv[0]
+            # Ensure X is aligned shape-wise
+            X_plot = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+            if hasattr(sv, 'ndim') and sv.ndim > 2:
+                sv = sv.reshape(sv.shape[0], -1)
+                if X_plot.ndim > 2:
+                    X_plot = X_plot.reshape(X_plot.shape[0], -1)
+
+            # Prepare output file
+            ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+            out_dir = self.output_dir / 'quick'
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f'shap_summary_{ts}.png'
+
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(
+                sv,
+                X_plot,
+                feature_names=feature_names,
+                max_display=getattr(self.config.shap, 'max_display', 20) if hasattr(self.config, 'shap') else 20,
+                show=False
+            )
+            plt.tight_layout()
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            logger.warning(f"summary_plot failed: {e}")
+            try:
+                plt.close()
+            except Exception:
+                pass
+    
+    def bar_plot(self,
+                 shap_values: Union[np.ndarray, Any],
+                 feature_names: Optional[List[str]] = None) -> None:
+        """Create and save a mean |SHAP| bar plot.
+        This lightweight helper matches calls from SHAPAnalyzer.
+        """
+        try:
+            sv = shap_values.values if hasattr(shap_values, 'values') else shap_values
+            if isinstance(sv, list):
+                sv = sv[0]
+            sv_arr = np.asarray(sv)
+            if sv_arr.ndim > 2:
+                sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
+            # Compute importance
+            importance = np.mean(np.abs(sv_arr), axis=0)
+            # Names
+            if feature_names is None:
+                feature_names = [f'feature_{i}' for i in range(len(importance))]
+            # Sort
+            order = np.argsort(importance)[::-1]
+            importance = importance[order]
+            names_sorted = [feature_names[i] for i in order]
+
+            # Prepare output file
+            ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+            out_dir = self.output_dir / 'quick'
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f'shap_bar_{ts}.png'
+
+            plt.figure(figsize=(12, 8))
+            sns.barplot(x=importance[:20], y=names_sorted[:20], orient='h')
+            plt.xlabel('Mean |SHAP value|')
+            plt.ylabel('Feature')
+            plt.tight_layout()
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close()
+        except Exception as e:
+            logger.warning(f"bar_plot failed: {e}")
+            try:
+                plt.close()
+            except Exception:
+                pass
+    
     def create_comprehensive_plots(self,
                                  shap_values: np.ndarray,
                                  X: Union[np.ndarray, pd.DataFrame],

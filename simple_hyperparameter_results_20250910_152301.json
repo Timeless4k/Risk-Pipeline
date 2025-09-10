@@ -1,0 +1,52 @@
+{
+  "Basic_Optimized": {
+    "success": true,
+    "r2_scores": {
+      "AAPL_arima_regression": -5.08215669276576,
+      "AAPL_xgboost_regression": -3.547481072864429,
+      "MSFT_arima_regression": -0.6428123361145204,
+      "MSFT_xgboost_regression": -1.9298843234541871
+    },
+    "error": null
+  },
+  "Conservative_XGBoost": {
+    "success": true,
+    "r2_scores": {
+      "AAPL_arima_regression": -5.08215669276576,
+      "AAPL_xgboost_regression": -3.547481072864429,
+      "MSFT_arima_regression": -0.6428123361145204,
+      "MSFT_xgboost_regression": -1.9298843234541871
+    },
+    "error": null
+  },
+  "Enhanced_ARIMA_Focus": {
+    "success": true,
+    "r2_scores": {
+      "AAPL_arima_regression": -5.08215669276576,
+      "AAPL_xgboost_regression": -3.547481072864429,
+      "MSFT_arima_regression": -0.6428123361145204,
+      "MSFT_xgboost_regression": -1.9298843234541871
+    },
+    "error": null
+  },
+  "Minimal_Features": {
+    "success": true,
+    "r2_scores": {
+      "AAPL_arima_regression": -5.08215669276576,
+      "AAPL_xgboost_regression": -3.547481072864429,
+      "MSFT_arima_regression": -0.6428123361145204,
+      "MSFT_xgboost_regression": -1.9298843234541871
+    },
+    "error": null
+  },
+  "Aggressive_Regularization": {
+    "success": true,
+    "r2_scores": {
+      "AAPL_arima_regression": -5.08215669276576,
+      "AAPL_xgboost_regression": -3.547481072864429,
+      "MSFT_arima_regression": -0.6428123361145204,
+      "MSFT_xgboost_regression": -1.9298843234541871
+    },
+    "error": null
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "timestamp": "2025-08-26T02:19:03.288312",
+  "statistical_tests_recommended": [
+    "Paired t-test for model comparison within same asset/task",
+    "Wilcoxon signed-rank test for non-parametric comparison",
+    "ANOVA for comparing multiple models across assets",
+    "Correlation analysis between model performance and market conditions"
+  ],
+  "sample_size_analysis": {
+    "note": "Per-fold metrics available for statistical testing",
+    "recommendations": [
+      "Use fold-level metrics for paired comparisons",
+      "Bootstrap confidence intervals for performance metrics",
+      "Cross-validation stability analysis",
+      "Temporal performance drift analysis"
+    ]
+  }
+}

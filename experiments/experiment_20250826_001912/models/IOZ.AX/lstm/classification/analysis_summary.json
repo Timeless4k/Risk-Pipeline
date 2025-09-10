@@ -1,0 +1,26 @@
+{
+  "asset": "IOZ.AX",
+  "model_type": "lstm",
+  "task": "classification",
+  "timestamp": "2025-08-26T01:07:40.998748",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": 0.433531746031746,
+    "accuracy_std": 0.11653685008426999,
+    "f1": 0.41784180073790955,
+    "f1_std": 0.12537259630833517,
+    "precision": 0.6162647838823834,
+    "precision_std": 0.14755134141624582,
+    "recall": 0.433531746031746,
+    "recall_std": 0.11653685008426999,
+    "fit_time": 7.04955381155014,
+    "fit_time_std": 1.6909292326390672,
+    "pred_time": 0.23902645707130432,
+    "pred_time_std": 0.031847316795145776,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "asset": "AAPL",
+  "model_type": "arima",
+  "task": "regression",
+  "timestamp": "2025-08-26T02:16:56.146651",
+  "n_splits": 0,
+  "successful_splits": 0,
+  "total_splits": 0,
+  "total_samples": 0,
+  "metrics_summary": {}
+}

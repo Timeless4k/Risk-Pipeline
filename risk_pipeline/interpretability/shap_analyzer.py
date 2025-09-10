@@ -84,60 +84,67 @@ class SHAPAnalyzer:
         
         logger.info("SHAPAnalyzer initialized")
     
-    def analyze_all_models(self, 
-                          features: Dict[str, Any],
-                          results: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Perform SHAP analysis for all trained models.
+    def analyze_all_models(self, models: Dict[str, Any], 
+                          X: Union[np.ndarray, pd.DataFrame],
+                          feature_names: List[str],
+                          assets: List[str],
+                          model_types: List[str],
+                          tasks: List[str]) -> Dict[str, Any]:
+        """Analyze all models with parallel processing."""
+        logger.info(f"Starting SHAP analysis for {len(assets)} assets, {len(model_types)} models, {len(tasks)} tasks")
         
-        Args:
-            features: Dictionary of features for each asset
-            results: Pipeline results containing trained models
-            
-        Returns:
-            Dictionary containing all SHAP analysis results
-        """
-        logger.info("Starting comprehensive SHAP analysis")
+        # 🚀 24-CORE OPTIMIZATION: Parallel SHAP analysis across all models
+        from joblib import Parallel, delayed
         
-        shap_results = {}
+        # Use config value for maximum performance (should be 23 cores)
+        cpu_count = getattr(self.config.training, 'joblib_n_jobs', 23)
+        logger.info(f"🚀 Using {cpu_count} cores for parallel SHAP analysis!")
         
-        for asset, asset_results in results.items():
-            logger.info(f"Analyzing SHAP for asset: {asset}")
+        def analyze_single_model_parallel(model_data):
+            """Parallel SHAP analysis for single model."""
+            asset, model_type, task = model_data
             
-            if asset not in features:
-                logger.warning(f"No features found for asset {asset}, skipping")
-                continue
-            
-            asset_features = features[asset]
-            asset_shap_results = {}
-            
-            # Analyze regression models
-            if 'regression' in asset_results:
-                regression_shap = self._analyze_task_models(
-                    asset=asset,
-                    task_results=asset_results['regression'],
-                    features=asset_features,
-                    task='regression'
-                )
-                asset_shap_results['regression'] = regression_shap
-            
-            # Analyze classification models
-            if 'classification' in asset_results:
-                classification_shap = self._analyze_task_models(
-                    asset=asset,
-                    task_results=asset_results['classification'],
-                    features=asset_features,
-                    task='classification'
-                )
-                asset_shap_results['classification'] = classification_shap
-            
-            shap_results[asset] = asset_shap_results
+            try:
+                model_key = f"{asset}_{model_type}_{task}"
+                if model_key in models:
+                    model = models[model_key]
+                    result = self._analyze_single_model(
+                        model=model,
+                        X=X,
+                        feature_names=feature_names,
+                        asset=asset,
+                        model_type=model_type,
+                        task=task
+                    )
+                    return model_key, result
+                else:
+                    logger.warning(f"Model {model_key} not found")
+                    return model_key, None
+            except Exception as e:
+                logger.error(f"SHAP analysis failed for {asset}_{model_type}_{task}: {e}")
+                return f"{asset}_{model_type}_{task}", None
         
-        # Store results
-        self.results_manager.store_shap_results(shap_results)
+        # Create all model combinations for parallel processing
+        model_combinations = [
+            (asset, model_type, task)
+            for asset in assets
+            for model_type in model_types
+            for task in tasks
+        ]
         
-        logger.info("SHAP analysis completed for all models")
-        return shap_results
+        # Parallel SHAP analysis using all 24 cores
+        parallel_results = Parallel(n_jobs=cpu_count, verbose=1)(
+            delayed(analyze_single_model_parallel)(combo) for combo in model_combinations
+        )
+        
+        # Collect results
+        all_results = {}
+        for model_key, result in parallel_results:
+            if result is not None:
+                all_results[model_key] = result
+        
+        logger.info(f"✅ SHAP analysis completed: {len(all_results)}/{len(model_combinations)} models successful")
+        return all_results
     
     def _analyze_task_models(self,
                             asset: str,
@@ -189,6 +196,16 @@ class SHAPAnalyzer:
         
         return task_shap_results
     
+    def _cleanup_background_data_params(self, **kwargs):
+        """
+        🔎 KILL-SWITCH: Remove any lingering background_data parameters to prevent crashes.
+        This function should be called at the start of every SHAP function.
+        """
+        if 'background_data' in kwargs:
+            logger.warning(f"🔎 KILL-SWITCH: Removing stray background_data parameter: {kwargs['background_data']}")
+            kwargs.pop('background_data', None)
+        return kwargs
+
     def _analyze_single_model(self,
                              model: Any,
                              X: Union[np.ndarray, pd.DataFrame],
@@ -213,62 +230,256 @@ class SHAPAnalyzer:
         logger.info(f"Analyzing SHAP for {asset}_{model_type}_{task}")
         
         try:
-            # Create explainer
+            # 🔎 KILL-SWITCH: Ensure no background_data leakage
+            if hasattr(model, 'background_data'):
+                logger.warning(f"🔎 KILL-SWITCH: Model has background_data attribute, removing: {model.background_data}")
+                delattr(model, 'background_data')
+            
+            # Create output directory early for saving eval sample
+            output_dir = Path(self.config.output.shap_dir) / asset / model_type / task
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Prepare consistent background and evaluation samples (stable indices reused)
+            bg_n = min(getattr(self.config.shap, 'background_samples', 500), len(X))
+            eval_n = min(getattr(self.config.shap, 'eval_samples', 100), len(X))
+            if isinstance(X, pd.DataFrame):
+                rng = np.random.RandomState(42)
+                idx = rng.choice(len(X), size=min(eval_n, len(X)), replace=False)
+                X_eval = X.iloc[idx]
+                # For background, reuse same subset (ensures consistency)
+                X_bg = X.iloc[idx[:min(bg_n, len(idx))]]
+                X_eval_np = X_eval.values
+            else:
+                X_np = np.asarray(X)
+                rng = np.random.RandomState(42)
+                idx = rng.choice(len(X_np), size=min(eval_n, len(X_np)), replace=False)
+                X_eval = X_np[idx]
+                X_bg = X_np[idx[:min(bg_n, len(idx))]]
+                X_eval_np = X_eval
+
+            # Persist evaluation sample for plotting reuse
+            np.save(output_dir / 'shap_X_eval.npy', X_eval_np)
+
+            # Create explainer using background sample
             explainer = self.explainer_factory.create_explainer(
                 model=model,
                 model_type=model_type,
                 task=task,
-                X=X
+                X=X_bg
             )
-            
-            # Prepare background data
-            background_data = self._prepare_background_data(X, model_type)
-            
-            # Calculate SHAP values
-            if model_type in ['lstm', 'stockmixer']:
-                # For deep learning models, use a subset for background
-                background_subset = background_data[:self.config.shap.background_samples]
-                shap_values = explainer.shap_values(background_subset)
-                
-                # For classification, SHAP returns a list
-                if isinstance(shap_values, list):
-                    shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+
+            # Compute SHAP values on the saved eval sample
+            # If Enhanced ARIMA residual model explainer, align transforms
+            if model_type == 'enhanced_arima' and getattr(explainer, '_explainer_tag', '') == 'residual_model':
+                try:
+                    # Ensure we pass the same transformed features used by residual model
+                    if hasattr(model, 'current_model') and hasattr(model.current_model, 'transform_features'):
+                        X_eval_used = model.current_model.transform_features(X_eval)
+                    else:
+                        X_eval_used = np.asarray(X_eval)
+                    shap_values = explainer.shap_values(X_eval_used)
+                except Exception as e:
+                    logger.error(f"EnhancedARIMA residual SHAP failed, fallback to raw X: {e}")
+                    shap_values = explainer.shap_values(X_eval)
             else:
-                # For tree-based models, use TreeExplainer
-                shap_values = explainer.shap_values(X)
+                shap_values = explainer.shap_values(X_eval)
+            # Guard for empty/None returns
+            if shap_values is None or (isinstance(shap_values, (list, tuple)) and len(shap_values) == 0):
+                raise RuntimeError("StockMixer returned empty SHAP values")
+            # If list (e.g., classification), choose positive class if available, else first
+            if isinstance(shap_values, (list, tuple)):
+                shap_values = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+
+            # Normalize SHAP array shape (handle (N, F, 1) and new API objects)
+            if hasattr(shap_values, 'values'):
+                sv = shap_values.values
+            else:
+                sv = shap_values
+            if isinstance(sv, list):
+                sv = sv[0]
+            if isinstance(sv, np.ndarray) and sv.ndim == 3 and sv.shape[-1] == 1:
+                sv = sv[..., 0]
+
+            # Align X to SHAP features
+            if model_type == 'enhanced_arima' and getattr(explainer, '_explainer_tag', '') == 'residual_model':
+                X_eval_2d = X_eval_used if 'X_eval_used' in locals() else (X_eval.values if isinstance(X_eval, pd.DataFrame) else np.asarray(X_eval))
+            else:
+                X_eval_2d = X_eval.values if isinstance(X_eval, pd.DataFrame) else np.asarray(X_eval)
             
+            # Ensure X_eval_2d is 2D
+            if X_eval_2d.ndim > 2:
+                X_eval_2d = X_eval_2d.reshape(X_eval_2d.shape[0], -1)
+            
+            # Safely determine feature count from SHAP values
+            try:
+                if isinstance(sv, np.ndarray) and sv.ndim >= 2:
+                    F = sv.shape[1]
+                else:
+                    F = X_eval_2d.shape[1] if X_eval_2d.ndim >= 2 else 1
+            except (IndexError, AttributeError):
+                F = X_eval_2d.shape[1] if hasattr(X_eval_2d, 'shape') and len(X_eval_2d.shape) >= 2 else 1
+            
+            # Safely align X_eval to match feature count
+            try:
+                if isinstance(X_eval, pd.DataFrame):
+                    if X_eval.shape[1] > F:
+                        X_eval = X_eval.iloc[:, :F]
+                else:
+                    X_eval_array = np.asarray(X_eval)
+                    if X_eval_array.ndim >= 2 and X_eval_array.shape[1] > F:
+                        X_eval = X_eval_array[:, :F]
+            except Exception as e:
+                logger.warning(f"Feature alignment failed, using original X_eval: {e}")
+                pass
+
+            logger.info(f"SHAP: X_bg={np.asarray(X_bg).shape} X_eval={X_eval_2d.shape} shap_vals={sv.shape}")
+
+            # Visualizations (ensure consistent X/shap pairing)
+            try:
+                from ..visualization.shap_visualizer import SHAPVisualizer
+                visualizer = SHAPVisualizer(self.config)
+                visualizer.summary_plot(shap_values, X_eval, feature_names)
+                visualizer.bar_plot(shap_values, feature_names)
+            except Exception as viz_error:
+                logger.warning(f"SHAP visualizations failed: {viz_error}")
+                pass
+
             # Calculate feature importance
-            feature_importance = self._calculate_feature_importance(
-                shap_values=shap_values,
-                feature_names=feature_names
-            )
+            try:
+                feature_importance = self._calculate_feature_importance(
+                    shap_values=shap_values,
+                    feature_names=feature_names
+                )
+            except Exception as e:
+                logger.warning(f"Feature importance calculation failed: {e}")
+                feature_importance = {}
             
-            # Generate plots
-            plots = self._generate_shap_plots(
-                explainer=explainer,
-                shap_values=shap_values,
-                X=X,
-                feature_names=feature_names,
-                asset=asset,
-                model_type=model_type,
-                task=task
-            )
+            # Generate plots with column alignment to SHAP width
+            try:
+                if isinstance(X_eval, pd.DataFrame):
+                    X_plot = X_eval.iloc[:, :sv.shape[1]]
+                else:
+                    X_plot = (np.asarray(X_eval)[:, :sv.shape[1]]
+                              if np.asarray(X_eval).ndim >= 2 else np.asarray(X_eval))
+            except (IndexError, AttributeError) as e:
+                logger.warning(f"X_plot generation failed, using original X_eval: {e}")
+                X_plot = X_eval
+            
+            # Safely slice feature names to match F
+            try:
+                if feature_names is not None:
+                    feature_names_plot = list(feature_names)[:F]
+                else:
+                    feature_names_plot = None
+            except (IndexError, TypeError) as e:
+                logger.warning(f"Feature names slicing failed: {e}")
+                feature_names_plot = feature_names
+            
+            # 🔒 SHAPE SANITY: Add shape guards once, right before plotting
+            # squeeze NN trailing unit
+            if hasattr(sv, "ndim") and sv.ndim == 3 and sv.shape[-1] == 1:
+                sv = sv[..., 0]
+
+            # pick class 1 or the first if list/tuple from some explainers
+            if isinstance(sv, (list, tuple)):
+                sv = sv[1] if len(sv) > 1 else sv[0]
+
+            # align feature counts - handle StockMixer/LSTM feature mismatches
+            try:
+                F = sv.shape[1] if isinstance(sv, np.ndarray) and sv.ndim >= 2 else 1
+            except (IndexError, AttributeError):
+                F = 1
+                logger.warning("Could not determine SHAP feature count, defaulting to 1")
+            
+            # Ensure X_plot has enough features to match SHAP values
+            try:
+                if hasattr(X_plot, 'shape') and len(X_plot.shape) >= 2:
+                    if X_plot.shape[1] < F:
+                        logger.warning(f"Feature count mismatch: SHAP has {F} features, X has {X_plot.shape[1]}. Padding X with zeros.")
+                        # Pad X with zeros if it has fewer features than SHAP
+                        if isinstance(X_plot, pd.DataFrame):
+                            padding_cols = [f'padded_feature_{i}' for i in range(F - X_plot.shape[1])]
+                            padding_df = pd.DataFrame(0, index=X_plot.index, columns=padding_cols)
+                            X_plot_final = pd.concat([X_plot, padding_df], axis=1)
+                        else:
+                            padding = np.zeros((X_plot.shape[0], F - X_plot.shape[1]))
+                            X_plot_final = np.hstack([X_plot, padding])
+                    else:
+                        X_plot_final = X_plot[:, :F]
+                else:
+                    X_plot_final = X_plot
+            except Exception as e:
+                logger.warning(f"X_plot feature alignment failed: {e}, using original")
+                X_plot_final = X_plot
+            
+            # Ensure feature names match
+            try:
+                if feature_names_plot is not None:
+                    if len(feature_names_plot) < F:
+                        logger.warning(f"Feature names count mismatch: need {F}, have {len(feature_names_plot)}. Padding with generic names.")
+                        padding_names = [f'padded_feature_{i}' for i in range(F - len(feature_names_plot))]
+                        feat_names = list(feature_names_plot) + padding_names
+                    else:
+                        feat_names = feature_names_plot[:F]
+                else:
+                    feat_names = [f'feature_{i}' for i in range(F)]
+            except Exception as e:
+                logger.warning(f"Feature names alignment failed: {e}, using generic names")
+                feat_names = [f'feature_{i}' for i in range(F)]
+            
+            logger.info(f"SHAP plotting: SHAP shape={sv.shape}, X shape={X_plot_final.shape}, features={len(feat_names)}")
+            
+            # Final safety check before plotting
+            try:
+                if not hasattr(sv, 'shape') or sv.shape[0] == 0:
+                    logger.warning("SHAP values are empty or invalid, skipping plotting")
+                    plots = {}
+                else:
+                    plots = self._generate_shap_plots(
+                        explainer=explainer,
+                        shap_values=sv,
+                        X=X_plot_final,
+                        feature_names=feat_names,
+                        asset=asset,
+                        model_type=model_type,
+                        task=task
+                    )
+            except Exception as e:
+                logger.error(f"SHAP plotting failed: {e}")
+                plots = {}
             
             # Store results
             result_key = f"{asset}_{model_type}_{task}"
             self._shap_values[result_key] = shap_values
             self._explainers[result_key] = explainer
-            self._background_data[result_key] = background_data
+            # Store background sample used for explainer creation
+            try:
+                # FIXED: Ensure X_bg is defined before storing
+                if 'X_bg' in locals():
+                    self._background_data[result_key] = X_bg
+                else:
+                    # Fallback: use a subset of X if X_bg is not available
+                    bg_subset = X.iloc[:min(100, len(X))] if isinstance(X, pd.DataFrame) else X[:min(100, len(X))]
+                    self._background_data[result_key] = bg_subset
+            except Exception as e:
+                logger.warning(f"Failed to store background data: {e}")
+                # Store a minimal background sample as fallback
+                try:
+                    minimal_bg = X.iloc[:1] if isinstance(X, pd.DataFrame) else X[:1]
+                    self._background_data[result_key] = minimal_bg
+                except Exception:
+                    pass
             
             return {
-                'shap_values': shap_values,
+                'shap_values': sv,
                 'feature_importance': feature_importance,
                 'explainer': explainer,
                 'plots': plots,
                 'model_type': model_type,
                 'task': task,
                 'asset': asset,
-                'feature_names': feature_names
+                'feature_names': feature_names,
+                'X': X_plot_final
             }
             
         except Exception as e:
@@ -313,13 +524,29 @@ class SHAPAnalyzer:
         Returns:
             Dictionary of feature importance scores
         """
-        # Calculate mean absolute SHAP values
-        mean_shap = np.mean(np.abs(shap_values), axis=0)
-        
-        # Create feature importance dictionary
-        feature_importance = {}
-        for i, feature_name in enumerate(feature_names):
-            feature_importance[feature_name] = float(mean_shap[i])
+        # Normalize SHAP to 2D and align with feature_names length
+        sv = shap_values.values if hasattr(shap_values, 'values') else shap_values
+        sv = np.asarray(sv)
+        if sv.ndim == 1:
+            sv = sv.reshape(-1, 1)
+        elif sv.ndim == 3:
+            # Flatten trailing dims (e.g., time x features)
+            sv = sv.reshape(sv.shape[0], -1)
+
+        mean_shap = np.mean(np.abs(sv), axis=0)
+
+        # Align feature_names length to SHAP width
+        F = mean_shap.shape[0]
+        if feature_names is None:
+            names = [f'feature_{i}' for i in range(F)]
+        else:
+            names = list(feature_names)
+            if len(names) < F:
+                names.extend([f'padded_feature_{i}' for i in range(F - len(names))])
+            elif len(names) > F:
+                names = names[:F]
+
+        feature_importance = {names[i]: float(mean_shap[i]) for i in range(F)}
         
         # Sort by importance
         feature_importance = dict(
@@ -337,7 +564,8 @@ class SHAPAnalyzer:
                             feature_names: List[str],
                             asset: str,
                             model_type: str,
-                            task: str) -> Dict[str, str]:
+                            task: str,
+                            **kwargs) -> Dict[str, str]:
         """
         Generate SHAP plots and save them.
         
@@ -349,10 +577,14 @@ class SHAPAnalyzer:
             asset: Asset name
             model_type: Type of model
             task: Task type
+            **kwargs: Additional parameters (will be cleaned of background_data)
             
         Returns:
             Dictionary of plot file paths
         """
+        # 🔎 KILL-SWITCH: Clean any stray background_data parameters
+        kwargs = self._cleanup_background_data_params(**kwargs)
+        
         plots = {}
         
         try:
@@ -360,23 +592,36 @@ class SHAPAnalyzer:
             output_dir = Path(self.config.output.shap_dir) / asset / model_type / task
             output_dir.mkdir(parents=True, exist_ok=True)
             
+            # 🧰 SHAPE SANITY: Comprehensive validation before plotting
+            try:
+                validated_shap, validated_X, validated_feature_names = self._validate_shap_data(
+                    shap_values, X, feature_names, model_type, task
+                )
+            except ValueError as e:
+                logger.error(f"🧰 SHAPE SANITY: Validation failed: {e}")
+                return {}
+            
             # Generate different types of plots
             plot_types = ['bar', 'waterfall', 'beeswarm', 'heatmap']
             
             for plot_type in plot_types:
                 if plot_type in self.config.shap.plot_type:
-                    plot_path = self._create_shap_plot(
-                        explainer=explainer,
-                        shap_values=shap_values,
-                        X=X,
-                        feature_names=feature_names,
-                        plot_type=plot_type,
-                        output_dir=output_dir,
-                        asset=asset,
-                        model_type=model_type,
-                        task=task
-                    )
-                    plots[plot_type] = str(plot_path)
+                    try:
+                        plot_path = self._create_shap_plot(
+                            explainer=explainer,
+                            shap_values=validated_shap,
+                            X=validated_X,
+                            feature_names=validated_feature_names,
+                            plot_type=plot_type,
+                            output_dir=output_dir,
+                            asset=asset,
+                            model_type=model_type,
+                            task=task
+                        )
+                        plots[plot_type] = str(plot_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to create {plot_type} plot: {str(e)}")
+                        continue
             
             logger.info(f"Generated SHAP plots for {asset}_{model_type}_{task}")
             
@@ -901,3 +1146,176 @@ class SHAPAnalyzer:
                 return []
         except:
             return [] 
+
+    def save_shap_plots(self, shap_vals, X_eval, feature_names=None, out_dir=None, **kwargs):
+        """
+        Save SHAP plots to disk.
+        
+        Args:
+            shap_vals: SHAP values array
+            X_eval: Evaluation data
+            feature_names: List of feature names
+            out_dir: Output directory
+            **kwargs: Additional parameters (will be cleaned of background_data)
+        """
+        # 🔎 KILL-SWITCH: Clean any stray background_data parameters
+        kwargs = self._cleanup_background_data_params(**kwargs)
+        
+        try:
+            if out_dir is None:
+                out_dir = Path(self.config.output.shap_dir)
+            
+            out_dir = Path(out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate plots using the safe wrapper
+            plots = self._generate_shap_plots(
+                explainer=None,  # Not needed for basic plotting
+                shap_values=shap_vals,
+                X=X_eval,
+                feature_names=feature_names,
+                asset='unknown',
+                model_type='unknown',
+                task='unknown'
+            )
+            
+            logger.info(f"Saved SHAP plots to {out_dir}")
+            return plots
+            
+        except Exception as e:
+            logger.error(f"Failed to save SHAP plots: {str(e)}")
+            return {} 
+
+    def _validate_shap_data(self, shap_values, X, feature_names, model_type, task):
+        """
+        🧰 SHAPE SANITY: Comprehensive validation of SHAP data before plotting.
+        
+        Args:
+            shap_values: SHAP values to validate
+            X: Feature data to validate
+            feature_names: Feature names to validate
+            model_type: Type of model for context
+            task: Task type for context
+            
+        Returns:
+            Tuple of (validated_shap_values, validated_X, validated_feature_names)
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        # 🔒 SHAPE SANITY: Validate SHAP values
+        if shap_values is None:
+            raise ValueError("🧰 SHAPE SANITY: SHAP values are None")
+        
+        if isinstance(shap_values, (list, tuple)) and len(shap_values) == 0:
+            raise ValueError("🧰 SHAPE SANITY: SHAP values list is empty")
+        
+        # Convert to numpy array if needed
+        if not isinstance(shap_values, np.ndarray):
+            try:
+                shap_values = np.asarray(shap_values)
+            except Exception as e:
+                raise ValueError(f"🧰 SHAPE SANITY: Failed to convert SHAP values to numpy array: {e}")
+        
+        # Validate SHAP array shape
+        if shap_values.size == 0:
+            raise ValueError("🧰 SHAPE SANITY: SHAP values array is empty")
+        
+        # Handle different SHAP shapes
+        if shap_values.ndim == 1:
+            # 1D: reshape to (n_samples, 1)
+            shap_values = shap_values.reshape(-1, 1)
+        elif shap_values.ndim == 3:
+            # 3D: squeeze trailing unit dimension
+            if shap_values.shape[-1] == 1:
+                shap_values = shap_values[..., 0]
+            else:
+                # For classification with multiple classes, pick class 1 or mean
+                if task == 'classification' and shap_values.shape[-1] > 1:
+                    shap_values = shap_values[..., 1]  # Pick positive class
+                else:
+                    shap_values = np.mean(shap_values, axis=-1)  # Average across classes
+        
+        # Ensure 2D shape
+        if shap_values.ndim != 2:
+            raise ValueError(f"🧰 SHAPE SANITY: SHAP values must be 2D after processing, got {shap_values.ndim}D")
+        
+        # 🔒 SHAPE SANITY: Validate X data
+        if X is None:
+            raise ValueError("🧰 SHAPE SANITY: Feature data X is None")
+        
+        # Convert X to numpy if needed
+        if isinstance(X, pd.DataFrame):
+            X_np = X.values
+        elif isinstance(X, np.ndarray):
+            X_np = X
+        else:
+            try:
+                X_np = np.asarray(X)
+            except Exception as e:
+                raise ValueError(f"🧰 SHAPE SANITY: Failed to convert X to numpy array: {e}")
+        
+        # Handle X shape
+        if X_np.ndim == 1:
+            X_np = X_np.reshape(-1, 1)
+        elif X_np.ndim > 2:
+            # Flatten to 2D
+            X_np = X_np.reshape(X_np.shape[0], -1)
+        
+        # 🔒 FEATURE COUNT ALIGNMENT: Ensure X and SHAP have matching features
+        n_samples_shap, n_features_shap = shap_values.shape
+        n_samples_X, n_features_X = X_np.shape
+        
+        if n_samples_shap != n_samples_X:
+            logger.warning(f"🧰 SHAPE SANITY: Sample count mismatch: SHAP={n_samples_shap}, X={n_samples_X}")
+            # Use minimum sample count
+            n_samples = min(n_samples_shap, n_samples_X)
+            shap_values = shap_values[:n_samples, :]
+            X_np = X_np[:n_samples, :]
+        
+        # Align feature counts
+        if n_features_shap != n_features_X:
+            logger.warning(f"🧰 SHAPE SANITY: Feature count mismatch: SHAP={n_features_shap}, X={n_features_X}")
+            
+            if n_features_shap < n_features_X:
+                # SHAP has fewer features: truncate X
+                X_np = X_np[:, :n_features_shap]
+                logger.info(f"🧰 SHAPE SANITY: Truncated X to {n_features_shap} features to match SHAP")
+            else:
+                # SHAP has more features: pad X with zeros
+                padding = np.zeros((X_np.shape[0], n_features_shap - n_features_X))
+                X_np = np.hstack([X_np, padding])
+                logger.info(f"🧰 SHAPE SANITY: Padded X with {n_features_shap - n_features_X} zero features")
+        
+        # 🔒 FEATURE NAMES ALIGNMENT: Ensure feature names match
+        if feature_names is None:
+            feature_names = [f'feature_{i}' for i in range(shap_values.shape[1])]
+        elif len(feature_names) != shap_values.shape[1]:
+            logger.warning(f"🧰 SHAPE SANITY: Feature names count mismatch: {len(feature_names)} != {shap_values.shape[1]}")
+            
+            if len(feature_names) < shap_values.shape[1]:
+                # Pad feature names
+                padding_names = [f'padded_feature_{i}' for i in range(shap_values.shape[1] - len(feature_names))]
+                feature_names = list(feature_names) + padding_names
+                logger.info(f"🧰 SHAPE SANITY: Padded feature names with {len(padding_names)} generic names")
+            else:
+                # Truncate feature names
+                feature_names = feature_names[:shap_values.shape[1]]
+                logger.info(f"🧰 SHAPE SANITY: Truncated feature names to {len(feature_names)}")
+        
+        # Final validation
+        final_shap_shape = shap_values.shape
+        final_X_shape = X_np.shape
+        
+        if final_shap_shape[0] != final_X_shape[0]:
+            raise ValueError(f"🧰 SHAPE SANITY: Final sample count mismatch: SHAP={final_shap_shape[0]}, X={final_X_shape[0]}")
+        
+        if final_shap_shape[1] != final_X_shape[1]:
+            raise ValueError(f"🧰 SHAPE SANITY: Final feature count mismatch: SHAP={final_shap_shape[1]}, X={final_X_shape[1]}")
+        
+        if len(feature_names) != final_shap_shape[1]:
+            raise ValueError(f"🧰 SHAPE SANITY: Final feature names count mismatch: {len(feature_names)} != {final_shap_shape[1]}")
+        
+        logger.info(f"🧰 SHAPE SANITY: Validation passed - SHAP: {final_shap_shape}, X: {final_X_shape}, Features: {len(feature_names)}")
+        
+        return shap_values, X_np, feature_names 

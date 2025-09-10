@@ -1,0 +1,26 @@
+{
+  "asset": "IOZ.AX",
+  "model_type": "stockmixer",
+  "task": "classification",
+  "timestamp": "2025-08-26T01:09:12.288757",
+  "n_splits": 8,
+  "successful_splits": 8,
+  "total_splits": 8,
+  "total_samples": 0,
+  "metrics_summary": {
+    "accuracy": 0.43601190476190477,
+    "accuracy_std": 0.12903596360560926,
+    "f1": 0.41617218321092464,
+    "f1_std": 0.1421821223128934,
+    "precision": 0.6309013395985439,
+    "precision_std": 0.13399639435786395,
+    "recall": 0.43601190476190477,
+    "recall_std": 0.12903596360560926,
+    "fit_time": 4.674932509660721,
+    "fit_time_std": 1.048806949852834,
+    "pred_time": 0.20779451727867126,
+    "pred_time_std": 0.013893530137680538,
+    "n_splits": 8,
+    "total_samples": 11088
+  }
+}

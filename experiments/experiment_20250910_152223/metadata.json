@@ -1,0 +1,14 @@
+{
+  "name": "pipeline_run_20250910_152223",
+  "description": "Simple test: Conservative_XGBoost",
+  "created_at": "2025-09-10T15:22:23.344526",
+  "assets_processed": 2,
+  "models_run": [
+    "arima",
+    "xgboost"
+  ],
+  "shap_analysis": false,
+  "models_saved": true,
+  "execution_time_minutes": 0.15442671378453574,
+  "peak_memory_mb": 508.734375
+}

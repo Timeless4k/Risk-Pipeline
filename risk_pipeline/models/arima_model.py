@@ -12,6 +12,7 @@ from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from .base_model import BaseModel
 
@@ -29,6 +30,12 @@ class ARIMAModel(BaseModel):
         """
         super().__init__(name="ARIMA", **kwargs)
         self.order = order
+        self.seasonal_order = kwargs.get('seasonal_order', (0, 0, 0, 0))  # Default no seasonality
+        self.seasonal = kwargs.get('seasonal', False)
+        self.auto_order = kwargs.get('auto_order', False)
+        self.max_p = int(kwargs.get('max_p', 5))
+        self.max_d = int(kwargs.get('max_d', 2))
+        self.max_q = int(kwargs.get('max_q', 5))
         self.task = 'regression'
         self.fitted_model = None
         self.is_stationary = None
@@ -45,68 +52,95 @@ class ARIMAModel(BaseModel):
         self.logger.info(f"ARIMA model ready with input shape: {input_shape}")
         return self
     
-    def train(self, X: Union[pd.DataFrame, np.ndarray], 
-              y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
-        """
-        Train ARIMA model.
+    def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **kwargs) -> 'ARIMAModel':
+        """Fit ARIMA model with parallel processing optimization."""
+        self.logger.info(f"Fitting ARIMA model for {self.name}")
         
-        Args:
-            X: Training features (not used for ARIMA)
-            y: Training targets (time series)
-            **kwargs: Additional training parameters
-            
-        Returns:
-            Dictionary containing training metrics and diagnostics
-        """
-        # Validate input (X is not used for ARIMA; allow None)
-        if X is None:
-            X = np.zeros((len(y), 1))
-        _, y = self._validate_input(X, y)
+        # 🚀 24-CORE OPTIMIZATION: Use all cores for ARIMA fitting
+        import psutil
+        cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
+        self.logger.info(f"🚀 Using {cpu_count} cores for ARIMA model fitting!")
         
-        if len(y) < 50:
-            raise ValueError("ARIMA requires at least 50 observations")
-        
-        self.logger.info(f"Training ARIMA model with {len(y)} observations")
+        # Set parallel processing for statsmodels
+        import os
+        os.environ['OMP_NUM_THREADS'] = str(cpu_count)
+        os.environ['MKL_NUM_THREADS'] = str(cpu_count)
+        os.environ['OPENBLAS_NUM_THREADS'] = str(cpu_count)
         
         try:
-            # FIXED: Fit ARIMA model and store it properly
-            self.model = ARIMA(y, order=self.order)
-            fitted_model = self.model.fit()
+            # Ignore X entirely. ARIMA uses only the univariate target series y.
+            # Normalize y to a 1D numpy array
+            if isinstance(y, pd.Series):
+                y_arr = y.values
+            elif isinstance(y, pd.DataFrame):
+                # Use the first column if a DataFrame is accidentally provided
+                y_arr = y.iloc[:, 0].values
+            else:
+                y_arr = np.asarray(y)
             
-            # Store the fitted model
-            self.model = fitted_model
+            if y_arr.ndim > 1:
+                y_arr = y_arr.ravel()
             
-            # Mark as trained
-            self.is_trained = True
+            if y_arr.size == 0:
+                raise ValueError("ARIMA requires a non-empty target series")
             
-            # Calculate training metrics
-            aic = fitted_model.aic
-            bic = fitted_model.bic
-            hqic = fitted_model.hqic
+            # Optionally run simple stationarity check
+            try:
+                self._check_stationarity(y_arr)
+            except Exception:
+                pass
+
+            # Auto-order selection if enabled
+            if self.auto_order:
+                try:
+                    best_order = self.auto_arima(y_arr, max_p=self.max_p, max_d=self.max_d, max_q=self.max_q)
+                    self.logger.info(f"Using auto-selected order: {best_order}")
+                    self.order = best_order
+                except Exception as auto_err:
+                    self.logger.warning(f"auto_arima failed, falling back to provided order {self.order}: {auto_err}")
+
+            # Fit ARIMA model with chosen parameters
+            seasonal_order = self.seasonal_order if self.seasonal else (0, 0, 0, 0)
+            self.model = ARIMA(y_arr, order=self.order, seasonal_order=seasonal_order)
+            self.fitted_model = self.model.fit()
+            self.is_trained = True  # Set training flag
             
-            # Calculate in-sample predictions
-            y_pred = fitted_model.predict(start=0, end=len(y)-1)
-            mse = np.mean((y - y_pred) ** 2)
-            mae = np.mean(np.abs(y - y_pred))
+            self.logger.info(f"✅ ARIMA model fitted successfully with {cpu_count}-core optimization")
+            self.logger.info(f"📊 Model: ARIMA{self.order} x {self.seasonal_order}")
             
-            metrics = {
-                'aic': aic,
-                'bic': bic,
-                'hqic': hqic,
-                'mse': mse,
-                'mae': mae,
-                'observations': len(y)
-            }
-            
-            self.logger.info(f"ARIMA training completed successfully. AIC: {aic:.2f}, MSE: {mse:.4f}")
-            return metrics
+            return self
             
         except Exception as e:
-            self.logger.error(f"ARIMA training failed: {e}")
-            # FIXED: Reset model state on failure
-            self.model = None
-            self.is_trained = False
-            raise RuntimeError(f"ARIMA training failed: {e}")
+            self.logger.error(f"ARIMA model fitting failed: {e}")
+            raise
+    
+    def train(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
+        """Train the ARIMA model (alias for fit)."""
+        self.fit(X, y, **kwargs)
+        return {
+            'status': 'success',
+            'model_order': self.order,
+            'aic': getattr(self.fitted_model, 'aic', None),
+            'bic': getattr(self.fitted_model, 'bic', None)
+        }
+    
+    def evaluate(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
+        """Evaluate the ARIMA model."""
+        if not self.is_trained:
+            raise ValueError("Model must be trained before evaluation")
+        
+        predictions = self.predict(X)
+        
+        # Calculate metrics
+        mse = mean_squared_error(y, predictions)
+        mae = mean_absolute_error(y, predictions)
+        r2 = r2_score(y, predictions)
+        
+        return {
+            'mse': mse,
+            'mae': mae,
+            'r2': r2
+        }
     
     def predict(self, X: Union[pd.DataFrame, np.ndarray], 
                 steps: Optional[int] = None) -> np.ndarray:
@@ -114,8 +148,8 @@ class ARIMAModel(BaseModel):
         Make predictions with ARIMA model.
         
         Args:
-            X: Input features (not used for ARIMA)
-            steps: Number of steps to forecast (default: length of X)
+            X: Input features (ignored for ARIMA; used only to infer steps if provided)
+            steps: Number of steps to forecast (default: len(X) if available, else 1)
             
         Returns:
             Predictions array
@@ -123,63 +157,39 @@ class ARIMAModel(BaseModel):
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
         
-        # FIXED: Check if model is actually a fitted ARIMA model
-        if not hasattr(self.model, 'forecast'):
+        # FIXED: Check if fitted model is actually a fitted ARIMA model
+        if not hasattr(self.fitted_model, 'forecast'):
             raise ValueError("ARIMA model not properly fitted")
         
-        if steps is None:
-            steps = len(X) if hasattr(X, '__len__') else 1
+        # Determine forecast horizon
+        if steps is not None:
+            horizon = int(max(1, steps))
+        else:
+            try:
+                horizon = len(X)  # prefer provided X length
+                if horizon is None or horizon <= 0:
+                    horizon = 1
+            except Exception:
+                horizon = 1
         
         try:
             # Make forecast
-            forecast = self.model.forecast(steps=steps)
-            return np.array(forecast)
+            if hasattr(self, 'fitted_model') and self.fitted_model is not None and hasattr(self.fitted_model, 'forecast'):
+                forecast = self.fitted_model.forecast(steps=horizon)
+            else:
+                forecast = self.model.forecast(steps=horizon)
+            return np.asarray(forecast)
             
         except Exception as e:
             self.logger.error(f"ARIMA prediction failed: {e}")
             # Return naive forecast as fallback
-            if hasattr(self.model, 'fittedvalues') and len(self.model.fittedvalues) > 0:
-                last_value = self.model.fittedvalues.iloc[-1]
-                return np.full(steps, last_value)
-            else:
-                return np.zeros(steps)
-    
-    def evaluate(self, X: Union[pd.DataFrame, np.ndarray], 
-                y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
-        """
-        Evaluate ARIMA model.
-        
-        Args:
-            X: Test features (not used for ARIMA)
-            y: Test targets
-            
-        Returns:
-            Dictionary containing evaluation metrics
-        """
-        if not self.is_trained:
-            raise ValueError("Model must be trained before evaluation")
-        
-        # Validate input
-        _, y = self._validate_input(X, y)
-        
-        try:
-            # Make predictions
-            y_pred = self.predict(X, steps=len(y))
-            
-            # Calculate metrics
-            metrics = self._calculate_regression_metrics(y, y_pred)
-            
-            self.logger.info(f"ARIMA evaluation completed: RMSE={metrics['RMSE']:.4f}")
-            
-            return metrics
-            
-        except Exception as e:
-            self.logger.error(f"ARIMA evaluation failed: {e}")
-            return {
-                'RMSE': float('inf'),
-                'MAE': float('inf'),
-                'R2': -float('inf')
-            }
+            try:
+                if hasattr(self.fitted_model, 'fittedvalues') and len(self.fitted_model.fittedvalues) > 0:
+                    last_value = np.asarray(self.fitted_model.fittedvalues)[-1]
+                    return np.full(horizon, last_value)
+            except Exception:
+                pass
+            return np.zeros(horizon)
     
     def _check_stationarity(self, y: np.ndarray) -> None:
         """Check if the time series is stationary."""

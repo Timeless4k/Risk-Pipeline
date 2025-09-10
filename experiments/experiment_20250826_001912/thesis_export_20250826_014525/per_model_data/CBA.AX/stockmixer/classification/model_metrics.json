@@ -1,0 +1,22 @@
+{
+  "metrics": {
+    "accuracy": 0.6205357142857142,
+    "accuracy_std": 0.20936947083586516,
+    "f1": 0.5973472580026502,
+    "f1_std": 0.23591561763602997,
+    "precision": 0.6835040441193927,
+    "precision_std": 0.24659425121727874,
+    "recall": 0.6205357142857142,
+    "recall_std": 0.20936947083586516,
+    "fit_time": 5.758437633514404,
+    "fit_time_std": 1.3363138058040789,
+    "pred_time": 0.23142355680465698,
+    "pred_time_std": 0.030404508830725114,
+    "n_splits": 8,
+    "total_samples": 11088
+  },
+  "asset": "CBA.AX",
+  "model_type": "stockmixer",
+  "task": "classification",
+  "stored_at": "2025-08-26T01:23:19.577394"
+}

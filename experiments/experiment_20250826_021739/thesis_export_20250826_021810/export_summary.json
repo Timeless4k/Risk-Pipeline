@@ -1,0 +1,24 @@
+{
+  "export_timestamp": "2025-08-26T02:18:10.458939",
+  "total_models": 2,
+  "total_assets": 1,
+  "model_types": [
+    "arima",
+    "enhanced_arima"
+  ],
+  "tasks": [
+    "regression"
+  ],
+  "export_summary": {
+    "AAPL": {
+      "models": 2,
+      "model_types": [
+        "arima",
+        "enhanced_arima"
+      ],
+      "tasks": [
+        "regression"
+      ]
+    }
+  }
+}

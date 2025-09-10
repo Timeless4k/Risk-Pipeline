@@ -15,7 +15,41 @@ import pandas as pd
 import numpy as np
 
 # FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
-# (Will be configured after logger setup)
+try:
+    import tensorflow as tf
+    
+    # Suppress TensorFlow warnings and errors
+    import os
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress warnings
+    os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  # Disable oneDNN optimizations
+    
+    # Force CPU-only mode
+    tf.config.set_soft_device_placement(False)
+    
+    # Hide all GPUs from TensorFlow
+    try:
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            tf.config.set_visible_devices([], 'GPU')
+            print("TensorFlow: All GPUs hidden - forcing CPU-only mode")
+    except Exception:
+        pass
+    
+    # Configure CPU devices
+    try:
+        cpus = tf.config.list_physical_devices('CPU')
+        if cpus:
+            tf.config.set_logical_device_configuration(
+                cpus[0],
+                [tf.config.LogicalDeviceConfiguration()]
+            )
+            print("TensorFlow: CPU device configured")
+    except Exception:
+        pass
+    
+    print("TensorFlow device configuration: Forced CPU usage for deep learning models")
+except ImportError:
+    pass
 
 # Import core components
 from .core.config import PipelineConfig
@@ -31,12 +65,13 @@ from .models.model_factory import ModelFactory
 # Import models conditionally to handle missing dependencies
 try:
     from .models.arima_model import ARIMAModel
+    from .models.enhanced_arima_model import EnhancedARIMAModel  # 🚀 NEW: Enhanced ARIMAX
     from .models.xgboost_model import XGBoostModel
     from .models.stockmixer_model import StockMixerModel
-    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
+    ARIMA_AVAILABLE = ENHANCED_ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
 except ImportError as e:
     print(f"[WARNING] Some models not available: {e}")
-    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
+    ARIMA_AVAILABLE = ENHANCED_ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
 
 try:
     from .models.lstm_model import LSTMModel
@@ -59,17 +94,23 @@ from .visualization.shap_visualizer import SHAPVisualizer
 
 logger = logging.getLogger(__name__)
 
-# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
-try:
-    import tensorflow as tf
-    tf.config.set_soft_device_placement(False)
-    tf.config.set_logical_device_configuration(
-        tf.config.list_physical_devices('CPU')[0],
-        [tf.config.LogicalDeviceConfiguration()]
-    )
-    logger.info("TensorFlow device configuration: Forced CPU usage for deep learning models")
-except ImportError:
-    pass
+# 🚀 24-CORE OPTIMIZATION: Global CPU optimization for all components
+import psutil
+cpu_count = psutil.cpu_count(logical=False)  # Physical cores (24 for your i9-14900HX)
+logger.info(f"🚀 RISKPIPELINE: Detected {cpu_count}-core Intel i9-14900HX system!")
+
+# Set global environment variables for maximum CPU utilization
+import os
+os.environ['OMP_NUM_THREADS'] = str(cpu_count)
+os.environ['MKL_NUM_THREADS'] = str(cpu_count)
+os.environ['OPENBLAS_NUM_THREADS'] = str(cpu_count)
+os.environ['VECLIB_MAXIMUM_THREADS'] = str(cpu_count)
+os.environ['NUMEXPR_NUM_THREADS'] = str(cpu_count)
+os.environ['BLAS_NUM_THREADS'] = str(cpu_count)
+os.environ['LAPACK_NUM_THREADS'] = str(cpu_count)
+
+logger.info(f"⚡ Environment variables set for {cpu_count}-core optimization")
+logger.info(f"💪 All math libraries will use maximum CPU power!")
 
 
 class RiskPipeline:
@@ -120,14 +161,13 @@ class RiskPipeline:
         
         self.validator = WalkForwardValidator(
             n_splits=self.config.training.walk_forward_splits,
-            test_size=self.config.training.test_size
+            test_size=self.config.training.test_size,
+            config=self.config
         )
         
         # Initialize model factory
-        # Pass plain dict config to model factory
-        self.model_factory = ModelFactory(
-            config=self.config.to_dict()
-        )
+        # ModelFactory is now a static class - no instantiation needed
+        self.model_factory = ModelFactory
         
         # Initialize SHAP analyzer
         self.shap_analyzer = SHAPAnalyzer(
@@ -355,6 +395,14 @@ class RiskPipeline:
             # Export results
             export_path = self.results_manager.export_results_table(format="csv")
             logger.info(f"Results exported to: {export_path}")
+
+            # Generate thesis report automatically
+            try:
+                from risk_pipeline.utils.thesis_reporting import create_thesis_report
+                report_dir = create_thesis_report(self.results_manager)
+                logger.info(f"Thesis report generated at: {report_dir}")
+            except Exception as report_err:
+                logger.warning(f"Failed to generate thesis report automatically: {report_err}")
             
             self._track_memory_usage("Pipeline end")
             logger.info("RiskPipeline execution completed successfully")
@@ -599,12 +647,26 @@ class RiskPipeline:
             try:
                 logger.info(f"Training {model_type} for {asset} {task}")
                 
-                model = self.model_factory.create_model(
+                # Merge model-specific config params
+                try:
+                    model_params = self.config.get_model_config(model_type)
+                    logger.info(f"Merged {model_type} params from config: {model_params}")
+                except Exception:
+                    model_params = {}
+
+                model = ModelFactory.create_model(
                     model_type=model_type,
                     task=task,
                     input_shape=X_clean.shape,
-                    n_classes=(len(pd.Series(y_clean).unique()) if task == 'classification' else None)
+                    n_classes=(len(pd.Series(y_clean).unique()) if task == 'classification' else None),
+                    **model_params
                 )
+
+                # Skip regression-only models in classification runs
+                if task == 'classification' and model_type in ['arima', 'enhanced_arima']:
+                    logger.warning(f"Skipping {model_type} in classification task (regression-only model)")
+                    results[model_type] = {'skipped': True, 'reason': 'regression_only'}
+                    continue
                 
                 # Ensure model is built before training (for neural network models)
                 if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):
@@ -663,8 +725,13 @@ class RiskPipeline:
                         task=task,
                         metrics=model_results.get('metrics', {}),
                         predictions={
-                            'actual': model_results.get('actuals', []),
-                            'predicted': model_results.get('predictions', [])
+                            'actual': model_results.get('all_actuals', []),
+                            'predicted': model_results.get('all_predictions', []),
+                            'all_fold_metrics': model_results.get('all_fold_metrics', []),
+                            'all_fold_indices': model_results.get('all_fold_indices', []),
+                            'n_splits': model_results.get('n_splits', 0),
+                            'successful_splits': model_results.get('successful_splits', 0),
+                            'total_splits': model_results.get('total_splits', 0),
                         },
                         model=model,
                         scaler=features.get('scaler'),
@@ -707,34 +774,48 @@ class RiskPipeline:
         # SHAP visualizations if available
         if shap_results:
             for asset, asset_shap in shap_results.items():
-                for model_type, model_shap in asset_shap.items():
-                    if 'shap_values' in model_shap:
-                        self.shap_visualizer.create_comprehensive_plots(
-                            shap_values=model_shap['shap_values'],
-                            X=model_shap.get('X'),
-                            feature_names=model_shap.get('feature_names', []),
-                            asset=asset,
-                            model_type=model_type,
-                            task=model_shap.get('task', 'regression')
-                        )
+                # Handle both possible structures:
+                # 1) {asset: {task: {model_type: result}}}
+                # 2) {asset: {model_type: result}}
+                if isinstance(asset_shap, dict) and any(k in asset_shap for k in ['regression', 'classification']):
+                    task_level_items = asset_shap.items()
+                else:
+                    task_level_items = [('regression', asset_shap)]
+
+                for task, task_shap in task_level_items:
+                    if not isinstance(task_shap, dict):
+                        continue
+                    for model_type, model_shap in task_shap.items():
+                        if isinstance(model_shap, dict) and 'shap_values' in model_shap:
+                            self.shap_visualizer.create_comprehensive_plots(
+                                shap_values=model_shap['shap_values'],
+                                X=model_shap.get('X'),
+                                feature_names=model_shap.get('feature_names', []),
+                                asset=asset,
+                                model_type=model_type,
+                                task=model_shap.get('task', task),
+                                explainer=model_shap.get('explainer')
+                            )
     
     def _extract_feature_importance(self, shap_results: Dict[str, Any]) -> Dict[str, float]:
         """Extract feature importance from SHAP results."""
         feature_importance = {}
         
-        for model_type, model_shap in shap_results.items():
-            if 'shap_values' in model_shap and 'feature_names' in model_shap:
-                shap_values = model_shap['shap_values']
-                feature_names = model_shap['feature_names']
-                
-                if len(shap_values.shape) > 1:
-                    importance = np.mean(np.abs(shap_values), axis=0)
-                else:
-                    importance = np.abs(shap_values)
-                
-                for i, feature in enumerate(feature_names):
-                    if i < len(importance):
-                        feature_importance[feature] = float(importance[i])
+        for asset, asset_shap in shap_results.items():
+            for task, task_shap in asset_shap.items():
+                for model_type, model_shap in task_shap.items():
+                    if 'shap_values' in model_shap and 'feature_names' in model_shap:
+                        shap_values = model_shap['shap_values']
+                        feature_names = model_shap['feature_names']
+                        
+                        if len(shap_values.shape) > 1:
+                            importance = np.mean(np.abs(shap_values), axis=0)
+                        else:
+                            importance = np.abs(shap_values)
+                        
+                        for i, feature in enumerate(feature_names):
+                            if i < len(importance):
+                                feature_importance[feature] = float(importance[i])
         
         return feature_importance
     
@@ -813,6 +894,8 @@ __all__ = [
 # Add available models to exports
 if ARIMA_AVAILABLE:
     __all__.append('ARIMAModel')
+if ENHANCED_ARIMA_AVAILABLE:
+    __all__.append('EnhancedARIMAModel')
 if XGBOOST_AVAILABLE:
     __all__.append('XGBoostModel')
 if STOCKMIXER_AVAILABLE:
