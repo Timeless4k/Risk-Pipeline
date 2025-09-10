@@ -10,13 +10,17 @@ import sys
 import time
 from pathlib import Path
 
-# Silence TensorFlow/absl/CUDA noise before any heavy imports
+# Silence TensorFlow/absl/CUDA noise and force CPU before any heavy imports
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')  # 0=all,1=INFO,2=WARNING,3=ERROR
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
-os.environ.setdefault('TF_XLA_FLAGS', '--xla_gpu_cuda_data_dir=\"\"')
 os.environ.setdefault('ABSL_LOGLEVEL', '3')  # absl to ERROR
 os.environ.setdefault('NVIDIA_TF32_OVERRIDE', '0')
-os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')  # hide GPUs to avoid CUDA init
+
+# Force CPU-only in WSL to avoid CUDA/XLA issues
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+# Ensure no broken XLA flags leak in from the shell
+if 'TF_XLA_FLAGS' in os.environ:
+    os.environ.pop('TF_XLA_FLAGS', None)
 
 # Add the project root to Python path
 project_root = Path(__file__).parent
@@ -24,7 +28,7 @@ sys.path.insert(0, str(project_root))
 
 try:
     from risk_pipeline import RiskPipeline
-    print("✅ RiskPipeline imported successfully!")
+    print("RiskPipeline imported successfully (CPU-only mode)")
 except ImportError as e:
     print(f"❌ Error importing RiskPipeline: {e}")
     print("Please ensure you're running this from the project root directory")
@@ -32,18 +36,18 @@ except ImportError as e:
 
 def main():
     """Run the complete RiskPipeline with maximum performance."""
-    print("🚀 Starting RiskPipeline with Maximum Performance!")
+    print("Starting RiskPipeline with Maximum Performance (CPU-only)")
     print("=" * 60)
     
     start_time = time.time()
     
     try:
         # Initialize pipeline with config file
-        print("📊 Initializing RiskPipeline...")
+        print("Initializing RiskPipeline...")
         experiment_name = f"simple_run_{int(time.time())}"
         config_path = str(project_root / 'configs' / 'pipeline_config.json')
         pipeline = RiskPipeline(config_path=config_path, experiment_name=experiment_name)
-        print("✅ Pipeline initialized successfully!")
+        print("Pipeline initialized successfully")
         
         # Define assets and models from config
         assets = pipeline.config.data.all_assets
@@ -76,7 +80,7 @@ def main():
         execution_minutes = execution_time / 60
         
         print("\n" + "=" * 60)
-        print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
+        print("PIPELINE COMPLETED SUCCESSFULLY")
         print("=" * 60)
         
         # Show results summary
@@ -90,23 +94,23 @@ def main():
                         if isinstance(task_results, dict):
                             total_models += len(task_results)
             
-            print(f"✅ Assets Processed: {asset_count}")
-            print(f"✅ Total Models Trained: {total_models}")
+            print(f"Assets Processed: {asset_count}")
+            print(f"Total Models Trained: {total_models}")
         
-        print(f"⏱️  Total Execution Time: {execution_minutes:.1f} minutes")
-        print(f"📁 Results saved to: {pipeline.results_manager.base_dir}")
+        print(f"Total Execution Time: {execution_minutes:.1f} minutes")
+        print(f"Results saved to: {pipeline.results_manager.base_dir}")
         
-        print("\n🎯 Pipeline Summary:")
-        print("  • All models trained successfully")
-        print("  • SHAP analysis completed")
-        print("  • Models saved for future use")
-        print("  • Results exported and organized")
-        print("  • Visualizations generated")
+        print("\nPipeline Summary:")
+        print("  - All models trained successfully")
+        print("  - SHAP analysis completed")
+        print("  - Models saved for future use")
+        print("  - Results exported and organized")
+        print("  - Visualizations generated")
         
-        print("\n🚀 Your risk analysis pipeline is ready!")
+        print("\nYour risk analysis pipeline is ready!")
         
     except Exception as e:
-        print(f"\n❌ Pipeline execution failed: {str(e)}")
+        print(f"\nPipeline execution failed: {str(e)}")
         print("Please check the error details above and try again.")
         sys.exit(1)
 

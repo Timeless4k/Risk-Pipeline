@@ -6,8 +6,15 @@ import logging
 from typing import Dict, Any, Type
 from .base_model import BaseModel
 from .arima_model import ARIMAModel
-from .garch_model import GARCHModel
 from .xgboost_model import XGBoostModel
+
+# Make GARCH optional (arch package may be missing)
+try:
+    from .garch_model import GARCHModel
+    GARCH_AVAILABLE = True
+except Exception:
+    GARCH_AVAILABLE = False
+    GARCHModel = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +39,13 @@ class ModelFactory:
     
     _models: Dict[str, Type[BaseModel]] = {
         'arima': ARIMAModel,
-        'garch': GARCHModel,
         'xgboost': XGBoostModel,
         # Aliases
         'xgb': XGBoostModel,
     }
+
+    if GARCH_AVAILABLE and GARCHModel is not None:
+        _models['garch'] = GARCHModel
     
     if LSTM_AVAILABLE:
         _models['lstm'] = LSTMModel

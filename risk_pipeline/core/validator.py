@@ -65,6 +65,10 @@ class ValidationConfig:
     gap: int = 0  # Gap between train and test sets
     expanding_window: bool = True  # True for expanding, False for sliding
     embargo: int = 0  # Additional embargo periods to purge around split boundaries
+    # Optional cap on the maximum number of training periods (e.g., ~2 years ≈ 504)
+    max_train_size: Optional[int] = None
+    # Optional cap by calendar days if index is a DatetimeIndex (not used if None)
+    max_train_days: Optional[int] = None
     
     def validate(self) -> bool:
         """Validate configuration parameters."""
@@ -173,6 +177,19 @@ class WalkForwardValidator:
         self.logger.info(f"Target splits by length={target_splits_by_length}, feasible_by_blocks={feasible_by_blocks}, using_splits={max_splits}")
         self.logger.info(f"Effective min_train_size set to {min_train_eff} (original {original_min_train})")
         
+        # Determine effective max training size (default to ~2 years if not specified)
+        effective_max_train = self.config.max_train_size
+        if effective_max_train is None:
+            try:
+                # Prefer pipeline config override if available
+                if self.pipeline_config is not None and hasattr(self.pipeline_config, 'training') and hasattr(self.pipeline_config.training, 'max_train_size'):
+                    effective_max_train = int(getattr(self.pipeline_config.training, 'max_train_size'))
+                else:
+                    effective_max_train = 504  # ~2 years of trading days
+            except Exception:
+                effective_max_train = 504
+        self.logger.info(f"Max training window cap set to {effective_max_train} periods")
+
         # Generate splits using proportional expanding/sliding strategies
         # This ensures later folds leverage much larger training windows from the full history.
         if max_splits <= 0:
@@ -183,9 +200,9 @@ class WalkForwardValidator:
             try:
                 self.config.min_train_size = min_train_eff
                 if self.config.expanding_window:
-                    splits = self._generate_expanding_splits(X, max_splits, adaptive_test_size)
+                    splits = self._generate_expanding_splits(X, max_splits, adaptive_test_size, effective_max_train)
                 else:
-                    splits = self._generate_sliding_splits(X, max_splits, adaptive_test_size)
+                    splits = self._generate_sliding_splits(X, max_splits, adaptive_test_size, effective_max_train)
             finally:
                 # Restore original min_train_size to avoid side effects
                 self.config.min_train_size = prev_min_train
@@ -863,7 +880,7 @@ class WalkForwardValidator:
             'regime_metrics': regime_metrics
         }
     
-    def _generate_expanding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int) -> List[Tuple[pd.Index, pd.Index]]:
+    def _generate_expanding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int, max_train_size: Optional[int]) -> List[Tuple[pd.Index, pd.Index]]:
         """Generate expanding window splits."""
         splits = []
         n_samples = len(X)
@@ -879,24 +896,29 @@ class WalkForwardValidator:
             test_start = train_end + self.config.gap
             test_end = min(test_start + test_size, n_samples)
             
+            # Apply max training cap (take last max_train_size observations)
+            if max_train_size is not None and max_train_size > 0:
+                train_start = max(0, train_end - max_train_size)
+            else:
+                train_start = 0
+
             # Ensure we have valid indices
-            if not self._validate_split_indices(train_end, test_start, test_end, n_samples):
+            if not self._validate_split_indices(train_end, test_start, test_end, n_samples, train_start=train_start):
                 self.logger.warning(f"Split {i+1}: Invalid indices, skipping")
                 continue
                 
-            train_idx = X.index[:train_end]
+            train_idx = X.index[train_start:train_end]
             test_idx = X.index[test_start:test_end]
             
             # Final validation
             if self._validate_split_sizes(train_idx, test_idx):
                 splits.append((train_idx, test_idx))
-                self.logger.info(f"✅ Split {i+1}: Train={len(train_idx)}, Test={len(test_idx)}")
             else:
                 self.logger.warning(f"Split {i+1}: Insufficient data (Train={len(train_idx)}, Test={len(test_idx)})")
         
         return splits
     
-    def _generate_sliding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int) -> List[Tuple[pd.Index, pd.Index]]:
+    def _generate_sliding_splits(self, X: pd.DataFrame, n_splits: int, test_size: int, max_train_size: Optional[int]) -> List[Tuple[pd.Index, pd.Index]]:
         """Generate sliding window splits."""
         splits = []
         n_samples = len(X)
@@ -910,7 +932,9 @@ class WalkForwardValidator:
         for i in range(n_splits):
             # Sliding window: maintain fixed train length and slide by test size
             train_end = self.config.min_train_size + i * (test_size + self.config.gap)
-            train_start = max(0, train_end - self.config.min_train_size)
+            # Respect max training cap
+            effective_train_len = self.config.min_train_size if (max_train_size is None or max_train_size <= 0) else min(self.config.min_train_size, max_train_size)
+            train_start = max(0, train_end - effective_train_len)
             test_start = train_end + self.config.gap
             test_end = test_start + test_size
             if test_end > n_samples:
@@ -927,7 +951,6 @@ class WalkForwardValidator:
             # Final validation
             if self._validate_split_sizes(train_idx, test_idx):
                 splits.append((train_idx, test_idx))
-                self.logger.info(f"✅ Split {i+1}: Train={len(train_idx)}, Test={len(test_idx)}")
             else:
                 self.logger.warning(f"Split {i+1}: Insufficient data (Train={len(train_idx)}, Test={len(test_idx)})")
         

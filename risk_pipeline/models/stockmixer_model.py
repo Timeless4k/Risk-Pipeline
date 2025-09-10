@@ -14,6 +14,10 @@ except Exception:
     tf = None  # type: ignore
     TF_AVAILABLE = False
 
+# Fail fast if TensorFlow is not available to allow graceful disable via models.__init__
+if not TF_AVAILABLE:
+    raise ImportError("TensorFlow is required for StockMixerModel but is not available in this environment.")
+
 from sklearn.model_selection import train_test_split
 
 import psutil

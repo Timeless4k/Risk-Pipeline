@@ -599,8 +599,8 @@ class FeatureEngineer:
                     correlations = self.modules['correlation'].create_features(data)
                     if not correlations.empty:
                         for asset in all_features.keys():
-                            # Align correlation features with asset features
-                            asset_correlations = correlations.reindex(all_features[asset].index, method='ffill')
+                            # Align correlation features with asset features without forward-filling at this stage
+                            asset_correlations = correlations.reindex(all_features[asset].index)
                             all_features[asset] = pd.concat([all_features[asset], asset_correlations], axis=1)
                 else:
                     self.logger.info("Skipping correlation features: module not enabled")
@@ -907,8 +907,8 @@ class FeatureEngineer:
         if nan_count_before > 0:
             self.logger.info(f"Found {nan_count_before} NaN values in features, cleaning...")
         
-        # Strategy 1: Forward fill then backward fill for time series
-        features_clean = features_df.fillna(method='ffill').fillna(method='bfill')
+        # Strategy 1: Forward fill only to avoid leaking future information
+        features_clean = features_df.fillna(method='ffill')
         
         # Strategy 2: For remaining NaN values, use column median
         for col in features_clean.columns:
@@ -1055,7 +1055,7 @@ class FeatureEngineer:
         vix_price_col = 'Adj Close' if 'Adj Close' in vix_data.columns else 'Close'
         
         # Align VIX data with features index
-        vix_aligned = vix_data[vix_price_col].reindex(features.index, method='ffill')
+        vix_aligned = vix_data[vix_price_col].reindex(features.index)
         
         features['VIX'] = vix_aligned
         features['VIX_change'] = vix_aligned.pct_change()
@@ -1083,7 +1083,7 @@ class FeatureEngineer:
                 return features
             ret = np.log(proxy_series / proxy_series.shift(1))
             axvi = ret.rolling(window=20, min_periods=10).std() * np.sqrt(252)
-            axvi_aligned = axvi.reindex(features.index, method='ffill')
+            axvi_aligned = axvi.reindex(features.index)
             features['AXVI_proxy'] = axvi_aligned
             features['AXVI_proxy_chg'] = axvi_aligned.pct_change()
             return features
@@ -1201,14 +1201,8 @@ class FeatureEngineer:
         # Count missing values before handling
         missing_before = features.isna().sum().sum()
         
-        # Use interpolation for missing values
-        features = features.interpolate(method='linear', limit_direction='forward', axis=0)
-        
-        # Forward fill any remaining NaNs at the beginning
+        # Forward fill only to prevent any future-looking imputation
         features = features.fillna(method='ffill')
-        
-        # Backward fill any remaining NaNs at the end
-        features = features.fillna(method='bfill')
         
         # For any remaining NaN values, use column median
         for col in features.columns:
