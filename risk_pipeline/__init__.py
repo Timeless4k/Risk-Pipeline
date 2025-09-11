@@ -18,34 +18,42 @@ import os
 # Set suppression env vars BEFORE TF import
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
-os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
 os.environ.setdefault('ABSL_LOGLEVEL', '3')
 
-# Global TensorFlow device configuration to prevent automatic GPU usage
+# Global TensorFlow device configuration (GPU usage is configurable via env)
 try:
     import tensorflow as tf
-
-    # Force CPU-only mode
-    tf.config.set_soft_device_placement(False)
-
-    # Hide all GPUs from TensorFlow
-    try:
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            tf.config.set_visible_devices([], 'GPU')
-    except Exception:
-        pass
-
-    # Configure CPU devices
-    try:
-        cpus = tf.config.list_physical_devices('CPU')
-        if cpus:
-            tf.config.set_logical_device_configuration(
-                cpus[0],
-                [tf.config.LogicalDeviceConfiguration()]
-            )
-    except Exception:
-        pass
+    force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
+    if force_cpu:
+        # Force CPU-only mode if explicitly requested
+        tf.config.set_soft_device_placement(False)
+        try:
+            gpus = tf.config.list_physical_devices('GPU')
+            if gpus:
+                tf.config.set_visible_devices([], 'GPU')
+        except Exception:
+            pass
+        try:
+            cpus = tf.config.list_physical_devices('CPU')
+            if cpus:
+                tf.config.set_logical_device_configuration(
+                    cpus[0],
+                    [tf.config.LogicalDeviceConfiguration()]
+                )
+        except Exception:
+            pass
+    else:
+        # Prefer GPU if available; allow soft placement
+        try:
+            tf.config.set_soft_device_placement(True)
+            gpus = tf.config.list_physical_devices('GPU')
+            for gpu in gpus:
+                try:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 except ImportError:
     pass
 

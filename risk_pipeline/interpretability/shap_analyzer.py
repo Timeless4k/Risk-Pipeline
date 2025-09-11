@@ -13,14 +13,26 @@ from datetime import datetime
 import shap
 import warnings
 
-# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+# TensorFlow device configuration for SHAP (respect global env flag)
+import os
 try:
     import tensorflow as tf
-    tf.config.set_soft_device_placement(False)
-    tf.config.set_logical_device_configuration(
-        tf.config.list_physical_devices('CPU')[0],
-        [tf.config.LogicalDeviceConfiguration()]
-    )
+    force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
+    if force_cpu:
+        tf.config.set_soft_device_placement(False)
+        try:
+            tf.config.set_logical_device_configuration(
+                tf.config.list_physical_devices('CPU')[0],
+                [tf.config.LogicalDeviceConfiguration()]
+            )
+        except Exception:
+            pass
+    else:
+        # Allow TF to pick GPU if available; keep soft placement on
+        try:
+            tf.config.set_soft_device_placement(True)
+        except Exception:
+            pass
 except ImportError:
     pass
 

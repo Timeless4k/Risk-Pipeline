@@ -134,7 +134,9 @@ class AdvancedOrderSelection:
                  seasonal_max_P: int = 2, seasonal_max_D: int = 1, seasonal_max_Q: int = 2,
                  m: int = 0, information_criterion: str = 'aic',
                  selection_metric: str = 'aic', candidate_orders: Optional[List[Tuple[int, int, int]]] = None,
-                 val_fraction: float = 0.2, selection_maxiter: int = 100):
+                 val_fraction: float = 0.2, selection_maxiter: int = 100,
+                 rmse_baseline_fallback: bool = True, baseline_tolerance: float = 1.0,
+                 include_naive_candidates: bool = True):
         self.max_p = max_p
         self.max_d = max_d
         self.max_q = max_q
@@ -147,6 +149,9 @@ class AdvancedOrderSelection:
         self.candidate_orders = candidate_orders
         self.val_fraction = max(0.05, min(0.5, float(val_fraction)))
         self.selection_maxiter = max(50, int(selection_maxiter))
+        self.rmse_baseline_fallback = bool(rmse_baseline_fallback)
+        self.baseline_tolerance = max(0.5, float(baseline_tolerance))
+        self.include_naive_candidates = bool(include_naive_candidates)
 
     def select_order(self, endog: pd.Series, exog: pd.DataFrame = None,
                      use_seasonal: bool = False) -> Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]:
@@ -161,8 +166,16 @@ class AdvancedOrderSelection:
             candidate_orders = [(p, optimal_d, q) for (p, _, q) in self.candidate_orders]
         else:
             # Focused small set first, bounded by max_p/max_q
-            base_candidates = [(0, optimal_d, 1), (1, optimal_d, 0), (1, optimal_d, 1),
-                               (2, optimal_d, 1), (1, optimal_d, 2), (2, optimal_d, 2), (3, optimal_d, 1)]
+            base_candidates = [
+                (0, optimal_d, 0),
+                (0, optimal_d, 1),
+                (1, optimal_d, 0),
+                (1, optimal_d, 1),
+                (2, optimal_d, 1),
+                (1, optimal_d, 2),
+                (2, optimal_d, 2),
+                (3, optimal_d, 1)
+            ]
             candidate_orders = [(p, d, q) for (p, d, q) in base_candidates if p <= self.max_p and q <= self.max_q]
             # Fallback to small grid if too few
             if len(candidate_orders) < 3:
@@ -196,6 +209,7 @@ class AdvancedOrderSelection:
             X_train = exog
             X_val = None
 
+        # Track best by RMSE/IC
         for order in candidate_orders:
             for seasonal_order in seasonal_orders:
                 try:
@@ -232,7 +246,46 @@ class AdvancedOrderSelection:
                 except Exception:
                     continue
 
-        metric_name = 'RMSE' if self.selection_metric == 'rmse' else self.ic.upper()
+        # Optional baseline-aware fallback if RMSE underperforms naive
+        if self.selection_metric == 'rmse' and y_val is not None and len(y_val) > 0 and self.rmse_baseline_fallback:
+            try:
+                naive_level = float(y_train.iloc[-1])
+                rmse_naive = float(np.sqrt(np.mean((y_val.values - naive_level) ** 2)))
+                if best_score > rmse_naive * self.baseline_tolerance:
+                    logger.info(
+                        f"RMSE selection underperformed naive (best={best_score:.4f} vs naive={rmse_naive:.4f}). "
+                        f"Falling back to {self.ic.upper()} on full training set."
+                    )
+                    ic_best = np.inf
+                    ic_best_order = best_order
+                    ic_best_seasonal = best_seasonal_order
+                    for order in candidate_orders:
+                        for seasonal_order in seasonal_orders:
+                            try:
+                                if X_train is not None:
+                                    model = SARIMAX(y_train, exog=X_train, order=order, seasonal_order=seasonal_order,
+                                                    enforce_stationarity=False, enforce_invertibility=False, trend=None)
+                                else:
+                                    model = SARIMAX(y_train, order=order, seasonal_order=seasonal_order,
+                                                    enforce_stationarity=False, enforce_invertibility=False)
+                                fitted = model.fit(disp=False, maxiter=self.selection_maxiter, method='lbfgs')
+                                score_ic = float(getattr(fitted, self.ic, fitted.aic))
+                                if score_ic < ic_best:
+                                    ic_best = score_ic
+                                    ic_best_order = order
+                                    ic_best_seasonal = seasonal_order
+                            except Exception:
+                                continue
+                    best_order = ic_best_order
+                    best_seasonal_order = ic_best_seasonal
+                    best_score = ic_best
+                    metric_name = self.ic.upper()
+                else:
+                    metric_name = 'RMSE'
+            except Exception:
+                metric_name = 'RMSE'
+        else:
+            metric_name = 'RMSE' if self.selection_metric == 'rmse' else self.ic.upper()
         try:
             logger.info(f"Order selection complete: ARIMA{best_order} x {best_seasonal_order} ({metric_name}={best_score:.2f})")
         except Exception:
@@ -306,6 +359,10 @@ class ARIMAModel(BaseModel):
         self.auto_order_selection = kwargs.get('auto_order_selection', True)
         self.seasonal_period = kwargs.get('seasonal_period', 0)
         self.use_trend = kwargs.get('use_trend', True)
+        # Fallback and search behavior configs
+        self.rmse_baseline_fallback = kwargs.get('rmse_baseline_fallback', True)
+        self.baseline_tolerance = kwargs.get('baseline_tolerance', 1.0)
+        self.include_naive_candidates = kwargs.get('include_naive_candidates', True)
         self.order_ = None
         self.seasonal_order_ = None
         self.fitted_model_ = None
@@ -371,7 +428,10 @@ class ARIMAModel(BaseModel):
                 selection_metric=self.selection_metric,
                 candidate_orders=self.candidate_orders,
                 val_fraction=self.selection_val_fraction,
-                selection_maxiter=self.selection_maxiter
+                selection_maxiter=self.selection_maxiter,
+                rmse_baseline_fallback=self.rmse_baseline_fallback,
+                baseline_tolerance=self.baseline_tolerance,
+                include_naive_candidates=self.include_naive_candidates
             )
             self.order_, self.seasonal_order_ = order_selector.select_order(
                 endog=y,

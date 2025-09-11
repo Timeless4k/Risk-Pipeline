@@ -22,23 +22,11 @@ from sklearn.model_selection import train_test_split
 
 import psutil
 
-# TensorFlow device/threading configuration (CPU-only, deterministic)
+from risk_pipeline.utils.tensorflow_utils import configure_tensorflow_memory, get_optimal_device
+
+# TensorFlow device/threading configuration (prefer GPU, allow soft placement)
 if TF_AVAILABLE:
-    tf.config.set_soft_device_placement(False)
-    try:
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            tf.config.set_visible_devices([], 'GPU')
-    except Exception:
-        pass
-    try:
-        cpus = tf.config.list_physical_devices('CPU')
-        if cpus:
-            tf.config.set_logical_device_configuration(
-                cpus[0], [tf.config.LogicalDeviceConfiguration()]
-            )
-    except Exception:
-        pass
+    tf.config.set_soft_device_placement(True)
     threads = psutil.cpu_count(logical=False) or 1
     tf.config.threading.set_inter_op_parallelism_threads(threads)
     tf.config.threading.set_intra_op_parallelism_threads(threads)
@@ -229,11 +217,20 @@ class StockMixerNet(tf.keras.Model):
         mixed_time = tf.transpose(mixed_time, [0, 1, 2, 3])
         mixed_time = tf.transpose(mixed_time, [0, 1, 3, 2])
 
-        stock_features = tf.reshape(mixed_time, [batch_size, self.n_stocks, -1])
+        # Avoid dynamic unknown feature dimension which breaks LayerNormalization variable init
+        static_feature_dim = self.sequence_length * self.n_indicators
+        stock_features = tf.reshape(mixed_time, [batch_size, self.n_stocks, static_feature_dim])
         mixed_stocks = self.stock_mixing(stock_features, training=training)
         pooled = tf.reduce_mean(mixed_stocks, axis=1)
         preds = self.prediction_head(pooled)
         return preds
+
+    def compute_output_shape(self, input_shape):
+        # input_shape: (batch, S, T, I)
+        batch = input_shape[0]
+        if self.task == 'regression':
+            return (batch, 1)
+        return (batch, self.num_classes)
 
 
 class StockMixerModel(BaseModel):
@@ -295,7 +292,9 @@ class StockMixerModel(BaseModel):
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
 
-        with tf.device('/CPU:0'):
+        device = get_optimal_device(prefer_gpu=True)
+        _configured = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=(device == '/CPU:0'))
+        with tf.device(device):
             net = StockMixerNet(
                 n_stocks=self.n_stocks,
                 n_indicators=self.n_indicators,
@@ -349,7 +348,8 @@ class StockMixerModel(BaseModel):
         X_train, X_val = X4[train_idx], X4[val_idx]
         y_train, y_val = y_arr[train_idx], y_arr[val_idx]
 
-        with tf.device('/CPU:0'):
+        device = '/GPU:0' if tf.config.list_physical_devices('GPU') else '/CPU:0'
+        with tf.device(device):
             history = self.model.fit(
                 X_train,
                 y_train,

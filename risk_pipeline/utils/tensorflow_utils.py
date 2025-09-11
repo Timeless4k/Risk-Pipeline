@@ -5,6 +5,7 @@ TensorFlow utilities for RiskPipeline with enhanced GPU/CPU fallback handling.
 import logging
 import os
 import warnings
+import time
 from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -271,3 +272,44 @@ def reset_gpu_state():
         
     except Exception as e:
         logger.error(f"GPU state reset failed: {e}")
+
+def warm_up_gpu(jit_intensive: bool = False) -> Tuple[bool, str]:
+    """Trigger light GPU work so CUDA kernels JIT-compile once.
+    
+    Args:
+        jit_intensive: If True, run a heavier matmul to JIT more kernels.
+    
+    Returns:
+        Tuple of (used_gpu, message)
+    """
+    try:
+        import tensorflow as tf
+        gpus = tf.config.list_physical_devices('GPU')
+        if not gpus:
+            return False, "No GPU available for warm-up"
+        start = time.time()
+        logger.info("Starting TensorFlow GPU warm-up (jit_intensive=%s)", jit_intensive)
+        # Keep memory growth sane to avoid large pre-allocations
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                logger.info("Enabled memory growth for %s", gpu)
+        except Exception:
+            pass
+        # Minimal warm-up: small random op on GPU:0
+        with tf.device('/GPU:0'):
+            a = tf.random.normal([256, 256])
+            b = tf.random.normal([256, 256])
+            _ = tf.linalg.matmul(a, b)
+            if jit_intensive:
+                # A bit heavier pass to JIT more kernels once
+                x = tf.random.normal([1024, 1024])
+                y = tf.random.normal([1024, 1024])
+                _ = tf.linalg.matmul(x, y)
+        elapsed = time.time() - start
+        msg = f"GPU warm-up complete in {elapsed:.2f}s"
+        logger.info(msg)
+        return True, msg
+    except Exception as e:
+        logger.warning(f"GPU warm-up skipped: {e}")
+        return False, f"GPU warm-up skipped: {e}"

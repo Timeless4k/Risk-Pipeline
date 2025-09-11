@@ -411,6 +411,19 @@ class WalkForwardValidator:
                 # Convert predictions to numpy arrays
                 y_true = np.asarray(y_test_clean)
                 y_pred = np.asarray(y_pred)
+
+                # Align prediction scale with target if pipeline uses log-vol target
+                # Specifically handle models that output volatility in decimal units (e.g., GARCH)
+                try:
+                    target_is_log = bool(getattr(getattr(self, 'pipeline_config', None), 'training', None) and getattr(self.pipeline_config.training, 'use_log_vol_target', False))
+                except Exception:
+                    target_is_log = False
+                if target_is_log and str(model_type).lower() == 'garch':
+                    eps_eval = 1e-8
+                    try:
+                        y_pred = np.log(np.maximum(y_pred.astype(float), 0.0) + eps_eval)
+                    except Exception:
+                        pass
                 
                 # Log shapes and sample values for debugging
                 logger.debug(f"Shape validation: y_true={y_true.shape}, y_pred={y_pred.shape}")

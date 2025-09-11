@@ -19,27 +19,15 @@ try:
 except Exception:  # pragma: no cover - environment-specific
     tf = None  # type: ignore
     TF_AVAILABLE = False
+from risk_pipeline.utils.tensorflow_utils import (
+    configure_tensorflow_memory,
+    get_optimal_device,
+)
 from sklearn.preprocessing import StandardScaler
 
-# FIXED: Global TensorFlow device configuration to prevent automatic GPU usage
+# Prefer GPU when available; allow TF to place ops softly
 if TF_AVAILABLE:
-    tf.config.set_soft_device_placement(False)
-    try:
-        # Hide all GPUs to avoid accidental GPU ops during evaluation/inference
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            tf.config.set_visible_devices([], 'GPU')
-    except Exception:
-        pass
-    try:
-        cpus = tf.config.list_physical_devices('CPU')
-        if cpus:
-            tf.config.set_logical_device_configuration(
-                cpus[0],
-                [tf.config.LogicalDeviceConfiguration()]
-            )
-    except Exception:
-        pass
+    tf.config.set_soft_device_placement(True)
 
 # QUICK CPU OPTIMIZATION: Use all physical cores for maximum performance (if TF available)
 import psutil
@@ -178,9 +166,10 @@ class LSTMModel(BaseModel):
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        # FIXED: Force CPU mode to avoid device conflicts
-        device = '/CPU:0'
-        self.logger.info(f"Using {device} for LSTM to avoid device conflicts")
+        # Choose optimal device (prefer GPU, fallback to CPU)
+        device = get_optimal_device(prefer_gpu=True)
+        _configured = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=(device == '/CPU:0'))
+        self.logger.info(f"Using device for LSTM build: {device}")
         
         try:
             with tf.device(device):
@@ -340,8 +329,8 @@ class LSTMModel(BaseModel):
                     X_train = self.scaler.fit_transform(X_train)
                     X_val = self.scaler.transform(X_val)
             
-            # FIXED: Train on CPU to match model device
-            with tf.device('/CPU:0'):
+            # Train on chosen device; TF will soft-place as needed
+            with tf.device(device if 'device' in locals() and device else '/CPU:0'):
                 # Training callbacks
                 callbacks = [
                     tf.keras.callbacks.EarlyStopping(
@@ -465,8 +454,8 @@ class LSTMModel(BaseModel):
                 except Exception:
                     pass
 
-            # FIXED: Force CPU device context during prediction to match training
-            with tf.device('/CPU:0'):
+            # Predict on chosen device; TF will soft-place as needed
+            with tf.device('/GPU:0') if tf.config.list_physical_devices('GPU') else tf.device('/CPU:0'):
                 # Make predictions
                 predictions = self.model.predict(X_reshaped, verbose=0)
             

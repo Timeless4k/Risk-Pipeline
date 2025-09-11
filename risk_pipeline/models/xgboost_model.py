@@ -7,12 +7,6 @@ from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
 import os
-# Enforce CPU-only XGBoost even if a GPU-enabled wheel is installed
-os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
-os.environ.setdefault('NVIDIA_VISIBLE_DEVICES', 'none')
-os.environ.setdefault('XGBOOST_ENABLE_GPU', '0')
-os.environ.setdefault('XGBOOST_USE_CUDA', '0')
-os.environ.setdefault('XGBOOST_EXECUTOR_THREADS', '1')
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from imblearn.combine import SMOTETomek
@@ -40,6 +34,17 @@ class XGBoostModel(BaseModel):
         self.use_log_vol_target = bool(kwargs.get('use_log_vol_target', False)) if task == 'regression' else False
         self.log_target_epsilon = float(kwargs.get('log_target_epsilon', 1e-6)) if task == 'regression' else 1e-6
         
+        # Detect GPU availability (via TensorFlow if present) and honor explicit opt-in only
+        gpu_available = False
+        try:
+            import tensorflow as tf  # type: ignore
+            gpu_available = len(tf.config.list_physical_devices('GPU')) > 0
+        except Exception:
+            gpu_available = False
+
+        # Prefer GPU by default; user can disable via allow_gpu=False
+        self.allow_gpu: bool = bool(kwargs.get('allow_gpu', True))
+
         # Tuned default parameters (apply unless explicitly overridden)
         self.params = {
             'n_estimators': kwargs.get('n_estimators', 800),
@@ -56,27 +61,27 @@ class XGBoostModel(BaseModel):
             'colsample_bytree': kwargs.get('colsample_bytree', 0.8),
             'min_child_weight': kwargs.get('min_child_weight', 5),
             'gamma': kwargs.get('gamma', 0.2),
-            # Force CPU to avoid accidental CUDA selection
-            'device': 'cpu',
-            'predictor': 'cpu_predictor',
+            # Device defaults (force CPU unless explicitly allowed and available)
+            'device': ('cuda' if (self.allow_gpu and gpu_available) else 'cpu'),
+            'predictor': ('gpu_predictor' if (self.allow_gpu and gpu_available) else 'cpu_predictor'),
         }
         
         # Update with any additional parameters
         self.params.update(kwargs)
         
-        # Force reliable CPU defaults; avoid flaky GPU selection in mixed environments
-        self.params.setdefault('tree_method', 'hist')
-        # Ensure CPU device settings take precedence
-        self.params['device'] = 'cpu'
-        self.params['predictor'] = 'cpu_predictor'
-        # Remove any GPU-specific parameters that may have been passed in
-        self.params.pop('gpu_id', None)
-        self.params.pop('gpu_id', None)
-        # Also guard against any booster device hints
-        if 'device' in self.params and self.params['device'] != 'cpu':
+        # Final guard: if GPU was requested but not available, force CPU
+        if self.params.get('device') == 'cuda' and not (self.allow_gpu and gpu_available):
+            self.logger.warning("GPU requested for XGBoost but no CUDA device detected. Forcing CPU.")
             self.params['device'] = 'cpu'
-        if 'tree_method' in self.params and str(self.params['tree_method']).startswith('gpu'):
+            self.params['predictor'] = 'cpu_predictor'
+        
+        # Choose tree method based on device (force CPU unless permitted)
+        if self.params.get('device') == 'cuda' and (self.allow_gpu and gpu_available):
+            self.params.setdefault('tree_method', 'gpu_hist')
+        else:
             self.params['tree_method'] = 'hist'
+        # Clean conflicting params
+        self.params.pop('gpu_id', None)
 
         # Create model
         if task == 'classification':
@@ -85,10 +90,10 @@ class XGBoostModel(BaseModel):
             self.model = xgb.XGBRegressor(**self.params)
         
         self.logger.info(f"XGBoost model initialized for {task} task with params: {self.params}")
-        # Final safety: enforce CPU on constructed model
+        # Final safety: enforce CPU on constructed model when GPU not explicitly allowed
         try:
-            if hasattr(self.model, 'set_params'):
-                self.model.set_params(tree_method='hist', predictor='cpu_predictor')
+            if hasattr(self.model, 'set_params') and not (self.allow_gpu and gpu_available):
+                self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
         except Exception:
             pass
     
@@ -99,12 +104,15 @@ class XGBoostModel(BaseModel):
         # QUICK CPU OPTIMIZATION: Use parallel cores for maximum performance
         cpu_count =  max(1, (__import__('psutil').cpu_count(logical=False) or 4))
         
+        # Inherit device choice from init; force CPU unless explicitly allowed and available
+        use_cuda = (str(self.params.get('device')) == 'cuda') and self.allow_gpu
+
         # Tuned defaults for stability and generalization
         xgb_params = {
             'n_jobs': cpu_count,
-            'tree_method': 'hist',
-            'device': 'cpu',
-            'predictor': 'cpu_predictor',
+            'tree_method': 'gpu_hist' if use_cuda else 'hist',
+            'device': 'cuda' if use_cuda else 'cpu',
+            'predictor': 'gpu_predictor' if use_cuda else 'cpu_predictor',
             'n_estimators': self.params.get('n_estimators', 800),
             'max_depth': self.params.get('max_depth', 6),
             'learning_rate': self.params.get('learning_rate', 0.05),
@@ -124,12 +132,12 @@ class XGBoostModel(BaseModel):
             self.model = xgb.XGBRegressor(**xgb_params)
         try:
             if hasattr(self.model, 'set_params'):
-                self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
+                self.model.set_params(tree_method=xgb_params['tree_method'], predictor=xgb_params['predictor'], device=xgb_params['device'])
         except Exception:
             pass
         
         self.logger.info(f"🚀 XGBoost model built with {cpu_count}-core optimization!")
-        self.logger.info(f"⚡ Using tree_method='hist' for maximum speed")
+        self.logger.info(f"⚡ Device: {xgb_params['device']} | tree_method: {xgb_params['tree_method']} | predictor: {xgb_params['predictor']}")
         self.logger.info(f"💪 Parallel processing: {cpu_count} cores")
         self.logger.info(f"Final XGB params: {xgb_params}")
         
@@ -197,15 +205,24 @@ class XGBoostModel(BaseModel):
                 except Exception:
                     pass
 
-            # Force CPU once more right before fit (defensive against upstream overrides)
+            # Ensure device params are consistent at fit time; force CPU unless explicitly allowed
             try:
-                if hasattr(self.model, 'set_params'):
+                if hasattr(self.model, 'set_params') and not self.allow_gpu:
                     self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
             except Exception:
                 pass
 
-            # Fit
-            self.model.fit(X_scaled, y)
+            # Fit with current preference; fallback to CPU on any device error
+            try:
+                self.model.fit(X_scaled, y)
+            except Exception as gpu_err:
+                try:
+                    self.logger.warning(f"XGBoost training failed on selected device: {gpu_err}. Falling back to CPU.")
+                    if hasattr(self.model, 'set_params'):
+                        self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
+                    self.model.fit(X_scaled, y)
+                except Exception:
+                    raise
             
             self.is_trained = True
             self.logger.info("XGBoost training completed")
