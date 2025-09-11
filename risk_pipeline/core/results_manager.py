@@ -647,12 +647,22 @@ class ResultsManager:
                 tf_model_dir = os.path.join(model_dir, 'tf_model')
                 os.makedirs(tf_model_dir, exist_ok=True)
                 # Use SavedModel format (directory) for maximum compatibility
-                keras_model.save(tf_model_dir)
+                # Ensure we save on CPU to avoid GPU kernels (Cast, etc.) during serialization
+                try:
+                    with tf.device('/CPU:0'):
+                        keras_model.save(tf_model_dir)
+                except Exception:
+                    # Retry once without explicit device
+                    keras_model.save(tf_model_dir)
                 # Also save weights in H5 for convenience
                 try:
-                    keras_model.save_weights(os.path.join(model_dir, 'weights.h5'))
+                    with tf.device('/CPU:0'):
+                        keras_model.save_weights(os.path.join(model_dir, 'weights.h5'))
                 except Exception:
-                    pass
+                    try:
+                        keras_model.save_weights(os.path.join(model_dir, 'weights.h5'))
+                    except Exception:
+                        pass
                 # Save a lightweight manifest with metadata
                 manifest = {
                     'backend': 'tensorflow.keras',

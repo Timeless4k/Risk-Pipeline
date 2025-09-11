@@ -478,7 +478,17 @@ class WalkForwardValidator:
                     f1 = float(f1_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
                     prec = float(precision_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
                     rec = float(recall_score(y_true_arr, y_pred_arr, average='weighted', zero_division=0))
-                    bacc = float(balanced_accuracy_score(y_true_arr, y_pred_arr))
+                    # Robust balanced accuracy: guard against undefined cases
+                    try:
+                        bacc = float(balanced_accuracy_score(y_true_arr, y_pred_arr))
+                        if not np.isfinite(bacc):
+                            raise ValueError("non-finite balanced accuracy")
+                    except Exception:
+                        try:
+                            # Fallback: macro recall as proxy when classes missing
+                            bacc = float(recall_score(y_true_arr, y_pred_arr, average='macro', zero_division=0))
+                        except Exception:
+                            bacc = float('nan')
 
                     # ROC-AUC (if binary classification)
                     roc_auc = np.nan

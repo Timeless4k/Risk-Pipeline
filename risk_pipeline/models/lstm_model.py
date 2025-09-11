@@ -172,6 +172,7 @@ class LSTMModel(BaseModel):
                 _mp.set_global_policy('float32')
             except Exception:
                 pass
+        self.device = device
         self.logger.info(f"Using device for LSTM build: {device}")
         
         try:
@@ -251,7 +252,6 @@ class LSTMModel(BaseModel):
                     from risk_pipeline.utils.tensorflow_utils import force_cpu_mode
                     self.logger.info("Attempting CPU fallback for LSTM build after CUDA error")
                     force_cpu_mode()
-                    import tensorflow as tf
                     with tf.device('/CPU:0'):
                         inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))
                         x = tf.keras.layers.BatchNormalization()(inputs)
@@ -403,7 +403,7 @@ class LSTMModel(BaseModel):
                     X_val = self.scaler.transform(X_val)
             
             # Train on chosen device; TF will soft-place as needed
-            with tf.device(device if 'device' in locals() and device else '/CPU:0'):
+            with tf.device(getattr(self, 'device', '/CPU:0') or '/CPU:0'):
                 # Training callbacks
                 callbacks = [
                     tf.keras.callbacks.EarlyStopping(
