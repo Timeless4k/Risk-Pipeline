@@ -70,15 +70,26 @@ class TimeMixingBlock(tf.keras.layers.Layer):
         self.time_dim = time_dim
         self.patch_sizes = patch_sizes
         self.hidden_dim = hidden_dim or time_dim
-        self.patch_processors = {}
+        # Use dedicated sublayers so Keras tracks variables properly
+        class PatchProcessor(tf.keras.layers.Layer):
+            def __init__(self, output_dim: int, dropout_rate: float, **kw):
+                super().__init__(**kw)
+                self.layer_norm = tf.keras.layers.LayerNormalization(axis=-1)
+                self.dense1 = tf.keras.layers.Dense(output_dim, activation='relu')
+                self.dropout = tf.keras.layers.Dropout(dropout_rate)
+                self.dense2 = tf.keras.layers.Dense(output_dim)
+
+            def call(self, x, training=None):
+                y = self.layer_norm(x)
+                y = self.dense1(y)
+                y = self.dropout(y, training=training)
+                y = self.dense2(y)
+                return x + y
+
+        self.patch_processors: Dict[int, tf.keras.layers.Layer] = {}
         for patch_size in patch_sizes:
-            compressed_dim = max(1, time_dim // patch_size)
-            self.patch_processors[patch_size] = {
-                'layer_norm': tf.keras.layers.LayerNormalization(),
-                'dense1': tf.keras.layers.Dense(compressed_dim, activation='relu'),
-                'dropout': tf.keras.layers.Dropout(dropout),
-                'dense2': tf.keras.layers.Dense(compressed_dim)
-            }
+            compressed_dim = max(1, time_dim // max(1, patch_size))
+            self.patch_processors[patch_size] = PatchProcessor(output_dim=compressed_dim, dropout_rate=dropout, name=f"patch_proc_{patch_size}")
         self.fusion_dense = tf.keras.layers.Dense(time_dim)
 
     def _create_causal_mask(self, seq_len: Union[int, tf.Tensor]):
@@ -116,11 +127,7 @@ class TimeMixingBlock(tf.keras.layers.Layer):
             mixed_patch = self._apply_causal_mixing(patch_input, scale_mask)
 
             processor = self.patch_processors[patch_size]
-            x = processor['layer_norm'](mixed_patch)
-            x = processor['dense1'](x)
-            x = processor['dropout'](x, training=training)
-            x = processor['dense2'](x)
-            processed_patch = mixed_patch + x
+            processed_patch = processor(mixed_patch, training=training)
 
             if patch_size > 1:
                 upsampled = tf.repeat(processed_patch, patch_size, axis=1)

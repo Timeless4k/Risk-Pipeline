@@ -9,8 +9,10 @@ import pandas as pd
 import os
 # Enforce CPU-only XGBoost even if a GPU-enabled wheel is installed
 os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
+os.environ.setdefault('NVIDIA_VISIBLE_DEVICES', 'none')
 os.environ.setdefault('XGBOOST_ENABLE_GPU', '0')
 os.environ.setdefault('XGBOOST_USE_CUDA', '0')
+os.environ.setdefault('XGBOOST_EXECUTOR_THREADS', '1')
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from imblearn.combine import SMOTETomek
@@ -83,6 +85,12 @@ class XGBoostModel(BaseModel):
             self.model = xgb.XGBRegressor(**self.params)
         
         self.logger.info(f"XGBoost model initialized for {task} task with params: {self.params}")
+        # Final safety: enforce CPU on constructed model
+        try:
+            if hasattr(self.model, 'set_params'):
+                self.model.set_params(tree_method='hist', predictor='cpu_predictor')
+        except Exception:
+            pass
     
     def build_model(self, input_shape: Tuple[int, ...]) -> 'XGBoostModel':
         """Build XGBoost model with optimized parameters."""
@@ -114,6 +122,11 @@ class XGBoostModel(BaseModel):
             self.model = xgb.XGBClassifier(**xgb_params)
         else:
             self.model = xgb.XGBRegressor(**xgb_params)
+        try:
+            if hasattr(self.model, 'set_params'):
+                self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
+        except Exception:
+            pass
         
         self.logger.info(f"🚀 XGBoost model built with {cpu_count}-core optimization!")
         self.logger.info(f"⚡ Using tree_method='hist' for maximum speed")
@@ -183,6 +196,13 @@ class XGBoostModel(BaseModel):
                         X_scaled, y = self._apply_smote_tomek(X_scaled, np.asarray(y).ravel())
                 except Exception:
                     pass
+
+            # Force CPU once more right before fit (defensive against upstream overrides)
+            try:
+                if hasattr(self.model, 'set_params'):
+                    self.model.set_params(tree_method='hist', predictor='cpu_predictor', device='cpu')
+            except Exception:
+                pass
 
             # Fit
             self.model.fit(X_scaled, y)
