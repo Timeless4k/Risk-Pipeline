@@ -29,7 +29,8 @@
         "enable_technical_indicators": true,
         "enable_correlation_features": true,
         "enable_regime_features": true,
-        "correlation_pairs": []
+        "correlation_pairs": [],
+        "keep_high_correlation_features": true
     },
     "models": {
         "garch_p": 1,

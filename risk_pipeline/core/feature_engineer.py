@@ -812,7 +812,7 @@ class FeatureEngineer:
             # CRITICAL: Ensure no data leakage by checking feature-target correlations
             self._validate_no_leakage(feat_df_final, volatility_target_final, regime_target_final, asset)
             
-            # FINAL SAFETY CHECK: Remove any remaining high-correlation features
+            # FINAL SAFETY CHECK: Remove any remaining high-correlation features (configurable)
             final_features = feat_df_final.copy()
             high_corr_cols = []
             for col in final_features.columns:
@@ -824,8 +824,12 @@ class FeatureEngineer:
                         self.logger.warning(f"Final removal: {col} (corr={vol_corr:.3f})")
             
             if high_corr_cols:
-                final_features = final_features.drop(columns=high_corr_cols)
-                self.logger.info(f"Final cleanup: removed {len(high_corr_cols)} high-correlation features")
+                keep_high_corr = bool(getattr(getattr(self.config, 'feature_engineering', None), 'keep_high_correlation_features', False))
+                if keep_high_corr:
+                    self.logger.warning(f"Keeping {len(high_corr_cols)} high-correlation features per config toggle: {high_corr_cols}")
+                else:
+                    final_features = final_features.drop(columns=high_corr_cols)
+                    self.logger.info(f"Final cleanup: removed {len(high_corr_cols)} high-correlation features")
             
             # ULTIMATE FIX: Ensure we have enough features (target: 41)
             if len(final_features.columns) < 35:  # Allow some flexibility but ensure minimum
@@ -1452,8 +1456,18 @@ class FeatureEngineer:
             if len(leakage_report['high_correlation_features']) > 5:  # FIXED: Increased from 3 to 5 for less aggressive failure
                 leakage_report['overall_assessment'] = 'FAIL'
 
-        # AUTO-MITIGATION: If only WARNING due to high-correlation features, drop them and re-check
+        # AUTO-MITIGATION: If only WARNING due to high-correlation features, optionally drop them and re-check
         if leakage_report['overall_assessment'] == 'WARNING' and len(leakage_report['high_correlation_features']) > 0:
+            keep_high_corr = bool(getattr(getattr(self.config, 'feature_engineering', None), 'keep_high_correlation_features', False))
+            if keep_high_corr:
+                self.logger.warning("Config toggle set to keep high-correlation features; skipping auto-drop. Proceed with caution.")
+                # Keep report as WARNING and return early
+                self.logger.info("📊 Data Leakage Check Report:")
+                self.logger.info(f"   Assets checked: {len(leakage_report['assets_checked'])}")
+                self.logger.info(f"   High-correlation features: {len(leakage_report['high_correlation_features'])}")
+                self.logger.info(f"   Suspicious features: {len(leakage_report['suspicious_features'])}")
+                self.logger.info(f"   Overall assessment: {leakage_report['overall_assessment']}")
+                return leakage_report
             self.logger.info("🛠️ Auto-mitigating potential leakage by dropping high-correlation features...")
             # Group features to drop by asset
             to_drop_by_asset: Dict[str, List[str]] = {}

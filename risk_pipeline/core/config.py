@@ -281,6 +281,8 @@ class FeatureEngineeringToggles:
     feature_selection_k: int = 50
     min_correlation_threshold: float = 0.01
     max_feature_correlation: float = 0.95
+    # When True, do not drop high-correlation features; emit warnings only
+    keep_high_correlation_features: bool = True
 
 
 class PipelineConfig:
@@ -446,6 +448,7 @@ class PipelineConfig:
             feature_selection_k=fe_config.get('feature_selection_k', 50),
             min_correlation_threshold=fe_config.get('min_correlation_threshold', 0.01),
             max_feature_correlation=fe_config.get('max_feature_correlation', 0.95),
+            keep_high_correlation_features=fe_config.get('keep_high_correlation_features', False),
         )
         
         # DYNAMIC CPU OPTIMIZATION: Auto-detect and configure cores

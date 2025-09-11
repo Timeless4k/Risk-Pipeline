@@ -70,14 +70,22 @@ class TimeMixingBlock(tf.keras.layers.Layer):
         self.time_dim = time_dim
         self.patch_sizes = patch_sizes
         self.hidden_dim = hidden_dim or time_dim
-        # Use dedicated sublayers so Keras tracks variables properly
+        self.feature_dim: Optional[int] = None
+        self.dropout_rate = float(dropout)
+        # Define nested class
         class PatchProcessor(tf.keras.layers.Layer):
-            def __init__(self, output_dim: int, dropout_rate: float, **kw):
+            def __init__(self, input_dim: int, output_dim: int, dropout_rate: float, **kw):
                 super().__init__(**kw)
+                self.input_dim = int(input_dim)
                 self.layer_norm = tf.keras.layers.LayerNormalization(axis=-1)
                 self.dense1 = tf.keras.layers.Dense(output_dim, activation='relu')
                 self.dropout = tf.keras.layers.Dropout(dropout_rate)
                 self.dense2 = tf.keras.layers.Dense(output_dim)
+
+            def build(self, input_shape):
+                # Ensure LayerNormalization variables have static last-dimension shapes
+                self.layer_norm.build((None, None, self.input_dim))
+                super().build(input_shape)
 
             def call(self, x, training=None):
                 y = self.layer_norm(x)
@@ -86,11 +94,29 @@ class TimeMixingBlock(tf.keras.layers.Layer):
                 y = self.dense2(y)
                 return x + y
 
+        self._PatchProcessor = PatchProcessor
         self.patch_processors: Dict[int, tf.keras.layers.Layer] = {}
-        for patch_size in patch_sizes:
-            compressed_dim = max(1, time_dim // max(1, patch_size))
-            self.patch_processors[patch_size] = PatchProcessor(output_dim=compressed_dim, dropout_rate=dropout, name=f"patch_proc_{patch_size}")
         self.fusion_dense = tf.keras.layers.Dense(time_dim)
+
+    def build(self, input_shape):
+        # input_shape: (batch, T, F)
+        self.feature_dim = int(input_shape[-1]) if input_shape[-1] is not None else None
+        if self.feature_dim is None:
+            raise ValueError("TimeMixingBlock requires a known feature dimension at build time")
+        # Instantiate patch processors now that feature_dim is known
+        for patch_size in self.patch_sizes:
+            compressed_dim = max(1, self.time_dim // max(1, patch_size))
+            self.patch_processors[patch_size] = self._PatchProcessor(
+                input_dim=self.feature_dim,
+                output_dim=compressed_dim,
+                dropout_rate=self.dropout_rate,
+                name=f"patch_proc_{patch_size}"
+            )
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        # Output keeps the same temporal length and maps features to time_dim via fusion_dense
+        return (input_shape[0], input_shape[1], self.time_dim)
 
     def _create_causal_mask(self, seq_len: Union[int, tf.Tensor]):
         if isinstance(seq_len, int):
@@ -117,7 +143,13 @@ class TimeMixingBlock(tf.keras.layers.Layer):
                 pad_len = (patch_size - seq_len % patch_size) % patch_size
                 padded = tf.pad(inputs, [[0, 0], [0, pad_len], [0, 0]])
                 new_seq_len = tf.shape(padded)[1]
-                patches = tf.reshape(padded, [batch_size, new_seq_len // patch_size, patch_size, -1])
+                # Avoid ambiguous -1 which can yield None static dims under tracing
+                if self.feature_dim is not None:
+                    patches = tf.reshape(padded, [batch_size, new_seq_len // patch_size, patch_size, self.feature_dim])
+                else:
+                    # Fallback if feature_dim is dynamic
+                    f_dyn = tf.shape(padded)[-1]
+                    patches = tf.reshape(padded, [batch_size, new_seq_len // patch_size, patch_size, f_dyn])
                 patch_input = tf.reduce_mean(patches, axis=2)
             else:
                 patch_input = inputs
@@ -184,12 +216,14 @@ class StockMixerNet(tf.keras.Model):
     def call(self, inputs, training=None):
         # inputs: [B, S, T, I]
         batch_size = tf.shape(inputs)[0]
-        reshaped_for_ind = tf.reshape(inputs, [-1, self.n_indicators])
+        total_tokens = batch_size * self.n_stocks * self.sequence_length
+        reshaped_for_ind = tf.reshape(inputs, [total_tokens, self.n_indicators])
         mixed_ind = self.indicator_mixing(reshaped_for_ind, training=training)
         mixed_ind = tf.reshape(mixed_ind, [batch_size, self.n_stocks, self.sequence_length, self.n_indicators])
 
         x = tf.transpose(mixed_ind, [0, 1, 3, 2])
-        x = tf.reshape(x, [-1, self.sequence_length, 1])
+        time_tokens = batch_size * self.n_stocks * self.n_indicators
+        x = tf.reshape(x, [time_tokens, self.sequence_length, 1])
         mixed_time = self.time_mixing(x, training=training)
         mixed_time = tf.reshape(mixed_time, [batch_size, self.n_stocks, self.n_indicators, self.sequence_length])
         mixed_time = tf.transpose(mixed_time, [0, 1, 2, 3])
