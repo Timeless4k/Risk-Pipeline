@@ -20,42 +20,46 @@ os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
 os.environ.setdefault('ABSL_LOGLEVEL', '3')
 
+# Logger early (needed for guarded imports below)
+logger = logging.getLogger(__name__)
+
 # Global TensorFlow device configuration (GPU usage is configurable via env)
-try:
-    import tensorflow as tf
-    force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
-    if force_cpu:
-        # Force CPU-only mode if explicitly requested
-        tf.config.set_soft_device_placement(False)
-        try:
-            gpus = tf.config.list_physical_devices('GPU')
-            if gpus:
-                tf.config.set_visible_devices([], 'GPU')
-        except Exception:
-            pass
-        try:
-            cpus = tf.config.list_physical_devices('CPU')
-            if cpus:
-                tf.config.set_logical_device_configuration(
-                    cpus[0],
-                    [tf.config.LogicalDeviceConfiguration()]
-                )
-        except Exception:
-            pass
-    else:
-        # Prefer GPU if available; allow soft placement
-        try:
-            tf.config.set_soft_device_placement(True)
-            gpus = tf.config.list_physical_devices('GPU')
-            for gpu in gpus:
-                try:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-except ImportError:
-    pass
+if os.environ.get('RISKPIPELINE_DISABLE_TF', '').lower() not in ('1', 'true', 'yes'):
+    try:
+        import tensorflow as tf
+        force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
+        if force_cpu:
+            # Force CPU-only mode if explicitly requested
+            tf.config.set_soft_device_placement(False)
+            try:
+                gpus = tf.config.list_physical_devices('GPU')
+                if gpus:
+                    tf.config.set_visible_devices([], 'GPU')
+            except Exception:
+                pass
+            try:
+                cpus = tf.config.list_physical_devices('CPU')
+                if cpus:
+                    tf.config.set_logical_device_configuration(
+                        cpus[0],
+                        [tf.config.LogicalDeviceConfiguration()]
+                    )
+            except Exception:
+                pass
+        else:
+            # Prefer GPU if available; allow soft placement
+            try:
+                tf.config.set_soft_device_placement(True)
+                gpus = tf.config.list_physical_devices('GPU')
+                for gpu in gpus:
+                    try:
+                        tf.config.experimental.set_memory_growth(gpu, True)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception as _tf_err:
+        logger.warning(f"TensorFlow initialization skipped due to error: {_tf_err}")
 
 # Import core components
 from .core.config import PipelineConfig
@@ -69,19 +73,34 @@ from .models.base_model import BaseModel
 from .models.model_factory import ModelFactory
 
 # Import models conditionally to handle missing dependencies
+# Safe imports (no TF required)
 try:
     from .models.arima_model import ARIMAModel
+    ARIMA_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"ARIMA not available: {e}")
+    ARIMA_AVAILABLE = False
+
+try:
     from .models.xgboost_model import XGBoostModel
+    XGBOOST_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"XGBoost not available: {e}")
+    XGBOOST_AVAILABLE = False
+
+# TF-dependent models
+try:
     from .models.stockmixer_model import StockMixerModel
-    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"Some models not available: {e}")
-    ARIMA_AVAILABLE = XGBOOST_AVAILABLE = STOCKMIXER_AVAILABLE = False
+    STOCKMIXER_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"StockMixer not available: {e}")
+    STOCKMIXER_AVAILABLE = False
 
 try:
     from .models.lstm_model import LSTMModel
     LSTM_AVAILABLE = True
-except ImportError:
+except Exception as e:
+    logger.warning(f"LSTM not available: {e}")
     LSTM_AVAILABLE = False
 
 # Import interpretability components
@@ -96,7 +115,6 @@ from .utils.model_persistence import ModelPersistence
 from .visualization.volatility_visualizer import VolatilityVisualizer
 from .visualization.shap_visualizer import SHAPVisualizer
 
-logger = logging.getLogger(__name__)
 
 # 🚀 24-CORE OPTIMIZATION: Global CPU optimization for all components
 import psutil
