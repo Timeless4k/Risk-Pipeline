@@ -6,6 +6,11 @@ import logging
 from typing import Dict, List, Tuple, Optional, Union, Any
 import numpy as np
 import pandas as pd
+import os
+# Enforce CPU-only XGBoost even if a GPU-enabled wheel is installed
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '')
+os.environ.setdefault('XGBOOST_ENABLE_GPU', '0')
+os.environ.setdefault('XGBOOST_USE_CUDA', '0')
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 from imblearn.combine import SMOTETomek

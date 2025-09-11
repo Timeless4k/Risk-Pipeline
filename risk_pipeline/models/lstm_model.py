@@ -140,7 +140,8 @@ class LSTMModel(BaseModel):
         self.use_multi_scale = kwargs.get('use_multi_scale', True)
         self.scales = kwargs.get('scales', [1, 2, 4])
         self.multi_scale_units = kwargs.get('multi_scale_units', max(self.units[0], 64))
-        self.num_classes = kwargs.get('num_classes', 2)
+        # Ensure stable classification with fixed class count across folds
+        self.num_classes = kwargs.get('num_classes', (3 if self.task == 'classification' else 1))
         # Advanced training options
         self.use_class_weights = kwargs.get('use_class_weights', True)
         self.gradient_clip_norm = kwargs.get('gradient_clip_norm', 1.0)
