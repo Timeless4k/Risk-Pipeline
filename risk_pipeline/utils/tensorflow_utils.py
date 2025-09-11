@@ -130,11 +130,17 @@ def configure_tensorflow_memory(gpu_memory_growth: bool = True,
                     )
                     logger.info(f"Set memory limit to {gpu_memory_limit}MB for {gpu}")
             
-            # Test GPU with a simple operation
+            # Test GPU with a set of ops that commonly trigger driver issues
             with tf.device('/GPU:0'):
+                # Simple constant + reduction
                 test_tensor = tf.constant([1.0, 2.0, 3.0])
-                test_result = tf.reduce_sum(test_tensor)
-                logger.info(f"GPU test successful: {test_result.numpy()}")
+                test_result = tf.reduce_sum(test_tensor).numpy()
+                # Small matmul
+                a = tf.random.uniform((32, 32), dtype=tf.float32)
+                _ = tf.matmul(a, tf.transpose(a)).numpy()
+                # Cast kernel (often triggers CUDA handle issues with drivers)
+                _ = tf.cast(a, tf.float16).numpy()
+                logger.info(f"GPU test successful: {test_result}")
             
             logger.info(f"GPU configuration successful, using {len(gpu_devices)} GPU(s)")
             return '/GPU:0'

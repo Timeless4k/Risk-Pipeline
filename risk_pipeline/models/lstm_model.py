@@ -240,8 +240,78 @@ class LSTMModel(BaseModel):
                     self.model.compile(optimizer=opt, loss=loss, metrics=['mae', 'mse'])
                     
         except Exception as build_error:
-            self.logger.error(f"LSTM build failed: {build_error}")
-            raise RuntimeError(f"Failed to build LSTM model: {build_error}")
+            # If GPU path failed with CUDA-related error, auto-fallback to CPU and rebuild once
+            err_msg = str(build_error)
+            self.logger.error(f"LSTM build failed: {err_msg}")
+            should_fallback = (device != '/CPU:0') and any(k in err_msg for k in (
+                'CUDA_ERROR', 'cuLaunchKernel', 'CUBLAS_STATUS', 'CUDNN_STATUS', 'Blas', 'cublas', 'cudnn', 'XLA_GPU'
+            ))
+            if should_fallback:
+                try:
+                    from risk_pipeline.utils.tensorflow_utils import force_cpu_mode
+                    self.logger.info("Attempting CPU fallback for LSTM build after CUDA error")
+                    force_cpu_mode()
+                    import tensorflow as tf
+                    with tf.device('/CPU:0'):
+                        inputs = tf.keras.Input(shape=(self.input_shape[1], self.input_shape[2]))
+                        x = tf.keras.layers.BatchNormalization()(inputs)
+                        x = tf.keras.layers.Dropout(self.dropout * 0.5)(x)
+
+                        time_steps = self.input_shape[1]
+                        enable_multi_scale = bool(self.use_multi_scale and time_steps is not None and time_steps > 1)
+
+                        if enable_multi_scale:
+                            ms_block = MultiScaleLSTMBlock(self.multi_scale_units, self.scales, self.dropout, self.recurrent_dropout, name='multi_scale')
+                            ms_feat = ms_block(x)
+                            ms_feat = tf.keras.layers.Dense(self.input_shape[2], activation='tanh', name='ms_dense')(ms_feat)
+                            ms_feat = tf.keras.layers.Reshape((1, self.input_shape[2]))(ms_feat)
+                            ms_feat = tf.keras.layers.Lambda(lambda t: tf.tile(t, [1, tf.shape(x)[1], 1]))(ms_feat)
+                            x = tf.keras.layers.Add()([x, ms_feat])
+
+                        for i, u in enumerate(self.units):
+                            is_last = (i == len(self.units) - 1)
+                            return_sequences = (not is_last) or bool(self.use_attention)
+                            lstm = tf.keras.layers.LSTM(
+                                u,
+                                return_sequences=return_sequences,
+                                dropout=self.dropout,
+                                recurrent_dropout=self.recurrent_dropout,
+                                kernel_regularizer=tf.keras.regularizers.l2(1e-4),
+                                name=f'lstm_{i}'
+                            )
+                            if self.use_bidirectional:
+                                x = tf.keras.layers.Bidirectional(lstm, name=f'bilstm_{i}')(x)
+                            else:
+                                x = lstm(x)
+                            x = tf.keras.layers.BatchNormalization(name=f'bn_lstm_{i}')(x)
+                            x = tf.keras.layers.Dropout(self.dropout, name=f'dp_lstm_{i}')(x)
+
+                        if self.use_attention:
+                            last_dim = self.units[-1] * (2 if self.use_bidirectional else 1)
+                            attn = AttentionLayer(last_dim, name='attention')
+                            x, _ = attn(x)
+                        else:
+                            x = x if len(x.shape) == 2 else x[:, -1, :]
+
+                        if self.task == 'classification':
+                            outputs = tf.keras.layers.Dense(self.num_classes, activation='softmax', name='classification_output')(x)
+                        else:
+                            outputs = tf.keras.layers.Dense(1, activation='linear', name='regression_output')(x)
+
+                        self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+
+                        opt = tf.keras.optimizers.Adam(learning_rate=self.params.get('learning_rate', 0.001), clipnorm=self.gradient_clip_norm, epsilon=1e-7)
+                        if self.task == 'classification':
+                            loss = tf.keras.losses.CategoricalCrossentropy(label_smoothing=self.label_smoothing, from_logits=False)
+                            self.model.compile(optimizer=opt, loss=loss, metrics=['accuracy'])
+                        else:
+                            loss = tf.keras.losses.Huber(delta=1.0)
+                            self.model.compile(optimizer=opt, loss=loss, metrics=['mae', 'mse'])
+                    self.logger.info("✅ LSTM model rebuilt successfully on CPU after CUDA failure")
+                except Exception as cpu_error:
+                    raise RuntimeError(f"Failed to build LSTM model after CPU fallback: {cpu_error}")
+            else:
+                raise RuntimeError(f"Failed to build LSTM model: {err_msg}")
         
         self.logger.info(f"LSTM model built successfully with input shape: {self.input_shape}")
         return self
