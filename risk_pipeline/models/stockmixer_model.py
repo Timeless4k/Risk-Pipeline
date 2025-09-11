@@ -27,9 +27,7 @@ from risk_pipeline.utils.tensorflow_utils import configure_tensorflow_memory, ge
 # TensorFlow device/threading configuration (prefer GPU, allow soft placement)
 if TF_AVAILABLE:
     tf.config.set_soft_device_placement(True)
-    threads = psutil.cpu_count(logical=False) or 1
-    tf.config.threading.set_inter_op_parallelism_threads(threads)
-    tf.config.threading.set_intra_op_parallelism_threads(threads)
+    # Do not modify TensorFlow threading here; changing after TF context init can raise RuntimeError.
 
 from .base_model import BaseModel
 
@@ -294,6 +292,12 @@ class StockMixerModel(BaseModel):
 
         device = get_optimal_device(prefer_gpu=True)
         _configured = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=(device == '/CPU:0'))
+        if device == '/CPU:0':
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+            except Exception:
+                pass
         with tf.device(device):
             net = StockMixerNet(
                 n_stocks=self.n_stocks,
@@ -348,7 +352,15 @@ class StockMixerModel(BaseModel):
         X_train, X_val = X4[train_idx], X4[val_idx]
         y_train, y_val = y_arr[train_idx], y_arr[val_idx]
 
-        device = '/GPU:0' if tf.config.list_physical_devices('GPU') else '/CPU:0'
+        from risk_pipeline.utils.tensorflow_utils import get_optimal_device, configure_tensorflow_memory
+        device = get_optimal_device(prefer_gpu=True)
+        _ = configure_tensorflow_memory(force_cpu=(device == '/CPU:0'))
+        if device == '/CPU:0':
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+            except Exception:
+                pass
         with tf.device(device):
             history = self.model.fit(
                 X_train,

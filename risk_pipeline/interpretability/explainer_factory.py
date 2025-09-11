@@ -180,15 +180,17 @@ class ExplainerFactory:
                     logger.error(f"Failed to create XGBoost regression explainer: {e}")
                     raise
             elif model_type == 'garch':
-                # Provide SHAP support for GARCH via KernelExplainer over predict
+                # Provide SHAP support for GARCH via KernelExplainer over the wrapper's predict()
                 try:
                     def _predict_fn(data):
                         arr = np.asarray(data)
                         arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
-                        # Unwrap to underlying model if needed
-                        mdl = model.model if hasattr(model, 'model') else model
-                        preds = mdl.predict(arr2d)
-                        # Ensure 1D output for KernelExplainer expectations
+                        # Always use the wrapper's predict (do NOT use model.model which is a status string)
+                        try:
+                            preds = model.predict(arr2d)
+                        except TypeError:
+                            # Some wrappers may expect kwargs; fallback to steps inference
+                            preds = model.predict(arr2d)
                         preds = np.asarray(preds)
                         if preds.ndim > 1:
                             preds = preds.reshape(preds.shape[0], -1).mean(axis=1)
@@ -199,28 +201,6 @@ class ExplainerFactory:
                     explainer = shap.KernelExplainer(_predict_fn, bg2d)
                     self._explainers[f"garch_{task}"] = explainer
                     self._background_data[f"garch_{task}"] = bg2d
-                    return explainer
-                except Exception as e:
-                    logger.warning(f"GARCH KernelExplainer failed ({e}); using zero explainer")
-                    class _ZeroExplainer:
-                        def __init__(self):
-                            self.expected_value = 0.0
-                        def shap_values(self, data):
-                            arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                            arr2d = arr if arr.ndim == 2 else arr.reshape(arr.shape[0], -1)
-                            return np.zeros_like(arr2d)
-                    return _ZeroExplainer()
-            elif model_type == 'garch':
-                # GARCH: fall back to Kernel/Permutation style simple explainer on linearized features
-                try:
-                    X_bg = X.iloc[:min(200, len(X))] if hasattr(X, 'iloc') else X[:min(200, len(X))]
-                    def predict_wrapped(x):
-                        try:
-                            return np.asarray(model.predict(x)).reshape(-1)
-                        except Exception:
-                            return np.zeros((len(x),), dtype=float)
-                    explainer = shap.KernelExplainer(predict_wrapped, X_bg)
-                    explainer._explainer_tag = 'kernel_garch'
                     return explainer
                 except Exception as e:
                     logger.warning(f"GARCH KernelExplainer failed ({e}); using zero explainer")
@@ -764,28 +744,39 @@ class ARIMAExplainer:
             lower_vals: List[float]
             upper_vals: List[float]
 
+            # Forecast values with robust Mock handling
             try:
-                forecast_series = fm.forecast(steps=steps)
-                # Convert to list robustly
-                forecast_vals = (
-                    forecast_series.tolist()
-                    if hasattr(forecast_series, 'tolist') else list(forecast_series)
-                )
+                if hasattr(fm, 'forecast') and callable(getattr(fm, 'forecast')):
+                    forecast_series = fm.forecast(steps=steps)
+                    # Convert to 1D list robustly
+                    if hasattr(forecast_series, 'tolist'):
+                        forecast_vals = forecast_series.tolist()
+                    else:
+                        arr = np.asarray(forecast_series)
+                        if arr.ndim == 0:
+                            forecast_vals = [float(arr)] * steps
+                        elif arr.ndim == 1:
+                            forecast_vals = arr.astype(float).tolist()
+                        else:
+                            forecast_vals = arr.reshape(-1).astype(float).tolist()[:steps]
+                else:
+                    forecast_vals = [0.0] * steps
             except Exception:
-                # Safe fallback for mocks
                 forecast_vals = [0.0] * steps
 
+            # Confidence intervals with robust Mock handling
             try:
-                gf = fm.get_forecast(steps=steps)
-                conf = gf.conf_int() if hasattr(gf, 'conf_int') else None
+                if hasattr(fm, 'get_forecast') and callable(getattr(fm, 'get_forecast')):
+                    gf = fm.get_forecast(steps=steps)
+                    conf = gf.conf_int() if hasattr(gf, 'conf_int') else None
+                else:
+                    conf = None
                 if conf is not None:
-                    # Prefer DataFrame iloc if available
                     if hasattr(conf, 'iloc'):
-                        lower_vals = conf.iloc[:, 0].tolist()
-                        upper_vals = conf.iloc[:, 1].tolist()
+                        lower_vals = conf.iloc[:, 0].astype(float).tolist()
+                        upper_vals = conf.iloc[:, 1].astype(float).tolist()
                     else:
-                        # If conf is array-like shape (steps,2)
-                        arr = np.asarray(conf)
+                        arr = np.asarray(conf, dtype=float)
                         if arr.ndim == 2 and arr.shape[1] >= 2:
                             lower_vals = arr[:, 0].tolist()
                             upper_vals = arr[:, 1].tolist()
@@ -795,8 +786,8 @@ class ARIMAExplainer:
                     raise ValueError('conf_int not available')
             except Exception:
                 # Safe symmetric interval around forecast for mocks
-                lower_vals = [v - 1.0 for v in forecast_vals]
-                upper_vals = [v + 1.0 for v in forecast_vals]
+                lower_vals = [float(v) - 1.0 for v in forecast_vals]
+                upper_vals = [float(v) + 1.0 for v in forecast_vals]
 
             return {
                 'forecast': forecast_vals,

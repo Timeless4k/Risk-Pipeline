@@ -25,7 +25,10 @@ GPU notes:
 if 'TF_XLA_FLAGS' in os.environ:
     os.environ.pop('TF_XLA_FLAGS', None)
 
-# Always attempt a minimal GPU warm-up before importing the package
+# Control GPU warm-up via env flag (default: on). Set RISKPIPELINE_SKIP_TF_WARMUP=1 to disable.
+_SKIP_TF_WARMUP = os.environ.get('RISKPIPELINE_SKIP_TF_WARMUP', '').lower() in ('1', 'true', 'yes')
+
+# Always attempt a minimal GPU warm-up before importing the package (unless skipped)
 _EARLY_WARMUP_MSG = None
 _SECONDARY_WARMUP_MSG = None
 _TF_DEVICE_STR = None
@@ -63,7 +66,11 @@ def _inline_gpu_warmup():
         print(_EARLY_WARMUP_MSG)
         return _EARLY_WARMUP_MSG
 
-_inline_gpu_warmup()
+if not _SKIP_TF_WARMUP:
+    _inline_gpu_warmup()
+else:
+    _EARLY_WARMUP_MSG = "TensorFlow warm-up skipped by env flag"
+    print(_EARLY_WARMUP_MSG)
 
 # Add the project root to Python path
 project_root = Path(__file__).parent
@@ -74,9 +81,17 @@ try:
     # Configure TF after warm-up for consistent device state
     try:
         from risk_pipeline.utils.tensorflow_utils import configure_tensorflow_memory, warm_up_gpu
-        _TF_DEVICE_STR = configure_tensorflow_memory(gpu_memory_growth=True, gpu_memory_limit=None, force_cpu=(os.environ.get('RISKPIPELINE_FORCE_CPU','').lower() in ('1','true','yes')))
-        used_gpu, _SECONDARY_WARMUP_MSG = warm_up_gpu(jit_intensive=False)
-        print(f"TensorFlow device: {_TF_DEVICE_STR} | Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
+        _TF_DEVICE_STR = configure_tensorflow_memory(
+            gpu_memory_growth=True,
+            gpu_memory_limit=None,
+            force_cpu=(os.environ.get('RISKPIPELINE_FORCE_CPU','').lower() in ('1','true','yes'))
+        )
+        if not _SKIP_TF_WARMUP:
+            used_gpu, _SECONDARY_WARMUP_MSG = warm_up_gpu(jit_intensive=False)
+            print(f"TensorFlow device: {_TF_DEVICE_STR} | Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
+        else:
+            _SECONDARY_WARMUP_MSG = "GPU warm-up skipped by env flag"
+            print(f"TensorFlow device: {_TF_DEVICE_STR} | Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
     except Exception as _e:
         print(f"TensorFlow setup/warm-up skipped: {_e}")
     print("RiskPipeline imported successfully")

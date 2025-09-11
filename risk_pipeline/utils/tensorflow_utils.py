@@ -92,7 +92,20 @@ def configure_tensorflow_memory(gpu_memory_growth: bool = True,
         # Check if we should force CPU
         if force_cpu:
             logger.info("Forcing CPU usage as requested")
+            # Environment guard for any future TF imports
             os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+            try:
+                # Hide all GPUs from the current TF runtime as well
+                tf.config.set_visible_devices([], 'GPU')
+            except Exception:
+                pass
+            # Ensure no mixed precision policies that could trigger GPU-only kernels
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+                logger.info("Disabled TensorFlow mixed precision policy (set to float32)")
+            except Exception:
+                pass
             return '/CPU:0'
         
         # Check GPU availability
@@ -130,6 +143,15 @@ def configure_tensorflow_memory(gpu_memory_growth: bool = True,
             logger.warning(f"GPU configuration failed: {e}, falling back to CPU")
             # Disable GPU and fall back to CPU
             os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+            try:
+                tf.config.set_visible_devices([], 'GPU')
+            except Exception:
+                pass
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+            except Exception:
+                pass
             return '/CPU:0'
             
     except ImportError:
@@ -153,6 +175,19 @@ def get_optimal_device(prefer_gpu: bool = True,
     """
     try:
         import tensorflow as tf
+        # Honor explicit CPU-only environment overrides
+        if os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes') or os.environ.get('CUDA_VISIBLE_DEVICES') == '-1':
+            logger.info("Environment enforces CPU-only mode; selecting CPU device")
+            try:
+                tf.config.set_visible_devices([], 'GPU')
+            except Exception:
+                pass
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+            except Exception:
+                pass
+            return '/CPU:0'
         
         if not prefer_gpu:
             logger.info("CPU preferred, using CPU")
@@ -250,6 +285,19 @@ def cleanup_tensorflow_memory():
 def force_cpu_mode():
     """Force TensorFlow to use CPU only."""
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+    try:
+        import tensorflow as tf
+        try:
+            tf.config.set_visible_devices([], 'GPU')
+        except Exception:
+            pass
+        try:
+            from tensorflow.keras import mixed_precision as _mp
+            _mp.set_global_policy('float32')
+        except Exception:
+            pass
+    except Exception:
+        pass
     logger.info("Forced CPU-only mode for TensorFlow")
 
 def reset_gpu_state():

@@ -29,12 +29,9 @@ from sklearn.preprocessing import StandardScaler
 if TF_AVAILABLE:
     tf.config.set_soft_device_placement(True)
 
-# QUICK CPU OPTIMIZATION: Use all physical cores for maximum performance (if TF available)
-import psutil
-cpu_count = psutil.cpu_count(logical=False)
-if TF_AVAILABLE:
-    tf.config.threading.set_inter_op_parallelism_threads(cpu_count)
-    tf.config.threading.set_intra_op_parallelism_threads(cpu_count)
+# NOTE: Do not set TensorFlow threading configs here. Changing inter/intra-op
+# threads after TF context initialization raises a RuntimeError. Global CPU
+# threading is already optimized via environment variables in risk_pipeline/__init__.py.
 
 from .base_model import BaseModel
 
@@ -166,9 +163,15 @@ class LSTMModel(BaseModel):
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
         
-        # Choose optimal device (prefer GPU, fallback to CPU)
+        # Choose optimal device (prefer GPU, fallback to CPU). If CPU forced, also disable mixed precision.
         device = get_optimal_device(prefer_gpu=True)
         _configured = configure_tensorflow_memory(gpu_memory_growth=True, force_cpu=(device == '/CPU:0'))
+        if device == '/CPU:0':
+            try:
+                from tensorflow.keras import mixed_precision as _mp
+                _mp.set_global_policy('float32')
+            except Exception:
+                pass
         self.logger.info(f"Using device for LSTM build: {device}")
         
         try:
@@ -454,8 +457,17 @@ class LSTMModel(BaseModel):
                 except Exception:
                     pass
 
-            # Predict on chosen device; TF will soft-place as needed
-            with tf.device('/GPU:0') if tf.config.list_physical_devices('GPU') else tf.device('/CPU:0'):
+            # Predict on optimal device; honor environment overrides
+            from risk_pipeline.utils.tensorflow_utils import get_optimal_device, configure_tensorflow_memory
+            pred_device = get_optimal_device(prefer_gpu=True)
+            _ = configure_tensorflow_memory(force_cpu=(pred_device == '/CPU:0'))
+            if pred_device == '/CPU:0':
+                try:
+                    from tensorflow.keras import mixed_precision as _mp
+                    _mp.set_global_policy('float32')
+                except Exception:
+                    pass
+            with tf.device(pred_device):
                 # Make predictions
                 predictions = self.model.predict(X_reshaped, verbose=0)
             
