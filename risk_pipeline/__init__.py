@@ -362,8 +362,8 @@ class RiskPipeline:
                 
                 classification_results = {}
                 if getattr(self.config, 'tasks', None) is None or getattr(self.config.tasks, 'classification_enabled', True):
-                    # Exclude regression-only models from classification runs (allow garch now)
-                    classification_models = [m for m in models if m not in ['arima', 'enhanced_arima']]
+                    # All models now support classification (ARIMA via thresholding, GARCH via thresholding)
+                    classification_models = models
                     classification_results = self._run_models(
                         features=asset_features,
                         asset=asset,
