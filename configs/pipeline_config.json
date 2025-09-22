@@ -2,8 +2,8 @@
     "data": {
         "start_date": "1990-01-01",
         "end_date": "2025-10-08",
-        "us_assets": ["MSFT", "^VIX"],
-        "au_assets": ["IOZ.AX", "CBA.AX"],
+        "us_assets": ["MSFT", "^VIX", "AAPL", "^GSPC"],
+        "au_assets": ["IOZ.AX", "CBA.AX", "BHP.AX"],
         "cache_dir": "data_cache"
     },
     "features": {

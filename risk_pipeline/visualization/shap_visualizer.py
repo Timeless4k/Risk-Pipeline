@@ -75,6 +75,57 @@ class SHAPVisualizer:
             plt.switch_backend('Agg')
         
         logger.info("SHAPVisualizer initialized")
+
+    def _select_array_from_shap(self, shap_values: Any) -> np.ndarray:
+        """Select a numeric numpy array from various SHAP return types.
+        Handles Explanation, list/tuple (classification), and raw arrays.
+        """
+        try:
+            if hasattr(shap_values, 'values'):
+                return np.asarray(shap_values.values)
+            if isinstance(shap_values, (list, tuple)):
+                candidate = shap_values[1] if len(shap_values) > 1 else shap_values[0]
+                if hasattr(candidate, 'values'):
+                    candidate = candidate.values
+                return np.asarray(candidate)
+            return np.asarray(shap_values)
+        except Exception:
+            return np.asarray(shap_values, dtype=object)
+
+    def _normalize_sv_X(self,
+                        shap_values: Any,
+                        X: Union[np.ndarray, pd.DataFrame],
+                        feature_names: Optional[List[str]]) -> Tuple[np.ndarray, np.ndarray, Optional[List[str]]]:
+        """Coerce SHAP values and X to 2D (samples x features) and align feature names."""
+        sv_arr = self._select_array_from_shap(shap_values)
+        X_arr = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
+
+        # If SHAP returned per-timestep at shape (N, T, F), reduce over time
+        if sv_arr.ndim == 3:
+            # assume time dimension is 1 (N, T, F)
+            sv_arr = np.mean(sv_arr, axis=1)
+        elif sv_arr.ndim > 3:
+            sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
+
+        # Make X 2D to match
+        if X_arr.ndim == 3:
+            X_arr = X_arr.reshape(X_arr.shape[0], -1)
+        elif X_arr.ndim > 3:
+            X_arr = X_arr.reshape(X_arr.shape[0], -1)
+
+        # Align feature names length if provided
+        if feature_names is not None and isinstance(feature_names, list):
+            try:
+                num_features = X_arr.shape[1]
+            except Exception:
+                num_features = sv_arr.shape[1] if sv_arr.ndim == 2 else None
+            if num_features is not None and num_features >= 1:
+                if len(feature_names) > num_features:
+                    feature_names = feature_names[:num_features]
+                elif len(feature_names) < num_features:
+                    feature_names = feature_names + [f'feature_{i}' for i in range(len(feature_names), num_features)]
+
+        return sv_arr, X_arr, feature_names
     
     def _clear_gpu_memory(self):
         """Clear GPU memory to prevent OOM errors during plotting."""
@@ -104,16 +155,21 @@ class SHAPVisualizer:
         This lightweight helper matches calls from SHAPAnalyzer.
         """
         try:
-            # Normalize SHAP values object/array
-            sv = shap_values.values if hasattr(shap_values, 'values') else shap_values
-            if isinstance(sv, list):
-                sv = sv[0]
-            # Ensure X is aligned shape-wise
-            X_plot = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
-            if hasattr(sv, 'ndim') and sv.ndim > 2:
-                sv = sv.reshape(sv.shape[0], -1)
-                if X_plot.ndim > 2:
-                    X_plot = X_plot.reshape(X_plot.shape[0], -1)
+            # Normalize to 2D (samples x features) and align names
+            sv, X_plot, feature_names = self._normalize_sv_X(shap_values, X, feature_names)
+
+            # If shapes still mismatch (e.g., multiclass), try class-mean reduction
+            if hasattr(X_plot, 'shape') and hasattr(sv, 'shape'):
+                if sv.ndim == 3 and X_plot.ndim == 2:
+                    # Prefer reducing the axis that is NOT matching features
+                    if sv.shape[1] == X_plot.shape[1]:
+                        sv = np.mean(sv, axis=2)
+                    elif sv.shape[2] == X_plot.shape[1]:
+                        sv = np.mean(sv, axis=1)
+                    else:
+                        # Fallback: flatten and match X by flattening too
+                        sv = sv.reshape(sv.shape[0], -1)
+                        X_plot = X_plot.reshape(X_plot.shape[0], -1)
 
             # Prepare output file
             ts = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
@@ -157,17 +213,24 @@ class SHAPVisualizer:
         This lightweight helper matches calls from SHAPAnalyzer.
         """
         try:
-            sv = shap_values.values if hasattr(shap_values, 'values') else shap_values
-            if isinstance(sv, list):
-                sv = sv[0]
-            sv_arr = np.asarray(sv)
-            if sv_arr.ndim > 2:
+            # Coerce to array and reduce multiclass/time dims to 2D
+            sv_arr = self._select_array_from_shap(shap_values)
+            if sv_arr.ndim == 3:
+                # Reduce last axis by mean (e.g., classes) by default
+                sv_arr = np.mean(sv_arr, axis=-1)
+            elif sv_arr.ndim > 3:
                 sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
             # Compute importance
             importance = np.mean(np.abs(sv_arr), axis=0)
             # Names
             if feature_names is None:
                 feature_names = [f'feature_{i}' for i in range(len(importance))]
+            else:
+                # Align provided names length
+                if len(feature_names) > len(importance):
+                    feature_names = feature_names[:len(importance)]
+                elif len(feature_names) < len(importance):
+                    feature_names = feature_names + [f'feature_{i}' for i in range(len(feature_names), len(importance))]
             # Sort
             order = np.argsort(importance)[::-1]
             importance = importance[order]
@@ -292,11 +355,14 @@ class SHAPVisualizer:
         plots = {}
         
         try:
+            # Normalize inputs to 2D for plotting, handling list/Explanation
+            sv_arr, X_arr, feature_names = self._normalize_sv_X(shap_values, X, feature_names)
+
             # Summary plot (bar chart)
             plt.figure(figsize=(12, 8))
             shap.summary_plot(
-                shap_values,
-                X,
+                sv_arr,
+                X_arr,
                 feature_names=feature_names,
                 max_display=20,
                 show=False
@@ -311,11 +377,28 @@ class SHAPVisualizer:
             
             # Beeswarm plot
             plt.figure(figsize=(12, 8))
-            shap.plots.beeswarm(
-                shap.Explanation(shap_values, feature_names=feature_names),
-                max_display=20,
-                show=False
-            )
+            try:
+                # New API prefers Explanation with matching shapes
+                explanation = shap.Explanation(
+                    values=sv_arr,
+                    data=X_arr,
+                    feature_names=feature_names
+                )
+                shap.plots.beeswarm(
+                    explanation,
+                    max_display=20,
+                    show=False
+                )
+            except Exception:
+                # Fallback to classic summary_plot beeswarm
+                shap.summary_plot(
+                    sv_arr,
+                    X_arr,
+                    feature_names=feature_names,
+                    plot_type='dot',
+                    max_display=20,
+                    show=False
+                )
             plt.title(f'SHAP Beeswarm - {asset} {model_type} {task}')
             plt.tight_layout()
             
@@ -327,15 +410,22 @@ class SHAPVisualizer:
             # Waterfall plot for a sample
             plt.figure(figsize=(12, 8))
             sample_idx = 0
-            shap.waterfall_plot(
-                shap.Explanation(
-                    shap_values[sample_idx],
-                    base_values=0,
-                    feature_names=feature_names
-                ),
-                max_display=20,
-                show=False
-            )
+            try:
+                shap.waterfall_plot(
+                    shap.Explanation(
+                        values=sv_arr[sample_idx],
+                        base_values=0,
+                        feature_names=feature_names
+                    ),
+                    max_display=20,
+                    show=False
+                )
+            except Exception:
+                # Fallback: bar of absolute SHAP for the sample
+                abs_vals = np.abs(sv_arr[sample_idx])
+                order = np.argsort(abs_vals)[-20:][::-1]
+                names = [feature_names[i] for i in order] if feature_names else [f'f{i}' for i in order]
+                sns.barplot(x=abs_vals[order], y=names, orient='h')
             plt.title(f'SHAP Waterfall - {asset} {model_type} {task} (Sample {sample_idx})')
             plt.tight_layout()
             
@@ -561,12 +651,13 @@ class SHAPVisualizer:
             plt.figure(figsize=(15, 8))
             
             # Reshape SHAP values for temporal visualization
-            if len(shap_values.shape) == 2:
-                # If 2D, assume time steps are in rows
-                temporal_shap = shap_values
+            sv_arr = self._select_array_from_shap(shap_values)
+            if sv_arr.ndim == 2:
+                temporal_shap = sv_arr
+            elif sv_arr.ndim == 3:
+                temporal_shap = np.mean(sv_arr, axis=1)
             else:
-                # If 3D, take mean across time dimension
-                temporal_shap = np.mean(shap_values, axis=1)
+                temporal_shap = sv_arr.reshape(sv_arr.shape[0], -1)
             
             # Create heatmap
             sns.heatmap(
@@ -714,16 +805,25 @@ class SHAPVisualizer:
         plots = {}
         
         try:
+            # Normalize SHAP values to 2D time x features for rolling stats
+            sv_arr = self._select_array_from_shap(shap_values)
+            if sv_arr.ndim == 3:
+                # average across sequence length axis if likely (N, T, F) -> (N, F)
+                # choose axis 1 (time) when shape hints time dimension in middle
+                sv_arr = np.mean(sv_arr, axis=1)
+            elif sv_arr.ndim > 3:
+                sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
+
             # Rolling SHAP statistics
             plt.figure(figsize=(15, 10))
             
             # Calculate rolling statistics
             window_size = 30
-            rolling_mean = pd.DataFrame(shap_values).rolling(window=window_size, min_periods=1).mean()
-            rolling_std = pd.DataFrame(shap_values).rolling(window=window_size, min_periods=1).std()
+            rolling_mean = pd.DataFrame(sv_arr).rolling(window=window_size, min_periods=1).mean()
+            rolling_std = pd.DataFrame(sv_arr).rolling(window=window_size, min_periods=1).std()
             
             # Plot rolling statistics for top features
-            top_features = self._get_top_features(shap_values, feature_names, top_k=5)
+            top_features = self._get_top_features(sv_arr, feature_names, top_k=5)
             
             for i, feature in enumerate(top_features):
                 feature_idx = feature_names.index(feature)
@@ -754,7 +854,7 @@ class SHAPVisualizer:
             plt.figure(figsize=(12, 8))
             
             # Calculate overall feature importance over time
-            feature_importance = np.mean(np.abs(shap_values), axis=1)
+            feature_importance = np.mean(np.abs(sv_arr), axis=1)
             rolling_importance = pd.Series(feature_importance).rolling(
                 window=window_size, min_periods=1
             ).mean()
@@ -797,11 +897,21 @@ class SHAPVisualizer:
         plots = {}
         
         try:
+            # Normalize SHAP array to 2D for correlation computations
+            sv_arr = self._select_array_from_shap(shap_values)
+            if sv_arr.ndim > 2:
+                sv_arr = sv_arr.reshape(sv_arr.shape[0], -1)
+            # Align feature_names
+            if feature_names and sv_arr.ndim == 2 and len(feature_names) != sv_arr.shape[1]:
+                if len(feature_names) > sv_arr.shape[1]:
+                    feature_names = feature_names[:sv_arr.shape[1]]
+                else:
+                    feature_names = feature_names + [f'feature_{i}' for i in range(len(feature_names), sv_arr.shape[1])]
             # Feature interaction heatmap
             plt.figure(figsize=(12, 10))
             
             # Calculate pairwise interactions
-            interaction_matrix = np.corrcoef(np.abs(shap_values).T)
+            interaction_matrix = np.corrcoef(np.abs(sv_arr).T)
             
             # Create mask for upper triangle
             mask = np.triu(np.ones_like(interaction_matrix, dtype=bool))
