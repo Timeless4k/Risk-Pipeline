@@ -903,11 +903,7 @@ class RiskPipeline:
                     **model_params
                 )
 
-                # Skip regression-only models in classification runs
-                if task == 'classification' and model_type in ['arima', 'enhanced_arima']:
-                    logger.warning(f"Skipping {model_type} in classification task (regression-only model)")
-                    results[model_type] = {'skipped': True, 'reason': 'regression_only'}
-                    continue
+                # Note: ARIMA now supports classification via thresholding
                 
                 # Ensure model is built before training (for neural network models)
                 if hasattr(model, 'build_model') and callable(getattr(model, 'build_model')):

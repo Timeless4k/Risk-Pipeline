@@ -72,10 +72,8 @@ class ModelFactory:
         
         # Handle model-specific parameters
         if model_type == 'arima':
-            # ARIMA only supports regression
-            if task != 'regression':
-                logger.warning("ARIMA only supports regression tasks. Using regression.")
-            return model_class(**kwargs)
+            # ARIMA supports regression and derived classification (via thresholding)
+            return model_class(task=task, **kwargs)
         elif model_type == 'lstm':
             # LSTM supports both tasks
             return model_class(task=task, **kwargs)

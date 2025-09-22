@@ -363,6 +363,8 @@ class ARIMAModel(BaseModel):
         self.rmse_baseline_fallback = kwargs.get('rmse_baseline_fallback', True)
         self.baseline_tolerance = kwargs.get('baseline_tolerance', 1.0)
         self.include_naive_candidates = kwargs.get('include_naive_candidates', True)
+        # Classification support
+        self.classification_threshold = kwargs.get('classification_threshold', None)
         self.order_ = None
         self.seasonal_order_ = None
         self.fitted_model_ = None
@@ -372,6 +374,7 @@ class ARIMAModel(BaseModel):
         self.selected_features_ = None
         self.endog_train_ = None
         self.exog_train_ = None
+        self.training_targets_ = None  # Store training targets for classification threshold
         logger.info(f"Modern ARIMA initialized for {CPU_COUNT}-core optimization")
 
     def build_model(self, input_shape: Tuple[int, ...]) -> 'ARIMAModel':
@@ -387,6 +390,10 @@ class ARIMAModel(BaseModel):
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **kwargs) -> 'ARIMAModel':
         logger.info("Starting Modern ARIMA training")
+        
+        # Store training targets for classification threshold calculation
+        if self.task == 'classification':
+            self.training_targets_ = np.asarray(y, dtype=float)
         if isinstance(X, np.ndarray):
             X = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(X.shape[1])])
         if isinstance(y, np.ndarray):
@@ -517,12 +524,54 @@ class ARIMAModel(BaseModel):
                 forecast_result = self.fitted_model_.get_forecast(steps=min(steps, len(exog_forecast)), exog=exog_forecast.iloc[:steps])
             else:
                 forecast_result = self.fitted_model_.get_forecast(steps=steps)
-            return forecast_result.predicted_mean.values
+            
+            predictions = forecast_result.predicted_mean.values
+            
+            # Handle classification task
+            if self.task == 'classification':
+                # Convert regression predictions to classification using thresholding
+                # Similar to GARCH approach
+                pred_values = np.asarray(predictions, dtype=float)
+                
+                # Determine threshold: use provided or median of training targets
+                threshold = self.classification_threshold
+                if threshold is None and self.training_targets_ is not None:
+                    try:
+                        # Use median of training targets as threshold
+                        threshold = np.nanmedian(self.training_targets_)
+                    except Exception:
+                        threshold = np.nanmedian(pred_values)
+                
+                if threshold is None:
+                    threshold = np.nanmedian(pred_values)
+                
+                # Convert predictions to class probabilities using logistic transform
+                eps = 1e-9
+                scale = max(eps, float(np.nanstd(pred_values)) or 1e-3)
+                logits = -(pred_values - threshold) / (scale + eps)
+                probs = 1.0 / (1.0 + np.exp(-logits))
+                
+                # Convert probabilities to class labels (0, 1, 2 for 3-class problem)
+                # Map probabilities to classes: low prob -> class 0, medium -> class 1, high -> class 2
+                class_predictions = np.zeros_like(probs, dtype=int)
+                class_predictions[probs < 0.33] = 0  # Low volatility regime
+                class_predictions[(probs >= 0.33) & (probs < 0.67)] = 1  # Medium volatility regime  
+                class_predictions[probs >= 0.67] = 2  # High volatility regime
+                
+                return class_predictions
+            else:
+                return predictions
+                
         except Exception as e:
             logger.error(f"ARIMA prediction failed: {e}")
             if hasattr(self.fitted_model_, 'fittedvalues') and len(self.fitted_model_.fittedvalues) > 0:
                 last_value = self.fitted_model_.fittedvalues.iloc[-1]
+                if self.task == 'classification':
+                    # Return neutral class for classification
+                    return np.full(steps, 1, dtype=int)
                 return np.full(steps, last_value)
+            if self.task == 'classification':
+                return np.full(steps, 1, dtype=int)
             return np.zeros(steps)
 
     def evaluate(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray]) -> Dict[str, float]:
