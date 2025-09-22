@@ -21,6 +21,17 @@ def _inline_gpu_check():
             _TORCH_GPU_INFO = f"PyTorch CUDA available: {name}"
         else:
             _TORCH_GPU_INFO = "PyTorch CUDA not available"
+        
+        # Test gradient flow
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        test_tensor = torch.randn(2, 10, requires_grad=True, device=device)
+        test_layer = torch.nn.Linear(10, 1).to(device)
+        test_output = test_layer(test_tensor)
+        if test_output.requires_grad:
+            _TORCH_GPU_INFO += " (gradients working)"
+        else:
+            _TORCH_GPU_INFO += " (WARNING: gradients not working!)"
+            
     except Exception as e:
         _TORCH_GPU_INFO = f"PyTorch check failed: {e}"
     print(_TORCH_GPU_INFO)
@@ -121,8 +132,22 @@ def main():
         print("\nYour risk analysis pipeline is ready!")
         
     except Exception as e:
-        print(f"\nPipeline execution failed: {str(e)}")
-        print("Please check the error details above and try again.")
+        print(f"\n❌ Pipeline execution failed: {str(e)}")
+        print("\nDebugging information:")
+        print(f"  - Error type: {type(e).__name__}")
+        print(f"  - Execution time before failure: {time.time() - start_time:.1f} seconds")
+        
+        # Try to get more detailed error info
+        import traceback
+        print("\nFull traceback:")
+        traceback.print_exc()
+        
+        print("\nTroubleshooting steps:")
+        print("  1. Check if all required packages are installed")
+        print("  2. Verify PyTorch installation and CUDA compatibility")
+        print("  3. Check available disk space")
+        print("  4. Review the log files in the logs/ directory")
+        
         sys.exit(1)
 
 if __name__ == "__main__":
