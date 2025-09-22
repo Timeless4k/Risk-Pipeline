@@ -1,54 +1,145 @@
 """
-GARCH model implementation for RiskPipeline.
+Enhanced GARCH model implementation for RiskPipeline.
+Based on paper: "A Hybrid Model Integrating LSTM with Multiple GARCH-Type Models for Volatility and VaR Forecast"
+
+Key improvements:
+- Realized volatility calculation using high-frequency data approximation
+- Multiple GARCH variants (GARCH, EGARCH, TGARCH)
+- Enhanced exogenous feature support
+- Improved volatility forecasting and VaR estimation
 """
 
 import logging
-from typing import Dict, Tuple, Optional, Union, Any
+from typing import Dict, Tuple, Optional, Union, Any, List
 import numpy as np
 import pandas as pd
 from arch import arch_model
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
+from scipy import stats
 
 from .base_model import BaseModel
 
 
 class GARCHModel(BaseModel):
-    """GARCH model for volatility forecasting and derived classification."""
+    """
+    Enhanced GARCH model for volatility forecasting and derived classification.
+    
+    Based on the paper methodology with improvements for:
+    - Realized volatility calculation
+    - Multiple GARCH variants (GARCH, EGARCH, TGARCH)
+    - Enhanced exogenous feature support
+    - VaR estimation capabilities
+    """
 
-    def __init__(self, p: int = 1, q: int = 1, task: str = 'regression', threshold: Optional[float] = None, **kwargs):
+    def __init__(self, p: int = 1, q: int = 1, task: str = 'regression', 
+                 threshold: Optional[float] = None, garch_type: str = 'GARCH', **kwargs):
         """
-        Initialize GARCH model.
+        Initialize enhanced GARCH model.
 
         Args:
             p: GARCH lag order
             q: ARCH lag order
+            task: 'regression' or 'classification'
+            threshold: Classification threshold for volatility
+            garch_type: Type of GARCH model ('GARCH', 'EGARCH', 'TGARCH')
             **kwargs: Additional parameters
         """
-        super().__init__(name="GARCH", **kwargs)
+        super().__init__(name=f"{garch_type}({p},{q})", **kwargs)
         self.p = p
         self.q = q
         self.task = task or 'regression'
+        self.garch_type = garch_type.upper()
         self.fitted_model = None
         self.returns_data = None
         self.last_returns = None
-        self.classification_threshold = threshold  # used if task == 'classification'
+        self.classification_threshold = threshold
+        self.realized_volatility = None
 
-        # Exogenous feature support (mean model ARX)
-        # Default to False to avoid exogenous forecasting shape issues unless explicitly enabled
+        # Enhanced exogenous feature support
         self.use_exog_mean = bool(kwargs.get('use_exog_mean', False))
         self.max_exog_features = int(kwargs.get('max_exog_features', 64))
         self.exog_scaler: Optional[StandardScaler] = StandardScaler()
-        self.exog_feature_names: Optional[list] = None
+        self.exog_feature_names: Optional[List[str]] = None
 
-        self.logger.info(f"GARCH({p}, {q}) model initialized")
+        # VaR estimation parameters
+        self.var_confidence_levels = [0.90, 0.95, 0.99]
+        self.var_estimates = {}
+
+        # Realized volatility parameters
+        self.use_realized_vol = bool(kwargs.get('use_realized_vol', True))
+        self.rv_window = int(kwargs.get('rv_window', 5))  # 5-day realized volatility
+
+        self.logger.info(f"{self.garch_type}({p}, {q}) model initialized with task={task}")
 
     def build_model(self, input_shape: Tuple[int, ...]) -> 'GARCHModel':
         """Build GARCH model (no explicit building needed)."""
         self.input_shape = input_shape
-        self.model = "GARCH_READY"
-        self.logger.info(f"GARCH model ready")
+        self.model = f"{self.garch_type}_READY"
+        self.logger.info(f"{self.garch_type} model ready")
         return self
+
+    def calculate_realized_volatility(self, prices: pd.Series, window: int = None) -> pd.Series:
+        """
+        Calculate realized volatility as per paper methodology.
+        
+        RV_t = sqrt(sum(r_t,i^2) for i=1 to M)
+        where r_t,i = 100 * ln(P_t,i / P_t,i-1)
+        
+        Args:
+            prices: Price series (can be daily or intraday)
+            window: Rolling window for RV calculation
+            
+        Returns:
+            Realized volatility series
+        """
+        if window is None:
+            window = self.rv_window
+            
+        # Calculate log returns
+        log_returns = 100 * np.log(prices / prices.shift(1))
+        
+        # For daily data, approximate high-frequency RV using squared returns
+        # This is a simplified approximation of the paper's methodology
+        if len(log_returns) < window:
+            self.logger.warning(f"Insufficient data for {window}-day RV calculation")
+            return pd.Series(index=prices.index, dtype=float)
+        
+        # Calculate rolling realized volatility
+        rv = log_returns.rolling(window=window, min_periods=window//2).std()
+        
+        # Annualize (assuming daily data)
+        rv_annualized = rv * np.sqrt(252)
+        
+        self.logger.info(f"Calculated {window}-day realized volatility")
+        return rv_annualized
+
+    def calculate_var(self, returns: np.ndarray, confidence_level: float = 0.95) -> float:
+        """
+        Calculate Value at Risk using parametric method.
+        
+        VaR = μ + t_α * σ
+        where μ is mean return, t_α is quantile, σ is volatility
+        
+        Args:
+            returns: Return series
+            confidence_level: Confidence level (e.g., 0.95 for 95%)
+            
+        Returns:
+            VaR estimate
+        """
+        if len(returns) == 0:
+            return 0.0
+            
+        mean_return = np.mean(returns)
+        vol = np.std(returns)
+        
+        # Use t-distribution for better tail behavior
+        alpha = 1 - confidence_level
+        t_alpha = stats.t.ppf(alpha, df=len(returns)-1)
+        
+        var = mean_return + t_alpha * vol
+        return var
 
     def fit(self, X: Union[pd.DataFrame, np.ndarray],
             y: Union[pd.Series, np.ndarray], **kwargs) -> 'GARCHModel':
@@ -59,12 +150,15 @@ class GARCHModel(BaseModel):
     def train(self, X: Union[pd.DataFrame, np.ndarray], 
               y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         """
-        Train GARCH model.
+        Train enhanced GARCH model with realized volatility support.
 
-        For GARCH, we need returns. If y looks like volatility, synthesize
-        returns matching that volatility pattern as a proxy.
+        Enhanced training process:
+        1. Calculate realized volatility if using price data
+        2. Use appropriate GARCH variant based on configuration
+        3. Support for exogenous features in mean model
+        4. VaR estimation capabilities
         """
-        self.logger.info(f"Training GARCH model with {len(y)} observations")
+        self.logger.info(f"Training {self.garch_type} model with {len(y)} observations")
 
         try:
             # Convert inputs
@@ -73,13 +167,42 @@ class GARCHModel(BaseModel):
             else:
                 y_arr = np.asarray(y).ravel()
 
-            # Determine if y appears to be volatility
+            # Enhanced data preparation
+            returns_data = None
+            realized_vol = None
+            
+            # Check if we have price data to calculate realized volatility
+            if X is not None and hasattr(X, 'columns'):
+                # Look for price columns
+                price_cols = ['Close', 'Adj Close', 'Price']
+                price_col = None
+                for col in price_cols:
+                    if col in X.columns:
+                        price_col = col
+                        break
+                
+                if price_col and self.use_realized_vol:
+                    # Calculate realized volatility from price data
+                    prices = X[price_col].dropna()
+                    if len(prices) > self.rv_window:
+                        realized_vol = self.calculate_realized_volatility(prices, self.rv_window)
+                        self.realized_volatility = realized_vol
+                        self.logger.info(f"Calculated realized volatility using {price_col}")
+            
+            # Determine target data type and prepare returns
             if np.all(np.isfinite(y_arr)) and np.all(y_arr >= 0) and np.nanmean(y_arr) < 1:
-                rng = np.random.default_rng(42)
-                synthetic_returns = rng.normal(0.0, y_arr)
-                returns_data = synthetic_returns
-                self.logger.info("Using synthetic returns derived from volatility targets")
+                # y appears to be volatility - use as target for realized volatility
+                if realized_vol is not None:
+                    returns_data = np.log(realized_vol.dropna().values + 1e-8)  # Log transform
+                    self.logger.info("Using log-transformed realized volatility as returns")
+                else:
+                    # Fallback to synthetic returns
+                    rng = np.random.default_rng(42)
+                    synthetic_returns = rng.normal(0.0, y_arr)
+                    returns_data = synthetic_returns
+                    self.logger.info("Using synthetic returns derived from volatility targets")
             else:
+                # y appears to be returns
                 returns_data = y_arr
                 self.logger.info("Using provided data as returns")
 
@@ -118,32 +241,70 @@ class GARCHModel(BaseModel):
                     self.logger.warning(f"Failed to prepare exogenous features for GARCH mean model: {e}")
                     exog_train = None
 
+            # Create appropriate GARCH model based on type
             if exog_train is not None:
                 try:
-                    model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
+                    if self.garch_type == 'GARCH':
+                        model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
+                    elif self.garch_type == 'EGARCH':
+                        model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='EGARCH', p=self.p, q=self.q)
+                    elif self.garch_type == 'TGARCH':
+                        model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='GARCH', p=self.p, q=self.q, o=1)  # Threshold GARCH
+                    else:
+                        model = arch_model(returns_scaled, x=exog_train, mean='ARX', lags=0, vol='Garch', p=self.p, q=self.q)
                 except Exception as e:
                     self.logger.warning(f"Falling back to no exogenous mean model due to: {e}")
-                    model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+                    if self.garch_type == 'GARCH':
+                        model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+                    elif self.garch_type == 'EGARCH':
+                        model = arch_model(returns_scaled, vol='EGARCH', p=self.p, q=self.q)
+                    elif self.garch_type == 'TGARCH':
+                        model = arch_model(returns_scaled, vol='GARCH', p=self.p, q=self.q, o=1)
+                    else:
+                        model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
             else:
-                model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+                if self.garch_type == 'GARCH':
+                    model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
+                elif self.garch_type == 'EGARCH':
+                    model = arch_model(returns_scaled, vol='EGARCH', p=self.p, q=self.q)
+                elif self.garch_type == 'TGARCH':
+                    model = arch_model(returns_scaled, vol='GARCH', p=self.p, q=self.q, o=1)
+                else:
+                    model = arch_model(returns_scaled, vol='Garch', p=self.p, q=self.q)
 
-            self.fitted_model = model.fit(disp='off')
+            # Fit the model with enhanced error handling
+            try:
+                self.fitted_model = model.fit(disp='off', show_warning=False)
+            except Exception as e:
+                self.logger.warning(f"Model fitting failed with {self.garch_type}, trying GARCH(1,1): {e}")
+                # Fallback to simple GARCH(1,1)
+                fallback_model = arch_model(returns_scaled, vol='Garch', p=1, q=1)
+                self.fitted_model = fallback_model.fit(disp='off', show_warning=False)
             self.is_trained = True
 
             aic = getattr(self.fitted_model, 'aic', None)
             bic = getattr(self.fitted_model, 'bic', None)
 
-            self.logger.info("GARCH model fitted successfully")
+            self.logger.info(f"{self.garch_type} model fitted successfully")
             if aic is not None:
                 self.logger.info(f"AIC: {aic:.2f}")
             if bic is not None:
                 self.logger.info(f"BIC: {bic:.2f}")
 
+            # Calculate VaR estimates for different confidence levels
+            if self.returns_data is not None:
+                for conf_level in self.var_confidence_levels:
+                    var_est = self.calculate_var(self.returns_data, conf_level)
+                    self.var_estimates[conf_level] = var_est
+                    self.logger.info(f"VaR {conf_level*100:.0f}%: {var_est:.4f}")
+
             return {
                 'status': 'success',
+                'model_type': self.garch_type,
                 'model_order': (self.p, self.q),
                 'aic': aic,
                 'bic': bic,
+                'var_estimates': self.var_estimates,
             }
 
         except Exception as e:
@@ -151,17 +312,19 @@ class GARCHModel(BaseModel):
             raise
 
     def predict(self, X: Union[pd.DataFrame, np.ndarray],
-                steps: Optional[int] = None) -> np.ndarray:
+                steps: Optional[int] = None, return_var: bool = False) -> Union[np.ndarray, Dict[str, np.ndarray]]:
         """
-        Make volatility predictions with GARCH model.
+        Make enhanced volatility predictions with GARCH model.
 
         Args:
             X: Input features (unused; only horizon inferred)
             steps: Optional number of steps to forecast
+            return_var: If True, return VaR estimates along with volatility
 
         Returns:
             Array of predictions. For regression: volatility forecasts (decimal units).
             For classification: probability of positive class (bull regime) by thresholding volatility.
+            If return_var=True, returns dict with 'volatility' and 'var' keys.
         """
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
@@ -206,6 +369,20 @@ class GARCHModel(BaseModel):
             volatility_forecast = np.sqrt(forecast.variance.values[-1, :])
             volatility_forecast = volatility_forecast / 100.0
 
+            # Calculate VaR estimates if requested
+            var_forecasts = {}
+            if return_var and self.returns_data is not None:
+                for conf_level in self.var_confidence_levels:
+                    # Use forecasted volatility for VaR calculation
+                    mean_return = np.mean(self.returns_data) if len(self.returns_data) > 0 else 0.0
+                    vol_forecast = volatility_forecast[0] if len(volatility_forecast) > 0 else 0.01
+                    
+                    # Calculate VaR using forecasted volatility
+                    alpha = 1 - conf_level
+                    t_alpha = stats.t.ppf(alpha, df=len(self.returns_data)-1) if len(self.returns_data) > 1 else -1.645
+                    var_forecast = mean_return + t_alpha * vol_forecast
+                    var_forecasts[conf_level] = var_forecast
+
             if (self.task or 'regression') == 'classification':
                 # Lower volatility often associated with positive/neutral regime; map to class probability.
                 vol = np.asarray(volatility_forecast, dtype=float)
@@ -224,8 +401,13 @@ class GARCHModel(BaseModel):
                 scale = max(eps, float(np.nanstd(vol)) or 1e-3)
                 logits = -(vol - thr) / (scale + eps)
                 probs = 1.0 / (1.0 + np.exp(-logits))
+                
+                if return_var:
+                    return {'volatility': probs, 'var': var_forecasts}
                 return probs
 
+            if return_var:
+                return {'volatility': volatility_forecast, 'var': var_forecasts}
             return volatility_forecast
         except Exception as e:
             self.logger.error(f"GARCH prediction failed: {e}")
@@ -285,14 +467,68 @@ class GARCHModel(BaseModel):
                 'R2': r2,
             }
 
+    def get_var_estimates(self, confidence_levels: List[float] = None) -> Dict[float, float]:
+        """
+        Get VaR estimates for specified confidence levels.
+        
+        Args:
+            confidence_levels: List of confidence levels (e.g., [0.90, 0.95, 0.99])
+            
+        Returns:
+            Dictionary mapping confidence levels to VaR estimates
+        """
+        if not self.is_trained or self.returns_data is None:
+            return {}
+        
+        if confidence_levels is None:
+            confidence_levels = self.var_confidence_levels
+        
+        var_estimates = {}
+        for conf_level in confidence_levels:
+            var_est = self.calculate_var(self.returns_data, conf_level)
+            var_estimates[conf_level] = var_est
+        
+        return var_estimates
+
     def get_model_summary(self) -> str:
-        """Get model summary."""
+        """Get enhanced model summary with VaR information."""
         if not self.is_trained:
             return "Model not trained"
+        
         try:
-            return str(self.fitted_model.summary())
+            summary = str(self.fitted_model.summary())
+            
+            # Add VaR information
+            if self.var_estimates:
+                summary += "\n\nVaR Estimates:\n"
+                for conf_level, var_est in self.var_estimates.items():
+                    summary += f"VaR {conf_level*100:.0f}%: {var_est:.4f}\n"
+            
+            return summary
         except Exception as e:
             self.logger.error(f"Failed to get model summary: {e}")
-            return "Summary not available"
+            return f"Summary not available. Model type: {self.garch_type}"
+
+    def get_leverage_effect(self) -> Optional[float]:
+        """
+        Get leverage effect parameter for EGARCH models.
+        
+        Returns:
+            Leverage effect parameter if available, None otherwise
+        """
+        if not self.is_trained or self.garch_type != 'EGARCH':
+            return None
+        
+        try:
+            # Extract leverage effect from EGARCH model
+            params = self.fitted_model.params
+            if 'alpha[1]' in params and 'gamma[1]' in params:
+                alpha = params['alpha[1]']
+                gamma = params['gamma[1]']
+                return gamma  # Leverage effect parameter
+        except Exception as e:
+            self.logger.warning(f"Could not extract leverage effect: {e}")
+        
+        return None
 
 

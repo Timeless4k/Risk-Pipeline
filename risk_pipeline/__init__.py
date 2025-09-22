@@ -15,51 +15,35 @@ import pandas as pd
 import numpy as np
 import os
 
-# Set suppression env vars BEFORE TF import
-os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
-os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
-os.environ.setdefault('ABSL_LOGLEVEL', '3')
-
 # Logger early (needed for guarded imports below)
 logger = logging.getLogger(__name__)
 
-# Global TensorFlow device configuration (GPU usage is configurable via env)
-if os.environ.get('RISKPIPELINE_DISABLE_TF', '').lower() not in ('1', 'true', 'yes'):
+# PyTorch preflight: log CUDA/Device info once at import
+try:
+    from .utils.torch_utils import torch_cuda_summary
+    ok, msg = torch_cuda_summary()
+    logger.info(msg)
+except Exception as _torch_init_err:
     try:
-        import tensorflow as tf
-        force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
-        if force_cpu:
-            # Force CPU-only mode if explicitly requested
-            tf.config.set_soft_device_placement(False)
-            try:
-                gpus = tf.config.list_physical_devices('GPU')
-                if gpus:
-                    tf.config.set_visible_devices([], 'GPU')
-            except Exception:
-                pass
-            try:
-                cpus = tf.config.list_physical_devices('CPU')
-                if cpus:
-                    tf.config.set_logical_device_configuration(
-                        cpus[0],
-                        [tf.config.LogicalDeviceConfiguration()]
-                    )
-            except Exception:
-                pass
+        logger.warning(f"PyTorch preflight check failed: {_torch_init_err}")
+    except Exception:
+        pass
+
+# GPU SHAP preflight check
+try:
+    from .utils.gpu_shap_utils import is_gpu_available, get_gpu_memory_usage
+    if is_gpu_available():
+        gpu_info = get_gpu_memory_usage()
+        if gpu_info.get('available'):
+            logger.info(f"🚀 GPU SHAP available! Memory: {gpu_info['total_mb']:.0f} MB")
         else:
-            # Prefer GPU if available; allow soft placement
-            try:
-                tf.config.set_soft_device_placement(True)
-                gpus = tf.config.list_physical_devices('GPU')
-                for gpu in gpus:
-                    try:
-                        tf.config.experimental.set_memory_growth(gpu, True)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except Exception as _tf_err:
-        logger.warning(f"TensorFlow initialization skipped due to error: {_tf_err}")
+            logger.info("ℹ️ GPU SHAP not available, using CPU")
+    else:
+        logger.info("ℹ️ GPU SHAP not available, using CPU")
+except Exception as _gpu_shap_err:
+    logger.debug(f"GPU SHAP preflight check failed: {_gpu_shap_err}")
+
+# Remove TensorFlow initialization; PyTorch is used where applicable
 
 # Import core components
 from .core.config import PipelineConfig
@@ -88,7 +72,7 @@ except Exception as e:
     logger.warning(f"XGBoost not available: {e}")
     XGBOOST_AVAILABLE = False
 
-# TF-dependent models
+# Model availability flags
 try:
     from .models.stockmixer_model import StockMixerModel
     STOCKMIXER_AVAILABLE = True
@@ -934,23 +918,14 @@ class RiskPipeline:
                     except Exception as build_error:
                         logger.error(f"Model build failed for {model_type}: {build_error}")
                         
-                        # Try to force CPU mode and retry for neural network models
+                        # Retry build once (TensorFlow utils removed)
                         if model_type in ['lstm', 'stockmixer']:
                             try:
-                                logger.info(f"Attempting CPU fallback for {model_type}")
-                                from risk_pipeline.utils.tensorflow_utils import force_cpu_mode, cleanup_tensorflow_memory
-                                
-                                # Force CPU mode and clean up GPU memory
-                                force_cpu_mode()
-                                cleanup_tensorflow_memory()
-                                
-                                # Retry building on CPU
+                                logger.info(f"Retrying {model_type} build after error")
                                 model.build_model(X_clean.shape)
-                                logger.info(f"✅ {model_type} model built successfully on CPU")
-                                
+                                logger.info(f"✅ {model_type} model rebuilt successfully")
                             except Exception as cpu_error:
-                                logger.error(f"CPU fallback also failed for {model_type}: {cpu_error}")
-                                # Continue with the pipeline but mark this model as failed
+                                logger.error(f"Retry also failed for {model_type}: {cpu_error}")
                                 results[model_type] = {'error': f'Model building failed: {cpu_error}'}
                                 continue
                         else:

@@ -34,11 +34,11 @@ class XGBoostModel(BaseModel):
         self.use_log_vol_target = bool(kwargs.get('use_log_vol_target', False)) if task == 'regression' else False
         self.log_target_epsilon = float(kwargs.get('log_target_epsilon', 1e-6)) if task == 'regression' else 1e-6
         
-        # Detect GPU availability (via TensorFlow if present) and honor explicit opt-in only
+        # Detect GPU availability via PyTorch if present
         gpu_available = False
         try:
-            import tensorflow as tf  # type: ignore
-            gpu_available = len(tf.config.list_physical_devices('GPU')) > 0
+            import torch  # type: ignore
+            gpu_available = torch.cuda.is_available()
         except Exception:
             gpu_available = False
 

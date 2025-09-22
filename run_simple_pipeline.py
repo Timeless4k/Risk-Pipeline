@@ -11,66 +11,19 @@ import time
 from pathlib import Path
 import logging
 
-# Silence TensorFlow/absl/CUDA noise before any heavy imports
-os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')  # 0=all,1=INFO,2=WARNING,3=ERROR
-os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
-os.environ.setdefault('ABSL_LOGLEVEL', '3')  # absl to ERROR
-os.environ.setdefault('NVIDIA_TF32_OVERRIDE', '0')
-
-"""
-GPU notes:
-- We keep TensorFlow 2.20.0 and accept PTX JIT on first run for RTX 50xx.
-- We no longer force CPU-only; instead we warm up the GPU once at startup.
-"""
-if 'TF_XLA_FLAGS' in os.environ:
-    os.environ.pop('TF_XLA_FLAGS', None)
-
-# Control GPU warm-up via env flag (default: on). Set RISKPIPELINE_SKIP_TF_WARMUP=1 to disable.
-_SKIP_TF_WARMUP = os.environ.get('RISKPIPELINE_SKIP_TF_WARMUP', '').lower() in ('1', 'true', 'yes')
-
-# Always attempt a minimal GPU warm-up before importing the package (unless skipped)
-_EARLY_WARMUP_MSG = None
-_SECONDARY_WARMUP_MSG = None
-_TF_DEVICE_STR = None
-
-
-def _inline_gpu_warmup():
-    global _EARLY_WARMUP_MSG
+_TORCH_GPU_INFO = None
+def _inline_gpu_check():
+    global _TORCH_GPU_INFO
     try:
-        import tensorflow as tf
-        gpus = tf.config.list_physical_devices('GPU')
-        if not gpus:
-            _EARLY_WARMUP_MSG = "TensorFlow warm-up: No GPU available"
-            print(_EARLY_WARMUP_MSG)
-            return _EARLY_WARMUP_MSG
-        try:
-            for gpu in gpus:
-                try:
-                    tf.config.experimental.set_memory_growth(gpu, True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        import time as _t
-        t0 = _t.time()
-        with tf.device('/GPU:0'):
-            a = tf.random.normal([256, 256])
-            b = tf.random.normal([256, 256])
-            _ = tf.linalg.matmul(a, b)
-        dt = _t.time() - t0
-        _EARLY_WARMUP_MSG = f"TensorFlow warm-up: GPU warmed in {dt:.2f}s"
-        print(_EARLY_WARMUP_MSG)
-        return _EARLY_WARMUP_MSG
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            _TORCH_GPU_INFO = f"PyTorch CUDA available: {name}"
+        else:
+            _TORCH_GPU_INFO = "PyTorch CUDA not available"
     except Exception as e:
-        _EARLY_WARMUP_MSG = f"TensorFlow warm-up skipped: {e}"
-        print(_EARLY_WARMUP_MSG)
-        return _EARLY_WARMUP_MSG
-
-if not _SKIP_TF_WARMUP:
-    _inline_gpu_warmup()
-else:
-    _EARLY_WARMUP_MSG = "TensorFlow warm-up skipped by env flag"
-    print(_EARLY_WARMUP_MSG)
+        _TORCH_GPU_INFO = f"PyTorch check failed: {e}"
+    print(_TORCH_GPU_INFO)
 
 # Add the project root to Python path
 project_root = Path(__file__).parent
@@ -78,22 +31,7 @@ sys.path.insert(0, str(project_root))
 
 try:
     from risk_pipeline import RiskPipeline
-    # Configure TF after warm-up for consistent device state
-    try:
-        from risk_pipeline.utils.tensorflow_utils import configure_tensorflow_memory, warm_up_gpu
-        _TF_DEVICE_STR = configure_tensorflow_memory(
-            gpu_memory_growth=True,
-            gpu_memory_limit=None,
-            force_cpu=(os.environ.get('RISKPIPELINE_FORCE_CPU','').lower() in ('1','true','yes'))
-        )
-        if not _SKIP_TF_WARMUP:
-            used_gpu, _SECONDARY_WARMUP_MSG = warm_up_gpu(jit_intensive=False)
-            print(f"TensorFlow device: {_TF_DEVICE_STR} | Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
-        else:
-            _SECONDARY_WARMUP_MSG = "GPU warm-up skipped by env flag"
-            print(f"TensorFlow device: {_TF_DEVICE_STR} | Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
-    except Exception as _e:
-        print(f"TensorFlow setup/warm-up skipped: {_e}")
+    _inline_gpu_check()
     print("RiskPipeline imported successfully")
 except ImportError as e:
     print(f"❌ Error importing RiskPipeline: {e}")
@@ -116,12 +54,8 @@ def main():
         # Now that logging is configured by RiskPipeline, mirror any early warm-up info into the log file
         try:
             _logger = logging.getLogger(__name__)
-            if _TF_DEVICE_STR is not None:
-                _logger.info(f"TensorFlow device configured: {_TF_DEVICE_STR}")
-            if _EARLY_WARMUP_MSG:
-                _logger.info(_EARLY_WARMUP_MSG)
-            if _SECONDARY_WARMUP_MSG:
-                _logger.info(f"Secondary warm-up: {_SECONDARY_WARMUP_MSG}")
+            if _TORCH_GPU_INFO:
+                _logger.info(_TORCH_GPU_INFO)
         except Exception:
             pass
         print("Pipeline initialized successfully")

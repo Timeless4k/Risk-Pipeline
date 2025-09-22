@@ -36,7 +36,7 @@ DEFAULT_LOGGING_CONFIG = {
         'matplotlib': logging.WARNING,
         'urllib3': logging.WARNING,
         'requests': logging.WARNING,
-        'tensorflow': logging.ERROR,
+        # 'tensorflow' removed
         'h5py': logging.WARNING,
         'numba': logging.WARNING,
         'shap': logging.WARNING,

@@ -13,28 +13,7 @@ from datetime import datetime
 import shap
 import warnings
 
-# TensorFlow device configuration for SHAP (respect global env flag)
-import os
-try:
-    import tensorflow as tf
-    force_cpu = os.environ.get('RISKPIPELINE_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
-    if force_cpu:
-        tf.config.set_soft_device_placement(False)
-        try:
-            tf.config.set_logical_device_configuration(
-                tf.config.list_physical_devices('CPU')[0],
-                [tf.config.LogicalDeviceConfiguration()]
-            )
-        except Exception:
-            pass
-    else:
-        # Allow TF to pick GPU if available; keep soft placement on
-        try:
-            tf.config.set_soft_device_placement(True)
-        except Exception:
-            pass
-except ImportError:
-    pass
+# TensorFlow removed; SHAP explainers use model.predict
 
 # Suppress SHAP warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='shap')
@@ -241,6 +220,10 @@ class SHAPAnalyzer:
         """
         logger.info(f"Analyzing SHAP for {asset}_{model_type}_{task}")
         
+        # Clear GPU memory before SHAP computation
+        if hasattr(self.explainer_factory, '_clear_gpu_memory'):
+            self.explainer_factory._clear_gpu_memory()
+        
         try:
             # 🔎 KILL-SWITCH: Ensure no background_data leakage
             if hasattr(model, 'background_data'):
@@ -315,6 +298,11 @@ class SHAPAnalyzer:
 
             # Compute SHAP values on the saved eval sample
             shap_values = explainer.shap_values(X_eval)
+            
+            # Clear GPU memory after SHAP computation
+            if hasattr(self.explainer_factory, '_clear_gpu_memory'):
+                self.explainer_factory._clear_gpu_memory()
+            
             # Guard for empty/None returns
             if shap_values is None or (isinstance(shap_values, (list, tuple)) and len(shap_values) == 0):
                 raise RuntimeError("StockMixer returned empty SHAP values")

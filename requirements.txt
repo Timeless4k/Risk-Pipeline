@@ -8,11 +8,15 @@ imbalanced-learn==0.10.1
 yfinance==0.2.38
 requests==2.31.0
 
-# GPU-enabled TensorFlow (installs CUDA-compatible wheels where available)
-tensorflow[and-cuda]==2.10.1
+# PyTorch (CUDA wheel selected at install time; don't pin cuda here)
+torch>=2.3.0
+torchaudio>=2.3.0
+torchvision>=0.18.0
 # GPU-enabled XGBoost build supports GPU hist (if CUDA present)
 xgboost==1.7.6
 shap==0.41.0
+# GPU-accelerated SHAP (requires CUDA)
+# shap[gpu]  # Uncomment if you have CUDA installed
 statsmodels==0.13.5
 arch==6.3.0
 matplotlib==3.6.3

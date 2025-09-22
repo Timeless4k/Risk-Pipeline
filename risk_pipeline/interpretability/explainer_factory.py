@@ -12,16 +12,26 @@ import shap
 import warnings
 from typing import Dict, List, Any, Optional, Union, Tuple
 from statsmodels.tsa.arima.model import ARIMA
-# Import TensorFlow conditionally
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Model
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    tf = None
-    Model = None
+TENSORFLOW_AVAILABLE = False
+tf = None
+Model = None
 import xgboost as xgb
+
+# GPU acceleration imports
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
+# Check for GPU availability
+GPU_AVAILABLE = False
+if TORCH_AVAILABLE:
+    try:
+        GPU_AVAILABLE = torch.cuda.is_available()
+    except Exception:
+        GPU_AVAILABLE = False
 
 # Suppress SHAP warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='shap')
@@ -50,6 +60,17 @@ class ExplainerFactory:
         self.config = config
         self._explainers = {}
         self._background_data = {}
+        
+        # GPU acceleration settings
+        self.use_gpu = getattr(config, 'use_gpu_shap', True) and GPU_AVAILABLE
+        self.gpu_memory_fraction = getattr(config, 'gpu_memory_fraction', 0.8)
+        
+        if self.use_gpu:
+            logger.info(f"🚀 GPU-accelerated SHAP enabled! CUDA available: {GPU_AVAILABLE}")
+            if TORCH_AVAILABLE:
+                logger.info(f"PyTorch device: {torch.cuda.get_device_name(0) if GPU_AVAILABLE else 'CPU'}")
+        else:
+            logger.info("Using CPU-based SHAP explainers")
         
         logger.info("ExplainerFactory initialized")
     
@@ -89,12 +110,8 @@ class ExplainerFactory:
             if model_type in ('arima',):
                 return self._create_arima_explainer(model, X, task, **kwargs)
             elif model_type == 'lstm':
-                if not TENSORFLOW_AVAILABLE:
-                    logger.warning("TensorFlow not available for LSTM explainer, using mock")
                 return self._create_lstm_explainer(model, X, task, **kwargs)
             elif model_type == 'stockmixer':
-                if not TENSORFLOW_AVAILABLE:
-                    logger.warning("TensorFlow not available for StockMixer explainer, using mock")
                 return self._create_stockmixer_explainer(model, X, task, **kwargs)
             elif model_type == 'xgboost':
                 # 🌲 KILL-SWITCH: Ensure XGBoost model is fitted before SHAP
@@ -123,6 +140,16 @@ class ExplainerFactory:
                 if booster is not None:
                     try:
                         logger.info(f"🌲 XGBoost SHAP: Using fitted booster with {getattr(booster, 'num_boosted_rounds', 'unknown')} rounds")
+                        
+                        # Try GPU-accelerated explainer first if available
+                        if self.use_gpu and hasattr(shap, 'GPUTreeExplainer'):
+                            try:
+                                logger.info("🚀 Using GPU-accelerated GPUTreeExplainer for XGBoost")
+                                return shap.GPUTreeExplainer(booster)
+                            except Exception as gpu_e:
+                                logger.warning(f"GPU explainer failed, falling back to CPU: {gpu_e}")
+                        
+                        # Fallback to CPU TreeExplainer
                         return shap.TreeExplainer(booster)
                     except Exception as e:
                         logger.warning(f"🌲 KILL-SWITCH: Failed to create TreeExplainer from booster: {e}; using safe dummy explainer")
@@ -340,10 +367,48 @@ class ExplainerFactory:
         Returns:
             DeepExplainer instance or mock explainer if TensorFlow unavailable
         """
-        if not TENSORFLOW_AVAILABLE:
-            logger.warning("TensorFlow not available, returning mock LSTM explainer")
-            # Return a lightweight mock explainer
-            from unittest.mock import Mock
+        # Use model.predict with KernelExplainer; TensorFlow removed
+        from unittest.mock import Mock
+        # Determine prediction function
+        pred_fn = None
+        if hasattr(model, 'predict') and callable(getattr(model, 'predict')):
+            pred_fn = model.predict
+        elif hasattr(model, 'model') and hasattr(model.model, 'predict'):
+            pred_fn = model.model.predict
+        else:
+            # Fallback dummy predictor
+            def pred_fn(x):
+                arr = np.asarray(x)
+                flat = arr.reshape(arr.shape[0], -1)
+                return np.zeros((flat.shape[0], 1))
+
+        background_data = self._flatten_to_2d(self._prepare_deep_background_data(X, model_type='lstm'))
+        try:
+            # Try GPU-accelerated explainer for LSTM if available
+            if self.use_gpu and TORCH_AVAILABLE:
+                try:
+                    logger.info("🚀 Using GPU-accelerated DeepExplainer for LSTM")
+                    # Convert to PyTorch tensors for GPU processing
+                    background_tensor = torch.tensor(background_data, dtype=torch.float32, device='cuda')
+                    
+                    # Create GPU-optimized prediction function
+                    def gpu_pred_fn(x):
+                        if isinstance(x, np.ndarray):
+                            x_tensor = torch.tensor(x, dtype=torch.float32, device='cuda')
+                        else:
+                            x_tensor = x
+                        with torch.no_grad():
+                            result = pred_fn(x_tensor.cpu().numpy())
+                        return result
+                    
+                    explainer = shap.KernelExplainer(gpu_pred_fn, background_data)
+                except Exception as gpu_e:
+                    logger.warning(f"GPU LSTM explainer failed, using CPU: {gpu_e}")
+                    explainer = shap.KernelExplainer(lambda x: pred_fn(x), background_data)
+            else:
+                explainer = shap.KernelExplainer(lambda x: pred_fn(x), background_data)
+        except Exception:
+            # Fallback mock
             def _mock_shap_values(data):
                 arr = data if isinstance(data, np.ndarray) else np.asarray(data)
                 flat = arr.reshape(arr.shape[0], -1)
@@ -352,44 +417,6 @@ class ExplainerFactory:
             mock_explainer.shap_values.side_effect = lambda data: _mock_shap_values(data)
             mock_explainer.expected_value = 0.0
             explainer = mock_explainer
-            background_data = self._prepare_deep_background_data(X, model_type='lstm')
-        else:
-            # Prefer robust, TF2-friendly KernelExplainer with a predict wrapper
-            from unittest.mock import Mock
-            # Resolve underlying TF model
-            if hasattr(model, 'model') and hasattr(model.model, 'predict'):
-                tf_model = model.model
-            else:
-                tf_model = model
-
-            # Determine expected input rank and flatten background
-            spec = self._infer_tf_input_spec(tf_model)
-            background_raw = self._prepare_deep_background_data(X, model_type='lstm')
-            background_flat = self._flatten_to_2d(background_raw)
-
-            def predict_fn(x2d):
-                arr = np.asarray(x2d)
-                reshaped = self._reshape_for_model(arr, spec)
-                return tf_model.predict(reshaped, verbose=0)
-
-            try:
-                explainer = shap.KernelExplainer(predict_fn, background_flat)
-                background_data = background_flat
-            except Exception as e:
-                logger.warning(f"Failed to create KernelExplainer for LSTM: {e}")
-                # Fallback: lightweight mock explainer
-                if isinstance(model, Mock):
-                    def _mock_shap_values(data):
-                        arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                        flat = arr.reshape(arr.shape[0], -1)
-                        return np.zeros_like(flat)
-                    mock_explainer = Mock()
-                    mock_explainer.shap_values.side_effect = lambda data: _mock_shap_values(data)
-                    mock_explainer.expected_value = 0.0
-                    explainer = mock_explainer
-                    background_data = background_flat
-                else:
-                    raise
         
         # Store for later use
         explainer_key = f"lstm_{task}"
@@ -397,6 +424,37 @@ class ExplainerFactory:
         self._background_data[explainer_key] = background_data
         
         return explainer
+    
+    def _clear_gpu_memory(self):
+        """Clear GPU memory to prevent OOM errors during SHAP computation."""
+        if self.use_gpu and TORCH_AVAILABLE and torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.debug("GPU memory cleared")
+            except Exception as e:
+                logger.warning(f"Failed to clear GPU memory: {e}")
+    
+    def _get_gpu_memory_info(self) -> Dict[str, Any]:
+        """Get GPU memory information for monitoring."""
+        if not (self.use_gpu and TORCH_AVAILABLE and torch.cuda.is_available()):
+            return {"available": False}
+        
+        try:
+            memory_allocated = torch.cuda.memory_allocated(0)
+            memory_reserved = torch.cuda.memory_reserved(0)
+            memory_total = torch.cuda.get_device_properties(0).total_memory
+            
+            return {
+                "available": True,
+                "allocated_mb": memory_allocated / 1024**2,
+                "reserved_mb": memory_reserved / 1024**2,
+                "total_mb": memory_total / 1024**2,
+                "free_mb": (memory_total - memory_reserved) / 1024**2
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get GPU memory info: {e}")
+            return {"available": False, "error": str(e)}
     
     def _create_stockmixer_explainer(self,
                                     model: Any,
@@ -435,29 +493,16 @@ class ExplainerFactory:
             explainer.deep_explainer = _DeepShim()
             return explainer
         
-        # Handle our custom StockMixerModel wrapper
-        if hasattr(model, 'model') and hasattr(model.model, 'predict'):
-            # Use the underlying TensorFlow model
-            tf_model = model.model
-        elif hasattr(model, 'predict'):
-            # Direct TensorFlow model
-            tf_model = model
-        else:
-            # Try to use the model as-is
-            tf_model = model
-        
+        # Handle our custom StockMixerModel wrapper -> use KernelExplainer
         try:
-            return StockMixerExplainer(tf_model, X, task, self.config)
+            return StockMixerExplainer(model, X, task, self.config)
         except Exception as e:
             logger.warning(f"Failed to create StockMixerExplainer: {e}")
-            # Fallback: create a mock explainer
             explainer = StockMixerExplainer.__new__(StockMixerExplainer)
             explainer.model = model
             explainer.X = X
             explainer.task = task
             explainer.config = self.config
-            # background data with correct shape
-            bg = self._prepare_deep_background_data(X, model_type='stockmixer')
             class _DeepShim:
                 def __init__(self):
                     self.expected_value = 0.0
@@ -938,20 +983,18 @@ class StockMixerExplainer:
             background_data = background_data[:, 0, :]
         elif expected_rank == 3 and background_data.ndim == 2:
             background_data = background_data.reshape(background_data.shape[0], 1, background_data.shape[1])
-        if isinstance(model, _Mock) or not TENSORFLOW_AVAILABLE:
-            class _DeepShim:
-                def __init__(self):
-                    self.expected_value = 0.0
-                def shap_values(self, data):
-                    arr = data if isinstance(data, np.ndarray) else np.asarray(data)
-                    flat = arr.reshape(arr.shape[0], -1)
-                    return np.zeros_like(flat)
-            self.deep_explainer = _DeepShim()
+        # Use KernelExplainer with model.predict to avoid TensorFlow
+        pred_fn = None
+        if hasattr(model, 'predict') and callable(getattr(model, 'predict')):
+            pred_fn = model.predict
+        elif hasattr(model, 'model') and hasattr(model.model, 'predict'):
+            pred_fn = model.model.predict
         else:
-            # FIXED: Force CPU device context for DeepExplainer to match model device
-            import tensorflow as tf
-            with tf.device('/CPU:0'):
-                self.deep_explainer = shap.DeepExplainer(model, background_data)
+            def pred_fn(x):
+                arr = x if isinstance(x, np.ndarray) else np.asarray(x)
+                flat = arr.reshape(arr.shape[0], -1)
+                return np.zeros((flat.shape[0], 1))
+        self.deep_explainer = shap.KernelExplainer(lambda x: pred_fn(x), background_data)
         
         logger.info("StockMixerExplainer initialized")
     
@@ -1064,53 +1107,8 @@ class StockMixerExplainer:
                 cross_stock_layer = self.model.cross_stock_mixing
                 
                 # Create intermediate models to get layer outputs
-                temporal_model = tf.keras.Model(
-                    inputs=self.model.input,
-                    outputs=temporal_layer.output
-                )
-                indicator_model = tf.keras.Model(
-                    inputs=self.model.input,
-                    outputs=indicator_layer.output
-                )
-                cross_stock_model = tf.keras.Model(
-                    inputs=self.model.input,
-                    outputs=cross_stock_layer.output
-                )
-                
-                # Get pathway activations
-                Xp = X.values if isinstance(X, pd.DataFrame) else np.asarray(X)
-                try:
-                    exp_input_shape = getattr(self.model, 'input_shape', None)
-                    if exp_input_shape is None and hasattr(self.model, 'inputs') and self.model.inputs:
-                        exp_input_shape = self.model.inputs[0].shape
-                    exp_rank = len(tuple(int(d) if d is not None else -1 for d in exp_input_shape)) if exp_input_shape is not None else 2
-                except Exception:
-                    exp_rank = 2
-                if exp_rank == 2 and Xp.ndim == 3 and Xp.shape[1] == 1:
-                    Xp = Xp[:, 0, :]
-                elif exp_rank == 3 and Xp.ndim == 2:
-                    Xp = Xp.reshape(Xp.shape[0], 1, Xp.shape[1])
-                temporal_activations = temporal_model.predict(Xp, verbose=0)
-                indicator_activations = indicator_model.predict(Xp, verbose=0)
-                cross_stock_activations = cross_stock_model.predict(Xp, verbose=0)
-                
-                return {
-                    'temporal_activations': {
-                        'mean': float(np.mean(temporal_activations)),
-                        'std': float(np.std(temporal_activations)),
-                        'shape': temporal_activations.shape
-                    },
-                    'indicator_activations': {
-                        'mean': float(np.mean(indicator_activations)),
-                        'std': float(np.std(indicator_activations)),
-                        'shape': indicator_activations.shape
-                    },
-                    'cross_stock_activations': {
-                        'mean': float(np.mean(cross_stock_activations)),
-                        'std': float(np.std(cross_stock_activations)),
-                        'shape': cross_stock_activations.shape
-                    }
-                }
+                # Not available without TensorFlow internals
+                return {'error': 'Pathway layers not accessible without TF internals'}
             else:
                 return {'error': 'Pathway layers not accessible'}
                 

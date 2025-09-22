@@ -630,66 +630,15 @@ class ResultsManager:
         
         # Save model
         model_path = os.path.join(model_dir, 'model.pkl')
-        keras_saved = False
-        # Prefer TensorFlow SavedModel for TF-backed models to avoid CUDA handle issues during pickling
-        try:
-            # Lazy import to avoid hard TF dependency
-            import tensorflow as tf  # type: ignore
-            # Detect a Keras model wrapper (common in LSTM/StockMixer)
-            keras_model = getattr(model, 'model', None)
-            if keras_model is not None and hasattr(keras_model, 'save'):
-                # Force CPU-only save path to avoid GPU cast kernels during serialization
-                try:
-                    from risk_pipeline.utils.tensorflow_utils import force_cpu_mode  # type: ignore
-                    force_cpu_mode()
-                except Exception:
-                    pass
-                tf_model_dir = os.path.join(model_dir, 'tf_model')
-                os.makedirs(tf_model_dir, exist_ok=True)
-                # Use SavedModel format (directory) for maximum compatibility
-                # Ensure we save on CPU to avoid GPU kernels (Cast, etc.) during serialization
-                try:
-                    with tf.device('/CPU:0'):
-                        keras_model.save(tf_model_dir)
-                except Exception:
-                    # Retry once without explicit device
-                    keras_model.save(tf_model_dir)
-                # Also save weights in H5 for convenience
-                try:
-                    with tf.device('/CPU:0'):
-                        keras_model.save_weights(os.path.join(model_dir, 'weights.h5'))
-                except Exception:
-                    try:
-                        keras_model.save_weights(os.path.join(model_dir, 'weights.h5'))
-                    except Exception:
-                        pass
-                # Save a lightweight manifest with metadata
-                manifest = {
-                    'backend': 'tensorflow.keras',
-                    'saved_model_dir': 'tf_model',
-                    'weights_file': 'weights.h5',
-                    'wrapper_class': model.__class__.__name__,
-                    'task': task,
-                    'model_type': model_type,
-                }
-                with open(os.path.join(model_dir, 'model_manifest.json'), 'w') as mf:
-                    json.dump(manifest, mf, indent=2)
-                keras_saved = True
-                logger.info(f"Keras model saved to {tf_model_dir} (SavedModel) with manifest")
-        except Exception:
-            # Not a TF environment or save failed; continue to pickle attempt
-            pass
-
+        # TensorFlow saving removed; use pickle/joblib only
+        
         # Attempt to pickle full wrapper for non-TF models or as best-effort backup
         try:
             with open(model_path, 'wb') as f:
                 pickle.dump(model, f)
             logger.info(f"Model saved to {model_path}")
         except Exception as e:
-            if keras_saved:
-                logger.warning(f"Failed to pickle model wrapper (using SavedModel instead): {e}")
-            else:
-                logger.warning(f"Failed to save model: {e}")
+            logger.warning(f"Failed to save model: {e}")
         
         # Save metrics
         metrics_path = os.path.join(model_dir, 'metrics.json')

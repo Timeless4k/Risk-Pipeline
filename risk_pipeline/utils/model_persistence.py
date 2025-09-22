@@ -108,20 +108,15 @@ class ModelPersistence:
             model, scaler, feature_names, config, metrics, metadata
         """
         filepath = Path(filepath)
-        # Load model
-        if (filepath / 'model.h5').exists():
-            from tensorflow.keras.models import load_model
-            model = load_model(filepath / 'model.h5')
-        else:
-            try:
-                # Prefer in-memory registry if available
-                reg_key = str(filepath / 'model.pkl')
-                model = _INMEM_REGISTRY.get(reg_key)
-                if model is None:
-                    model = joblib.load(filepath / 'model.pkl')
-            except Exception:
-                from unittest.mock import Mock as _Mock
-                model = _Mock()
+        # Load model (only pickle/joblib; TensorFlow artifacts no longer supported)
+        try:
+            reg_key = str(filepath / 'model.pkl')
+            model = _INMEM_REGISTRY.get(reg_key)
+            if model is None:
+                model = joblib.load(filepath / 'model.pkl')
+        except Exception:
+            from unittest.mock import Mock as _Mock
+            model = _Mock()
         # Load scaler
         scaler = None
         if (filepath / 'scaler.pkl').exists():
@@ -194,11 +189,7 @@ class ModelPersistence:
             versions['scikit-learn'] = sklearn.__version__
         except ImportError:
             pass
-        try:
-            import tensorflow as tf
-            versions['tensorflow'] = tf.__version__
-        except ImportError:
-            pass
+        # TensorFlow removed
         try:
             import xgboost
             versions['xgboost'] = xgboost.__version__

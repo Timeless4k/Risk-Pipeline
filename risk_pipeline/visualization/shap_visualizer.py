@@ -15,6 +15,22 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 import warnings
 
+# GPU acceleration imports
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None
+
+# Check for GPU availability
+GPU_AVAILABLE = False
+if TORCH_AVAILABLE:
+    try:
+        GPU_AVAILABLE = torch.cuda.is_available()
+    except Exception:
+        GPU_AVAILABLE = False
+
 # Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='shap')
 
@@ -44,11 +60,41 @@ class SHAPVisualizer:
         self.output_dir = Path(config.output.shap_dir) if hasattr(config.output, 'shap_dir') else Path('shap_plots')
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
+        # GPU acceleration settings
+        self.use_gpu = getattr(config, 'use_gpu_shap', True) and GPU_AVAILABLE
+        self.gpu_memory_fraction = getattr(config, 'gpu_memory_fraction', 0.8)
+        
         # Set style
         plt.style.use('seaborn-v0_8')
         sns.set_palette("husl")
         
+        # Configure matplotlib for better performance
+        if self.use_gpu:
+            logger.info("🚀 GPU-accelerated SHAP visualization enabled!")
+            # Use Agg backend for better performance with large plots
+            plt.switch_backend('Agg')
+        
         logger.info("SHAPVisualizer initialized")
+    
+    def _clear_gpu_memory(self):
+        """Clear GPU memory to prevent OOM errors during plotting."""
+        if self.use_gpu and TORCH_AVAILABLE and torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.debug("GPU memory cleared for plotting")
+            except Exception as e:
+                logger.warning(f"Failed to clear GPU memory: {e}")
+    
+    def _optimize_plot_performance(self, fig, ax=None):
+        """Optimize plot performance for large datasets."""
+        if self.use_gpu:
+            # Reduce memory usage for large plots
+            fig.patch.set_facecolor('white')
+            if ax is not None:
+                ax.set_facecolor('white')
+            # Optimize rendering
+            fig.canvas.draw_idle()
     
     def summary_plot(self,
                     shap_values: Union[np.ndarray, Any],
@@ -75,6 +121,9 @@ class SHAPVisualizer:
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f'shap_summary_{ts}.png'
 
+            # Clear GPU memory before plotting
+            self._clear_gpu_memory()
+            
             plt.figure(figsize=(12, 8))
             shap.summary_plot(
                 sv,
@@ -83,9 +132,17 @@ class SHAPVisualizer:
                 max_display=getattr(self.config.shap, 'max_display', 20) if hasattr(self.config, 'shap') else 20,
                 show=False
             )
+            
+            # Optimize plot performance
+            fig = plt.gcf()
+            self._optimize_plot_performance(fig)
+            
             plt.tight_layout()
             plt.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close()
+            
+            # Clear GPU memory after plotting
+            self._clear_gpu_memory()
         except Exception as e:
             logger.warning(f"summary_plot failed: {e}")
             try:

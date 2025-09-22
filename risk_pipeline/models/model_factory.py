@@ -18,11 +18,11 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-# Check TensorFlow availability
+# Import LSTM model directly from the existing file (now PyTorch-based)
 try:
     from .lstm_model import LSTMModel
     LSTM_AVAILABLE = True
-except ImportError:
+except Exception:
     LSTM_AVAILABLE = False
 
 # Check StockMixer availability

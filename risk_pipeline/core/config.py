@@ -267,6 +267,10 @@ class SHAPConfig:
     max_display: int = 20
     plot_type: str = 'bar'  # 'bar', 'waterfall', 'beeswarm', 'heatmap'
     save_plots: bool = True
+    # GPU acceleration settings
+    use_gpu: bool = True
+    gpu_memory_fraction: float = 0.8
+    batch_size_gpu: int = 1000  # Batch size for GPU processing
 
 
 @dataclass
