@@ -40,6 +40,12 @@ class _EnhancedTorchLSTMModule:
         self.task = task
         self.bidirectional = bidirectional
         self.use_attention = use_attention
+        
+        # Store parameters for serialization
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.num_classes = num_classes
+        self.dropout = dropout
 
         prev = input_dim
         self.lstm_layers = nn.ModuleList()
@@ -132,6 +138,73 @@ class _EnhancedTorchLSTMModule:
         x = x[:, -1, :]
         logits = self.head(x)
         return self.activation(logits)
+    
+    def __getstate__(self):
+        """Custom serialization for pickle compatibility."""
+        state = self.__dict__.copy()
+        # Remove non-serializable torch modules
+        if 'nn' in state:
+            del state['nn']
+        if 'torch' in state:
+            del state['torch']
+        return state
+    
+    def __setstate__(self, state):
+        """Custom deserialization for pickle compatibility."""
+        self.__dict__.update(state)
+        # Re-import torch modules
+        import torch
+        import torch.nn as nn
+        self.nn = nn
+        self.torch = torch
+        # Rebuild the model architecture
+        self._rebuild_model()
+    
+    def _rebuild_model(self):
+        """Rebuild the model architecture after deserialization."""
+        import torch
+        import torch.nn as nn
+        
+        prev = self.input_dim
+        self.lstm_layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        self.dropouts = nn.ModuleList()
+        
+        # Rebuild LSTM layers
+        for i, h in enumerate(self.hidden_dims):
+            self.lstm_layers.append(
+                nn.LSTM(
+                    input_size=prev,
+                    hidden_size=h,
+                    num_layers=1,
+                    batch_first=True,
+                    bidirectional=self.bidirectional,
+                    dropout=self.dropout if i < len(self.hidden_dims) - 1 else 0.0
+                )
+            )
+            self.batch_norms.append(nn.BatchNorm1d(h * (2 if self.bidirectional else 1)))
+            self.dropouts.append(nn.Dropout(self.dropout))
+            prev = h * (2 if self.bidirectional else 1)
+        
+        # Rebuild attention mechanism
+        if self.use_attention:
+            self.attention = nn.MultiheadAttention(
+                embed_dim=prev,
+                num_heads=4,
+                dropout=self.dropout,
+                batch_first=True
+            )
+            self.attention_norm = nn.LayerNorm(prev)
+        
+        # Rebuild output layers
+        out_dim = self.num_classes if self.task == 'classification' else 1
+        self.head = nn.Sequential(
+            nn.Linear(prev, prev // 2),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(prev // 2, out_dim)
+        )
+        self.activation = nn.LogSoftmax(dim=1) if self.task == 'classification' else nn.Identity()
 
 
 class LSTMModel(BaseModel):
@@ -361,7 +434,7 @@ class LSTMModel(BaseModel):
         
         # Learning rate scheduler
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=10, verbose=True
+            optimizer, mode='min', factor=0.5, patience=10
         )
         
         self.model.to(device)

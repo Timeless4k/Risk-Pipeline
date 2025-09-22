@@ -368,6 +368,20 @@ class WalkForwardValidator:
                     logger.error(f"Model fitting failed for {model_type}: {e}")
                     logger.error(f"Training data shapes: X={X_train_clean.shape}, y={y_train_clean.shape}")
                     logger.error(f"Training data types: X={X_train_clean.dtypes if hasattr(X_train_clean, 'dtypes') else type(X_train_clean)}, y={y_train_clean.dtype if hasattr(y_train_clean, 'dtype') else type(y_train_clean)}")
+                    
+                    # Enhanced debugging for StockMixer
+                    if model_type == 'stockmixer':
+                        logger.error(f"🔍 StockMixer Debug Info:")
+                        logger.error(f"  - Input shape: {X_train_clean.shape}")
+                        logger.error(f"  - Expected 3D input: [batch, time, features]")
+                        logger.error(f"  - Model parameters: {getattr(model, 'stocks', 'N/A')}, {getattr(model, 'time_steps', 'N/A')}, {getattr(model, 'channels', 'N/A')}")
+                        if hasattr(model, '_ensure_3d'):
+                            try:
+                                X3d = model._ensure_3d(X_train_clean)
+                                logger.error(f"  - After 3D conversion: {X3d.shape}")
+                            except Exception as conv_e:
+                                logger.error(f"  - 3D conversion failed: {conv_e}")
+                    
                     import traceback
                     logger.error(f"Full traceback: {traceback.format_exc()}")
                     fit_time = 0.0
@@ -378,6 +392,10 @@ class WalkForwardValidator:
                     # Check if model is trained
                     if hasattr(model, 'is_trained') and not model.is_trained:
                         logger.error(f"Model {model_type} is not trained, cannot predict")
+                        y_pred = np.full_like(y_test_clean, np.nan)
+                        pred_time = 0.0
+                    elif not hasattr(model, 'predict'):
+                        logger.error(f"Model {model_type} has no predict method")
                         y_pred = np.full_like(y_test_clean, np.nan)
                         pred_time = 0.0
                     elif hasattr(model, 'predict'):
@@ -403,6 +421,18 @@ class WalkForwardValidator:
                     logger.error(f"Model prediction failed for {model_type}: {e}")
                     logger.error(f"Test data shapes: X={X_test_clean.shape}, y={y_test_clean.shape}")
                     logger.error(f"Test data types: X={X_test_clean.dtypes if hasattr(X_test_clean, 'dtypes') else type(X_test_clean)}, y={y_test_clean.dtype if hasattr(y_test_clean, 'dtype') else type(y_test_clean)}")
+                    
+                    # Enhanced debugging for StockMixer prediction
+                    if model_type == 'stockmixer':
+                        logger.error(f"🔍 StockMixer Prediction Debug Info:")
+                        logger.error(f"  - Test input shape: {X_test_clean.shape}")
+                        if hasattr(model, '_ensure_3d'):
+                            try:
+                                X3d = model._ensure_3d(X_test_clean)
+                                logger.error(f"  - After 3D conversion: {X3d.shape}")
+                            except Exception as conv_e:
+                                logger.error(f"  - 3D conversion failed: {conv_e}")
+                    
                     import traceback
                     logger.error(f"Full prediction traceback: {traceback.format_exc()}")
                     y_pred = np.full_like(y_test_clean, np.nan)

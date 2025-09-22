@@ -639,6 +639,17 @@ class ResultsManager:
             logger.info(f"Model saved to {model_path}")
         except Exception as e:
             logger.warning(f"Failed to save model: {e}")
+            
+            # Enhanced error handling for specific model types
+            if 'lstm' in model_type.lower():
+                logger.warning("LSTM model pickle failed - this is expected due to PyTorch module serialization issues")
+                logger.warning("Model metrics and predictions are still saved. Model can be retrained from config.")
+            elif 'stockmixer' in model_type.lower():
+                logger.warning("StockMixer model pickle failed - this may be due to PyTorch module serialization issues")
+                logger.warning("Model metrics and predictions are still saved. Model can be retrained from config.")
+            else:
+                logger.warning(f"Model {model_type} pickle failed - this may be due to serialization issues")
+                logger.warning("Model metrics and predictions are still saved. Model can be retrained from config.")
         
         # Save metrics
         metrics_path = os.path.join(model_dir, 'metrics.json')

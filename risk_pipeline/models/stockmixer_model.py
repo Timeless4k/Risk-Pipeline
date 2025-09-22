@@ -67,14 +67,17 @@ class TriU(nn.Module):
     def __init__(self, time_step: int):
         super(TriU, self).__init__()
         self.time_step = time_step
-        self.triU = nn.ParameterList([
-            nn.Linear(i + 1, 1) for i in range(time_step)
-        ])
+        # Use a more flexible approach with a single linear layer
+        self.time_mixer = nn.Linear(time_step, time_step)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        x = self.triU[0](inputs[:, :, 0].unsqueeze(-1))
-        for i in range(1, self.time_step):
-            x = torch.cat([x, self.triU[i](inputs[:, :, 0:i + 1])], dim=-1)
+        B, C, T = inputs.shape
+        # Reshape to [B*C, T] for batch processing
+        x = inputs.permute(0, 1, 2).contiguous().view(B * C, T)
+        # Apply time mixing
+        x = self.time_mixer(x)
+        # Reshape back to [B, C, T]
+        x = x.view(B, C, T)
         return x
 
 
@@ -127,18 +130,20 @@ class Mixer2dTriU(nn.Module):
     """2D mixing with TriU for time dimension."""
     def __init__(self, time_steps: int, channels: int):
         super(Mixer2dTriU, self).__init__()
-        self.LN_1 = nn.LayerNorm([time_steps, channels])
-        self.LN_2 = nn.LayerNorm([time_steps, channels])
+        self.channels = channels
         self.timeMixer = TriU(time_steps)
         self.channelMixer = MixerBlock(channels, channels)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        x = self.LN_1(inputs)
+        B, T, C = inputs.shape
+        
+        # Use LayerNorm with proper shape for the actual input
+        x = F.layer_norm(inputs, [T, C])
         x = x.permute(0, 2, 1)  # [B, C, T]
         x = self.timeMixer(x)
         x = x.permute(0, 2, 1)  # [B, T, C]
 
-        x = self.LN_2(x + inputs)
+        x = F.layer_norm(x + inputs, [T, C])
         y = self.channelMixer(x)
         return x + y
 
@@ -147,12 +152,25 @@ class MultTime2dMixer(nn.Module):
     """Multi-time 2D mixing."""
     def __init__(self, time_step: int, channel: int, scale_dim: int = 8):
         super(MultTime2dMixer, self).__init__()
-        self.mix_layer = Mixer2dTriU(time_step, channel)
-        self.scale_mix_layer = Mixer2dTriU(scale_dim, channel)
+        self.channel = channel
+        self.scale_dim = scale_dim
+        # Use flexible time mixing
+        self.time_mixer = nn.Linear(time_step, time_step)
+        self.scale_mixer = nn.Linear(scale_dim, scale_dim)
 
     def forward(self, inputs: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        y = self.scale_mix_layer(y)
-        x = self.mix_layer(inputs)
+        B, T, C = inputs.shape
+        
+        # Process inputs with time mixing
+        x = inputs.permute(0, 2, 1)  # [B, C, T]
+        x = self.time_mixer(x)  # [B, C, T]
+        x = x.permute(0, 2, 1)  # [B, T, C]
+        
+        # Process scale input
+        y = y.permute(0, 2, 1)  # [B, C, scale_dim]
+        y = self.scale_mixer(y)  # [B, C, scale_dim]
+        y = y.permute(0, 2, 1)  # [B, scale_dim, C]
+        
         return torch.cat([inputs, x, y], dim=1)
 
 
@@ -194,46 +212,19 @@ class StockMixerNet(nn.Module):
         scale_dim = 16  # Increased scale dimension
         hidden_dim = max(256, channels * 2)  # Larger hidden dimensions
         
-        # Multiple mixing layers for deeper architecture
+        # Simplified mixing layers for 2D input
         self.mixer_layers = nn.ModuleList([
-            MultTime2dMixer(time_steps, channels, scale_dim=scale_dim) for _ in range(2)
+            nn.Sequential(
+                nn.Linear(channels, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, channels)
+            ) for _ in range(2)
         ])
         
         # Enhanced channel processing
         self.channel_processor = nn.Sequential(
             nn.Linear(channels, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-        
-        # Enhanced time processing
-        self.time_processor = nn.Sequential(
-            nn.Linear(time_steps * 2 + scale_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-        
-        # Multiple convolution layers for better feature extraction
-        self.conv_layers = nn.ModuleList([
-            nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=2, stride=2),
-            nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=3, stride=1, padding=1),
-            nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=5, stride=1, padding=2)
-        ])
-        
-        # Enhanced stock mixing
-        self.stock_mixer = NoGraphMixer(stocks, market)
-        
-        # Additional processing layers
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(time_steps * 2 + scale_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -253,54 +244,33 @@ class StockMixerNet(nn.Module):
         self.logsoftmax = nn.LogSoftmax(dim=1) if task == 'classification' else nn.Identity()
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # inputs: [B, S, T, C] or [B, T, C] - adapt to our data format
-        if inputs.dim() == 3:
-            # [B, T, C] -> [B, 1, T, C] for single stock
-            inputs = inputs.unsqueeze(1)
+        # Handle different input dimensions - convert to 2D for processing
+        if inputs.dim() == 2:
+            # [B, C] - already 2D, process directly
+            x = inputs
+        elif inputs.dim() == 3:
+            # [B, T, C] -> [B, T*C] - flatten time and features
+            B, T, C = inputs.shape
+            x = inputs.view(B, T * C)
+        elif inputs.dim() == 4:
+            # [B, S, T, C] -> [B, S*T*C] - flatten everything
+            B, S, T, C = inputs.shape
+            x = inputs.view(B, S * T * C)
+        else:
+            raise ValueError(f"Unsupported input dimension: {inputs.dim()}")
         
-        B, S, T, C = inputs.shape
+        B, C = x.shape
         
-        # Process each stock separately with enhanced architecture
-        stock_outputs = []
-        for s in range(S):
-            stock_input = inputs[:, s, :, :]  # [B, T, C]
-            
-            # Apply multiple convolution layers for better feature extraction
-            conv_features = []
-            for conv_layer in self.conv_layers:
-                x = stock_input.permute(0, 2, 1)  # [B, C, T]
-                x = conv_layer(x)  # [B, C, T']
-                x = x.permute(0, 2, 1)  # [B, T', C]
-                conv_features.append(x)
-            
-            # Use the first conv output for mixing
-            x = conv_features[0]  # [B, T//2, C]
-            
-            # Apply multiple mixing layers
-            mixed_features = stock_input
-            for mixer_layer in self.mixer_layers:
-                mixed_features = mixer_layer(mixed_features, x)  # [B, T*2 + scale_dim, C]
-            
-            # Enhanced channel processing
-            channel_output = self.channel_processor(mixed_features).squeeze(-1)  # [B, T*2 + scale_dim]
-            
-            # Enhanced time processing
-            time_output = self.time_processor(channel_output)  # [B, 1]
-            
-            stock_outputs.append(time_output)
+        # Apply multiple mixing layers
+        mixed_features = x
+        for mixer_layer in self.mixer_layers:
+            mixed_features = mixer_layer(mixed_features) + mixed_features  # Residual connection
         
-        # Stack stock outputs: [B, S, 1]
-        stock_outputs = torch.stack(stock_outputs, dim=1)  # [B, S, 1]
-        
-        # Enhanced stock-level mixing
-        z = self.stock_mixer(stock_outputs.squeeze(-1))  # [B, S]
-        z = self.fusion_layer(z.unsqueeze(-1))  # [B, 1]
-        
-        # Combine all features
-        final_output = time_output + z  # [B, 1]
+        # Enhanced channel processing
+        channel_output = self.channel_processor(mixed_features)  # [B, 1]
         
         # Apply enhanced output layer
-        output = self.output_fc(final_output)
+        output = self.output_fc(channel_output)
         
         return self.logsoftmax(output)
 
@@ -331,8 +301,12 @@ class StockMixerModel(BaseModel):
         self.device_str = get_torch_device(prefer_gpu=True)
         self.scaler = None  # For mixed precision
 
-    def _ensure_3d(self, X: np.ndarray) -> np.ndarray:
+    def _ensure_3d(self, X: Union[pd.DataFrame, np.ndarray]) -> np.ndarray:
         """Convert input to [B, T, C] format for the StockMixer."""
+        # Convert DataFrame to numpy array if needed
+        if hasattr(X, 'values'):
+            X = X.values
+        
         if X.ndim == 2:
             # [B, C] -> [B, 1, C] (single time step)
             return X.reshape(X.shape[0], 1, X.shape[1])
@@ -344,16 +318,28 @@ class StockMixerModel(BaseModel):
             return X.reshape(X.shape[0], X.shape[2], X.shape[3])
         else:
             raise ValueError(f"Unsupported input shape {X.shape}; expected [N,C], [N,T,C], or [N,S,T,C]")
+    
+    def _debug_input_shapes(self, X: np.ndarray, stage: str = ""):
+        """Debug helper to log input shapes."""
+        print(f"🔍 DEBUG {stage}: Input shape: {X.shape}, dtype: {X.dtype}")
+        if hasattr(self, 'model') and self.model is not None:
+            print(f"🔍 DEBUG {stage}: Model expects: stocks={self.stocks}, time_steps={self.time_steps}, channels={self.channels}")
+        if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+            print(f"⚠️ WARNING {stage}: Input contains NaN or Inf values")
 
     def build_model(self, input_shape: Tuple[int, ...]) -> 'StockMixerModel':
+        print(f"🔍 DEBUG build_model: Input shape: {input_shape}")
+        
         if len(input_shape) == 2:
-            # [B, C] - single time step
+            # [B, C] - single time step, convert to [B, 1, C]
             self.time_steps = 1
             self.channels = int(input_shape[1])
+            self.stocks = 1  # Single stock
         elif len(input_shape) == 3:
             # [B, T, C] - time series
             self.time_steps = int(input_shape[1])
             self.channels = int(input_shape[2])
+            self.stocks = 1  # Single stock
         elif len(input_shape) == 4:
             # [B, S, T, C] - multiple stocks
             self.stocks = int(input_shape[1])
@@ -361,6 +347,8 @@ class StockMixerModel(BaseModel):
             self.channels = int(input_shape[3])
         else:
             raise ValueError(f"Unsupported input shape: {input_shape}")
+
+        print(f"🔍 DEBUG build_model: Final params - stocks={self.stocks}, time_steps={self.time_steps}, channels={self.channels}")
 
         self.model = StockMixerNet(
             stocks=self.stocks,
@@ -377,11 +365,14 @@ class StockMixerModel(BaseModel):
     def train(self, X: Union[pd.DataFrame, np.ndarray], y: Union[pd.Series, np.ndarray], **kwargs) -> Dict[str, Any]:
         if self.model is None:
             X_arr, y_arr = self._validate_input(X, y)
+            self._debug_input_shapes(X_arr, "train_input")
             self.build_model(X_arr.shape)
         else:
             X_arr, y_arr = self._validate_input(X, y)
 
         X3 = self._ensure_3d(X_arr)
+        self._debug_input_shapes(X3, "train_3d")
+        
         if np.any(np.isnan(X3)) or np.any(np.isinf(X3)):
             raise ValueError("Features contain NaN or infinite values")
         if np.any(np.isnan(y_arr)) or np.any(np.isinf(y_arr)):
@@ -397,6 +388,11 @@ class StockMixerModel(BaseModel):
         
         device = torch.device(self.device_str)
         self.model.to(device)
+        self.model.train()  # Ensure model is in training mode
+        
+        # Ensure all parameters require gradients
+        for param in self.model.parameters():
+            param.requires_grad = True
         
         # Initialize mixed precision scaler
         if self.params.get('mixed_precision', True) and device.type == 'cuda':
@@ -454,7 +450,8 @@ class StockMixerModel(BaseModel):
                 
                 if train:
                     if self.scaler is not None:
-                        self.scaler.scale(loss).backward()
+                        scaled_loss = self.scaler.scale(loss)
+                        scaled_loss.backward()
                     else:
                         loss.backward()
                     

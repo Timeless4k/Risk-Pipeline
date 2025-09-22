@@ -613,6 +613,12 @@ class FeatureEngineer:
             for asset in all_features.keys():
                 vix_features = self.add_vix_features(all_features[asset], data['VIX'])
                 all_features[asset] = vix_features
+        
+        # Add performance-enhancing features
+        self.logger.info("🚀 Adding performance-enhancing features")
+        for asset in all_features.keys():
+            if asset in data:
+                all_features[asset] = self._add_performance_features(all_features[asset], data[asset], asset)
 
         # Add AXVI proxy for AU assets if possible
         try:
@@ -1070,6 +1076,55 @@ class FeatureEngineer:
             features['VIX_change'] = (vix_change - vix_change.mean()) / vix_change.std()
         
         return features
+    
+    def _add_performance_features(self, features_df: pd.DataFrame, price_data: pd.DataFrame, asset: str) -> pd.DataFrame:
+        """Add performance-enhancing features to improve model predictions."""
+        self.logger.info(f"🚀 Adding performance features for {asset}")
+        
+        # Use Adj Close if available, otherwise fall back to Close
+        price_col = 'Adj Close' if 'Adj Close' in price_data.columns else 'Close'
+        volume_col = 'Volume' if 'Volume' in price_data.columns else None
+        
+        # Add momentum features
+        features_df[f'{asset}_momentum_5'] = price_data[price_col].pct_change(5)
+        features_df[f'{asset}_momentum_10'] = price_data[price_col].pct_change(10)
+        features_df[f'{asset}_momentum_20'] = price_data[price_col].pct_change(20)
+        
+        # Add volatility clustering features
+        features_df[f'{asset}_vol_cluster_5'] = price_data[price_col].pct_change().rolling(5).std()
+        features_df[f'{asset}_vol_cluster_10'] = price_data[price_col].pct_change().rolling(10).std()
+        
+        # Add mean reversion features
+        rolling_mean_5 = price_data[price_col].rolling(5).mean()
+        rolling_std_5 = price_data[price_col].rolling(5).std()
+        rolling_mean_10 = price_data[price_col].rolling(10).mean()
+        rolling_std_10 = price_data[price_col].rolling(10).std()
+        
+        features_df[f'{asset}_mean_reversion_5'] = (price_data[price_col] - rolling_mean_5) / rolling_std_5
+        features_df[f'{asset}_mean_reversion_10'] = (price_data[price_col] - rolling_mean_10) / rolling_std_10
+        
+        # Add trend strength features
+        features_df[f'{asset}_trend_strength_5'] = price_data[price_col].rolling(5).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else np.nan)
+        features_df[f'{asset}_trend_strength_10'] = price_data[price_col].rolling(10).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0] if len(x) > 1 else np.nan)
+        
+        # Add market microstructure features (only if volume is available)
+        if volume_col is not None:
+            price_change = price_data[price_col].pct_change()
+            volume_change = price_data[volume_col].pct_change().replace([np.inf, -np.inf], np.nan)
+            features_df[f'{asset}_price_impact'] = price_change / volume_change
+            features_df[f'{asset}_volume_price_trend'] = price_data[volume_col].rolling(5).corr(price_change)
+        else:
+            # Fill with NaN if no volume data
+            features_df[f'{asset}_price_impact'] = np.nan
+            features_df[f'{asset}_volume_price_trend'] = np.nan
+        
+        # Align with features index
+        for col in features_df.columns:
+            if col.startswith(f'{asset}_'):
+                features_df[col] = features_df[col].reindex(features_df.index)
+        
+        self.logger.info(f"✅ Added {len([col for col in features_df.columns if col.startswith(f'{asset}_')])} performance features")
+        return features_df
 
     def add_axvi_proxy(self, features: pd.DataFrame, au_data: pd.DataFrame) -> pd.DataFrame:
         """Add AXVI proxy features for AU market using IOZ.AX or ^AXJO as proxy."""
@@ -1679,6 +1734,34 @@ class SimpleFeatureEngineer:
         logger.info(f"Aligned features and target to {len(common_index)} samples")
         
         return features_aligned, target_aligned
+    
+    def _add_performance_features(self, df: pd.DataFrame, asset: str) -> pd.DataFrame:
+        """Add performance-enhancing features to improve model predictions."""
+        logger.info(f"🚀 Adding performance features for {asset}")
+        
+        # Add momentum features
+        df[f'{asset}_momentum_5'] = df['Close'].pct_change(5)
+        df[f'{asset}_momentum_10'] = df['Close'].pct_change(10)
+        df[f'{asset}_momentum_20'] = df['Close'].pct_change(20)
+        
+        # Add volatility clustering features
+        df[f'{asset}_vol_cluster_5'] = df['Close'].pct_change().rolling(5).std()
+        df[f'{asset}_vol_cluster_10'] = df['Close'].pct_change().rolling(10).std()
+        
+        # Add mean reversion features
+        df[f'{asset}_mean_reversion_5'] = (df['Close'] - df['Close'].rolling(5).mean()) / df['Close'].rolling(5).std()
+        df[f'{asset}_mean_reversion_10'] = (df['Close'] - df['Close'].rolling(10).mean()) / df['Close'].rolling(10).std()
+        
+        # Add trend strength features
+        df[f'{asset}_trend_strength_5'] = df['Close'].rolling(5).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0])
+        df[f'{asset}_trend_strength_10'] = df['Close'].rolling(10).apply(lambda x: np.polyfit(range(len(x)), x, 1)[0])
+        
+        # Add market microstructure features
+        df[f'{asset}_price_impact'] = df['Close'].pct_change() / df['Volume'].pct_change().replace([np.inf, -np.inf], np.nan)
+        df[f'{asset}_volume_price_trend'] = df['Volume'].rolling(5).corr(df['Close'].pct_change())
+        
+        logger.info(f"✅ Added {len([col for col in df.columns if col.startswith(f'{asset}_')])} performance features")
+        return df
     
     def fit_scaler(self, features: pd.DataFrame) -> 'SimpleFeatureEngineer':
         """
