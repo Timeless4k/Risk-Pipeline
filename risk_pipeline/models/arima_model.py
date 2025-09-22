@@ -558,7 +558,11 @@ class ARIMAModel(BaseModel):
                 class_predictions[(probs >= 0.33) & (probs < 0.67)] = 1  # Medium volatility regime  
                 class_predictions[probs >= 0.67] = 2  # High volatility regime
                 
-                return class_predictions
+                # Ensure predictions are in valid range and handle NaN values
+                class_predictions = np.nan_to_num(class_predictions, nan=1)  # Default to class 1 for NaN
+                class_predictions = np.clip(class_predictions, 0, 2)  # Ensure valid range [0, 2]
+                
+                return class_predictions.astype(int)
             else:
                 return predictions
                 

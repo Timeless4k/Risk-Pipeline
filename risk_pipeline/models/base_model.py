@@ -14,12 +14,13 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 class BaseModel(ABC):
     """Abstract base class for all models in RiskPipeline."""
     
-    def __init__(self, name: str = None, **kwargs):
+    def __init__(self, name: str = None, task: str = 'regression', **kwargs):
         """
         Initialize the base model.
         
         Args:
             name: Model name for identification
+            task: Task type ('regression' or 'classification')
             **kwargs: Additional model-specific parameters
         """
         self.name = name or self.__class__.__name__
@@ -27,7 +28,7 @@ class BaseModel(ABC):
         self.model = None
         self.is_trained = False
         self.feature_names = None
-        self.task = None  # 'regression' or 'classification'
+        self.task = task  # 'regression' or 'classification'
         
         # Store model parameters
         self.params = kwargs
