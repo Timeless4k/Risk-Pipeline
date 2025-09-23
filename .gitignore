@@ -93,3 +93,6 @@ coverage.xml
 [pytest]
 python_files = test_*.py
 exclude = .*\.png|.*\.jpg|.*\.jpeg
+
+# Reports
+thesis_reports/comprehensive_report_20250922_202038/
